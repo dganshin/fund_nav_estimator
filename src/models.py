@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, PrimaryKeyConstraint, String, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, PrimaryKeyConstraint, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
     pass
+
+
+def utcnow() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class Fund(Base):
@@ -22,6 +26,7 @@ class Fund(Base):
     holding_versions: Mapped[list["HoldingVersion"]] = relationship(back_populates="fund")
     estimates: Mapped[list["FundEstimate"]] = relationship(back_populates="fund")
     actual_returns: Mapped[list["ActualReturn"]] = relationship(back_populates="fund")
+    navs: Mapped[list["FundNav"]] = relationship(back_populates="fund")
 
 
 class HoldingVersion(Base):
@@ -32,7 +37,7 @@ class HoldingVersion(Base):
     report_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     source: Mapped[str] = mapped_column(String(64), nullable=False)
     total_weight: Mapped[float] = mapped_column(Float, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     __table_args__ = (
@@ -56,6 +61,10 @@ class HoldingItem(Base):
     asset_name: Mapped[str] = mapped_column(String(128), nullable=False)
     asset_type: Mapped[str] = mapped_column(String(32), nullable=False)
     weight: Mapped[float] = mapped_column(Float, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("holding_version_id", "asset_code", name="uq_holding_item"),
+    )
 
     holding_version: Mapped["HoldingVersion"] = relationship(back_populates="items")
 
@@ -83,7 +92,8 @@ class FundEstimate(Base):
     raw_estimate: Mapped[float] = mapped_column(Float, nullable=False)
     covered_weight: Mapped[float] = mapped_column(Float, nullable=False)
     missing_weight: Mapped[float] = mapped_column(Float, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    missing_assets_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
     __table_args__ = (
         PrimaryKeyConstraint("trade_date", "fund_code", name="pk_fund_estimates"),
@@ -100,13 +110,30 @@ class ActualReturn(Base):
     fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False)
     actual_return: Mapped[float] = mapped_column(Float, nullable=False)
     source: Mapped[str] = mapped_column(String(64), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
     __table_args__ = (
         PrimaryKeyConstraint("trade_date", "fund_code", name="pk_actual_returns"),
     )
 
     fund: Mapped["Fund"] = relationship(back_populates="actual_returns")
+
+
+class FundNav(Base):
+    __tablename__ = "fund_navs"
+
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False)
+    unit_nav: Mapped[float] = mapped_column(Float, nullable=False)
+    accumulated_nav: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("trade_date", "fund_code", name="pk_fund_navs"),
+    )
+
+    fund: Mapped["Fund"] = relationship(back_populates="navs")
 
 
 class EstimateError(Base):
@@ -123,4 +150,3 @@ class EstimateError(Base):
     __table_args__ = (
         PrimaryKeyConstraint("trade_date", "fund_code", name="pk_estimate_errors"),
     )
-

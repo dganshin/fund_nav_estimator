@@ -1,0 +1,3 @@
+fund_code,fund_name,fund_type,market,is_active
+000001,示例成长混合,equity_mixed,CN,true
+000002,示例科技混合,equity_mixed,CN,true

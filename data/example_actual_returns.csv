@@ -1,4 +1,5 @@
-trade_date,fund_code,actual_return,source
-2026-05-20,000001,0.82,manual_sample
-2026-05-20,000002,1.54,manual_sample
-
+trade_date,fund_code,actual_return_pct,source
+2026-05-20,000001,0.36,manual_sample
+2026-05-20,000002,0.80,manual_sample
+2026-05-21,000001,0.62,manual_sample
+2026-05-21,000002,0.80,manual_sample

@@ -2,22 +2,124 @@ from __future__ import annotations
 
 import csv
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import Iterable
 
 import yaml
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import ActualReturn, DailyQuote, Fund, HoldingItem, HoldingVersion
+from .models import ActualReturn, DailyQuote, Fund, FundNav, HoldingItem, HoldingVersion
+
+
+class DataImportError(ValueError):
+    pass
+
+
+@dataclass
+class ImportReport:
+    imported_count: int
+    warnings: list[str]
+    generated_actual_returns: int = 0
+
+
+def validate_required_columns(fieldnames: list[str] | None, required_fields: Iterable[str], csv_path: Path) -> None:
+    if fieldnames is None:
+        raise DataImportError(f"{csv_path} is missing header row.")
+
+    missing_fields = [field for field in required_fields if field not in fieldnames]
+    if missing_fields:
+        raise DataImportError(
+            f"{csv_path} is missing required columns: {', '.join(missing_fields)}"
+        )
+
+
+def read_required_value(row: dict[str, str], field_name: str, row_number: int, csv_path: Path) -> str:
+    raw_value = row.get(field_name)
+    if raw_value is None:
+        raise DataImportError(f"{csv_path} row {row_number}: missing field {field_name}.")
+
+    value = raw_value.strip()
+    if value == "":
+        raise DataImportError(f"{csv_path} row {row_number}: empty value for {field_name}.")
+    return value
+
+
+def read_optional_value(row: dict[str, str], field_name: str) -> str | None:
+    raw_value = row.get(field_name)
+    if raw_value is None:
+        return None
+
+    value = raw_value.strip()
+    if value == "":
+        return None
+    return value
 
 
 def parse_date(value: str) -> date:
     return date.fromisoformat(value.strip())
 
 
-def parse_float(value: str) -> float:
-    return float(value.strip())
+def parse_csv_date(value: str, field_name: str, row_number: int, csv_path: Path) -> date:
+    try:
+        return parse_date(value)
+    except ValueError as exc:
+        raise DataImportError(
+            f"{csv_path} row {row_number}: invalid date for {field_name}: {value}. "
+            "Expected YYYY-MM-DD."
+        ) from exc
+
+
+def parse_decimal(value: str, field_name: str, row_number: int, csv_path: Path) -> float:
+    try:
+        return float(value.strip())
+    except ValueError as exc:
+        raise DataImportError(
+            f"{csv_path} row {row_number}: invalid numeric value for {field_name}: {value}"
+        ) from exc
+
+
+def parse_percent_to_decimal(value: str, field_name: str, row_number: int, csv_path: Path) -> float:
+    return parse_decimal(value, field_name, row_number, csv_path) / 100.0
+
+
+def parse_bool(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "y"}
+
+
+def validate_extreme_actual_return(
+    warnings: list[str],
+    fund_code: str,
+    trade_date: date,
+    actual_return: float,
+) -> None:
+    if abs(actual_return) > 0.2:
+        warnings.append(
+            f"Warning: fund {fund_code} on {trade_date} has actual_return "
+            f"{actual_return * 100:+.2f}%, exceeding 20%."
+        )
+
+
+def upsert_actual_return(
+    session: Session,
+    trade_date: date,
+    fund_code: str,
+    actual_return_value: float,
+    source: str,
+) -> ActualReturn:
+    actual_return = session.get(
+        ActualReturn,
+        {"trade_date": trade_date, "fund_code": fund_code},
+    )
+    if actual_return is None:
+        actual_return = ActualReturn(trade_date=trade_date, fund_code=fund_code)
+        session.add(actual_return)
+
+    actual_return.actual_return = actual_return_value
+    actual_return.source = source
+    return actual_return
 
 
 def import_funds_from_yaml(session: Session, yaml_path: str | Path) -> int:
@@ -42,19 +144,80 @@ def import_funds_from_yaml(session: Session, yaml_path: str | Path) -> int:
     return count
 
 
-def import_holdings_from_csv(session: Session, csv_path: str | Path) -> int:
+def import_funds_from_csv(session: Session, csv_path: str | Path) -> int:
     csv_file = Path(csv_path)
-    grouped_rows: dict[tuple[str, date, str], list[dict[str, str]]] = defaultdict(list)
+    required_fields = ["fund_code", "fund_name", "fund_type", "market", "is_active"]
+    count = 0
 
     with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
-        for row in reader:
-            key = (
-                row["fund_code"].strip(),
-                parse_date(row["report_date"]),
-                row["source"].strip(),
+        validate_required_columns(reader.fieldnames, required_fields, csv_file)
+
+        for row_number, row in enumerate(reader, start=2):
+            fund_code = read_required_value(row, "fund_code", row_number, csv_file)
+            fund = session.get(Fund, fund_code)
+            if fund is None:
+                fund = Fund(fund_code=fund_code)
+                session.add(fund)
+
+            fund.fund_name = read_required_value(row, "fund_name", row_number, csv_file)
+            fund.fund_type = read_required_value(row, "fund_type", row_number, csv_file)
+            fund.market = read_required_value(row, "market", row_number, csv_file)
+            fund.is_active = parse_bool(read_required_value(row, "is_active", row_number, csv_file))
+            count += 1
+
+    session.commit()
+    return count
+
+
+def get_weight_value(row: dict[str, str], row_number: int, csv_path: Path) -> tuple[str, str]:
+    for field_name in ("weight_pct", "weight"):
+        raw_value = row.get(field_name)
+        if raw_value is not None and raw_value.strip() != "":
+            return field_name, raw_value
+    raise DataImportError(
+        f"{csv_path} row {row_number}: missing required field weight_pct."
+    )
+
+
+def get_actual_return_value(row: dict[str, str], row_number: int, csv_path: Path) -> tuple[str, str]:
+    for field_name in ("actual_return_pct", "actual_return"):
+        raw_value = row.get(field_name)
+        if raw_value is not None and raw_value.strip() != "":
+            return field_name, raw_value
+    raise DataImportError(
+        f"{csv_path} row {row_number}: missing required field actual_return_pct."
+    )
+
+
+def import_holdings_from_csv(session: Session, csv_path: str | Path) -> int:
+    csv_file = Path(csv_path)
+    grouped_rows: dict[tuple[str, date, str], list[dict[str, str]]] = defaultdict(list)
+    required_fields = ["fund_code", "report_date", "source", "asset_code", "asset_name", "asset_type"]
+
+    with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        validate_required_columns(reader.fieldnames, required_fields, csv_file)
+
+        for row_number, row in enumerate(reader, start=2):
+            fund_code = read_required_value(row, "fund_code", row_number, csv_file)
+            report_date = parse_csv_date(read_required_value(row, "report_date", row_number, csv_file), "report_date", row_number, csv_file)
+            source = read_required_value(row, "source", row_number, csv_file)
+            asset_code = read_required_value(row, "asset_code", row_number, csv_file)
+            asset_name = read_required_value(row, "asset_name", row_number, csv_file)
+            asset_type = read_required_value(row, "asset_type", row_number, csv_file)
+            weight_field_name, weight_value = get_weight_value(row, row_number, csv_file)
+            weight_decimal = parse_percent_to_decimal(weight_value, weight_field_name, row_number, csv_file)
+
+            key = (fund_code, report_date, source)
+            grouped_rows[key].append(
+                {
+                    "asset_code": asset_code,
+                    "asset_name": asset_name,
+                    "asset_type": asset_type,
+                    "weight_decimal": f"{weight_decimal:.12f}",
+                }
             )
-            grouped_rows[key].append(row)
 
     created_or_updated = 0
     fund_latest_key: dict[str, tuple[str, date, str]] = {}
@@ -67,7 +230,7 @@ def import_holdings_from_csv(session: Session, csv_path: str | Path) -> int:
     for key, rows in grouped_rows.items():
         fund_code, report_date, source = key
         if session.get(Fund, fund_code) is None:
-            raise ValueError(f"Fund {fund_code} not found. Import funds first.")
+            raise DataImportError(f"Fund {fund_code} not found. Import funds first.")
 
         version = session.scalar(
             select(HoldingVersion).where(
@@ -76,7 +239,19 @@ def import_holdings_from_csv(session: Session, csv_path: str | Path) -> int:
                 HoldingVersion.source == source,
             )
         )
-        total_weight = sum(parse_float(row["weight"]) for row in rows)
+
+        seen_assets: set[str] = set()
+        total_weight = 0.0
+        for row in rows:
+            asset_code = row["asset_code"]
+            if asset_code in seen_assets:
+                raise DataImportError(
+                    f"{csv_path} duplicate asset_code {asset_code} in fund {fund_code} "
+                    f"report_date {report_date} source {source}."
+                )
+            seen_assets.add(asset_code)
+            total_weight += float(row["weight_decimal"])
+
         is_active = fund_latest_key[fund_code] == key
 
         if version is None:
@@ -93,14 +268,15 @@ def import_holdings_from_csv(session: Session, csv_path: str | Path) -> int:
             version.total_weight = total_weight
             version.is_active = is_active
             version.items.clear()
+            session.flush()
 
         for row in rows:
             version.items.append(
                 HoldingItem(
-                    asset_code=row["asset_code"].strip(),
-                    asset_name=row["asset_name"].strip(),
-                    asset_type=row["asset_type"].strip(),
-                    weight=parse_float(row["weight"]),
+                    asset_code=row["asset_code"],
+                    asset_name=row["asset_name"],
+                    asset_type=row["asset_type"],
+                    weight=float(row["weight_decimal"]),
                 )
             )
 
@@ -125,48 +301,156 @@ def import_holdings_from_csv(session: Session, csv_path: str | Path) -> int:
 def import_quotes_from_csv(session: Session, csv_path: str | Path) -> int:
     csv_file = Path(csv_path)
     count = 0
+    required_fields = ["trade_date", "asset_code", "asset_name", "return_pct", "source"]
 
     with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
-        for row in reader:
-            trade_date = parse_date(row["trade_date"])
-            asset_code = row["asset_code"].strip()
+        validate_required_columns(reader.fieldnames, required_fields, csv_file)
+
+        for row_number, row in enumerate(reader, start=2):
+            trade_date = parse_csv_date(read_required_value(row, "trade_date", row_number, csv_file), "trade_date", row_number, csv_file)
+            asset_code = read_required_value(row, "asset_code", row_number, csv_file)
             quote = session.get(DailyQuote, {"trade_date": trade_date, "asset_code": asset_code})
             if quote is None:
                 quote = DailyQuote(trade_date=trade_date, asset_code=asset_code)
                 session.add(quote)
-            quote.asset_name = row["asset_name"].strip()
-            quote.return_pct = parse_float(row["return_pct"])
-            quote.source = row["source"].strip()
+            quote.asset_name = read_required_value(row, "asset_name", row_number, csv_file)
+            quote.return_pct = parse_percent_to_decimal(
+                read_required_value(row, "return_pct", row_number, csv_file),
+                "return_pct",
+                row_number,
+                csv_file,
+            )
+            quote.source = read_required_value(row, "source", row_number, csv_file)
             count += 1
 
     session.commit()
     return count
 
 
-def import_actual_returns_from_csv(session: Session, csv_path: str | Path) -> int:
+def import_actual_returns_from_csv(session: Session, csv_path: str | Path) -> ImportReport:
     csv_file = Path(csv_path)
     count = 0
+    warnings: list[str] = []
+    required_fields = ["trade_date", "fund_code", "source"]
 
     with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
-        for row in reader:
-            trade_date = parse_date(row["trade_date"])
-            fund_code = row["fund_code"].strip()
-            if session.get(Fund, fund_code) is None:
-                raise ValueError(f"Fund {fund_code} not found. Import funds first.")
+        validate_required_columns(reader.fieldnames, required_fields, csv_file)
 
-            actual_return = session.get(
-                ActualReturn,
-                {"trade_date": trade_date, "fund_code": fund_code},
+        for row_number, row in enumerate(reader, start=2):
+            trade_date = parse_csv_date(read_required_value(row, "trade_date", row_number, csv_file), "trade_date", row_number, csv_file)
+            fund_code = read_required_value(row, "fund_code", row_number, csv_file)
+            if session.get(Fund, fund_code) is None:
+                raise DataImportError(f"Fund {fund_code} not found. Import funds first.")
+
+            actual_field_name, actual_value = get_actual_return_value(row, row_number, csv_file)
+            actual_return_value = parse_percent_to_decimal(
+                actual_value,
+                actual_field_name,
+                row_number,
+                csv_file,
             )
-            if actual_return is None:
-                actual_return = ActualReturn(trade_date=trade_date, fund_code=fund_code)
-                session.add(actual_return)
-            actual_return.actual_return = parse_float(row["actual_return"])
-            actual_return.source = row["source"].strip()
+            validate_extreme_actual_return(warnings, fund_code, trade_date, actual_return_value)
+            upsert_actual_return(
+                session,
+                trade_date,
+                fund_code,
+                actual_return_value,
+                read_required_value(row, "source", row_number, csv_file),
+            )
             count += 1
 
     session.commit()
-    return count
+    return ImportReport(imported_count=count, warnings=warnings)
 
+
+def import_navs_from_csv(session: Session, csv_path: str | Path) -> ImportReport:
+    csv_file = Path(csv_path)
+    count = 0
+    warnings: list[str] = []
+    generated_actual_returns = 0
+    required_fields = ["trade_date", "fund_code", "unit_nav", "source"]
+    imported_dates_by_fund: dict[str, set[date]] = defaultdict(set)
+
+    with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        validate_required_columns(reader.fieldnames, required_fields, csv_file)
+
+        for row_number, row in enumerate(reader, start=2):
+            trade_date = parse_csv_date(read_required_value(row, "trade_date", row_number, csv_file), "trade_date", row_number, csv_file)
+            fund_code = read_required_value(row, "fund_code", row_number, csv_file)
+            if session.get(Fund, fund_code) is None:
+                raise DataImportError(f"Fund {fund_code} not found. Import funds first.")
+
+            unit_nav = parse_decimal(
+                read_required_value(row, "unit_nav", row_number, csv_file),
+                "unit_nav",
+                row_number,
+                csv_file,
+            )
+            if unit_nav <= 0:
+                raise DataImportError(
+                    f"{csv_path} row {row_number}: unit_nav must be greater than 0."
+                )
+
+            accumulated_nav_value = read_optional_value(row, "accumulated_nav")
+            accumulated_nav = None
+            if accumulated_nav_value is not None:
+                accumulated_nav = parse_decimal(
+                    accumulated_nav_value,
+                    "accumulated_nav",
+                    row_number,
+                    csv_file,
+                )
+
+            nav = session.get(FundNav, {"trade_date": trade_date, "fund_code": fund_code})
+            if nav is None:
+                nav = FundNav(trade_date=trade_date, fund_code=fund_code)
+                session.add(nav)
+
+            nav.unit_nav = unit_nav
+            nav.accumulated_nav = accumulated_nav
+            nav.source = read_required_value(row, "source", row_number, csv_file)
+            imported_dates_by_fund[fund_code].add(trade_date)
+            count += 1
+
+    session.flush()
+
+    for fund_code, imported_dates in imported_dates_by_fund.items():
+        navs = session.scalars(
+            select(FundNav)
+            .where(FundNav.fund_code == fund_code)
+            .order_by(FundNav.trade_date.asc())
+        ).all()
+
+        previous_nav: FundNav | None = None
+        for nav in navs:
+            if previous_nav is None:
+                if nav.trade_date in imported_dates:
+                    warnings.append(
+                        f"Warning: fund {fund_code} on {nav.trade_date} is missing previous "
+                        "trade day nav, actual_return not generated."
+                    )
+                previous_nav = nav
+                continue
+
+            actual_return_value = round(nav.unit_nav / previous_nav.unit_nav - 1, 8)
+            validate_extreme_actual_return(warnings, fund_code, nav.trade_date, actual_return_value)
+            upsert_actual_return(
+                session,
+                nav.trade_date,
+                fund_code,
+                actual_return_value,
+                f"nav:{nav.source}",
+            )
+            if nav.trade_date in imported_dates:
+                generated_actual_returns += 1
+            previous_nav = nav
+
+    session.commit()
+    return ImportReport(
+        imported_count=count,
+        warnings=warnings,
+        generated_actual_returns=generated_actual_returns,
+    )

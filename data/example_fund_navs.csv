@@ -1,0 +1,7 @@
+trade_date,fund_code,unit_nav,accumulated_nav,source
+2026-05-19,000001,1.0000,1.3000,manual_sample
+2026-05-20,000001,1.0036,1.3036,manual_sample
+2026-05-21,000001,1.0098,1.3098,manual_sample
+2026-05-19,000002,1.0000,1.5000,manual_sample
+2026-05-20,000002,1.0080,1.5080,manual_sample
+2026-05-21,000002,1.0161,1.5161,manual_sample

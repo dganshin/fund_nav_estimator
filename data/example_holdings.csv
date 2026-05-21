@@ -1,4 +1,4 @@
-fund_code,report_date,source,asset_code,asset_name,asset_type,weight
+fund_code,report_date,source,asset_code,asset_name,asset_type,weight_pct
 000001,2026-03-31,manual_sample,600519.SH,贵州茅台,stock,9.8
 000001,2026-03-31,manual_sample,300750.SZ,宁德时代,stock,8.2
 000001,2026-03-31,manual_sample,601318.SH,中国平安,stock,7.0
@@ -15,4 +15,3 @@ fund_code,report_date,source,asset_code,asset_name,asset_type,weight
 000002,2026-03-31,manual_sample,300502.SZ,新易盛,stock,6.0
 000002,2026-03-31,manual_sample,688256.SH,寒武纪,stock,5.1
 000002,2026-03-31,manual_sample,300033.SZ,同花顺,stock,4.3
-
