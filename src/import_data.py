@@ -11,6 +11,7 @@ import yaml
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .data_sources.base import FundNavRecord, StockQuoteRecord
 from .models import ActualReturn, DailyQuote, Fund, FundAssetAllocation, FundIndustryAllocation, FundNav, HoldingItem, HoldingVersion
 
 
@@ -328,6 +329,25 @@ def import_quotes_from_csv(session: Session, csv_path: str | Path) -> int:
     return count
 
 
+def import_quote_records(session: Session, records: Iterable[StockQuoteRecord]) -> int:
+    count = 0
+    for record in records:
+        quote = session.get(
+            DailyQuote,
+            {"trade_date": record.trade_date, "asset_code": record.asset_code},
+        )
+        if quote is None:
+            quote = DailyQuote(trade_date=record.trade_date, asset_code=record.asset_code)
+            session.add(quote)
+        quote.asset_name = record.asset_name
+        quote.return_pct = record.return_pct
+        quote.source = record.source
+        count += 1
+
+    session.commit()
+    return count
+
+
 def import_actual_returns_from_csv(session: Session, csv_path: str | Path) -> ImportReport:
     csv_file = Path(csv_path)
     count = 0
@@ -414,6 +434,71 @@ def import_navs_from_csv(session: Session, csv_path: str | Path) -> ImportReport
             nav.source = read_required_value(row, "source", row_number, csv_file)
             imported_dates_by_fund[fund_code].add(trade_date)
             count += 1
+
+    session.flush()
+
+    for fund_code, imported_dates in imported_dates_by_fund.items():
+        navs = session.scalars(
+            select(FundNav)
+            .where(FundNav.fund_code == fund_code)
+            .order_by(FundNav.trade_date.asc())
+        ).all()
+
+        previous_nav: FundNav | None = None
+        for nav in navs:
+            if previous_nav is None:
+                if nav.trade_date in imported_dates:
+                    warnings.append(
+                        f"Warning: fund {fund_code} on {nav.trade_date} is missing previous "
+                        "trade day nav, actual_return not generated."
+                    )
+                previous_nav = nav
+                continue
+
+            actual_return_value = round(nav.unit_nav / previous_nav.unit_nav - 1, 8)
+            validate_extreme_actual_return(warnings, fund_code, nav.trade_date, actual_return_value)
+            upsert_actual_return(
+                session,
+                nav.trade_date,
+                fund_code,
+                actual_return_value,
+                f"nav:{nav.source}",
+            )
+            if nav.trade_date in imported_dates:
+                generated_actual_returns += 1
+            previous_nav = nav
+
+    session.commit()
+    return ImportReport(
+        imported_count=count,
+        warnings=warnings,
+        generated_actual_returns=generated_actual_returns,
+    )
+
+
+def import_nav_records(session: Session, records: Iterable[FundNavRecord]) -> ImportReport:
+    count = 0
+    warnings: list[str] = []
+    generated_actual_returns = 0
+    imported_dates_by_fund: dict[str, set[date]] = defaultdict(set)
+
+    for record in records:
+        if session.get(Fund, record.fund_code) is None:
+            raise DataImportError(f"Fund {record.fund_code} not found. Import funds first.")
+        if record.unit_nav <= 0:
+            raise DataImportError(
+                f"Fund {record.fund_code} on {record.trade_date} has non-positive unit_nav."
+            )
+
+        nav = session.get(FundNav, {"trade_date": record.trade_date, "fund_code": record.fund_code})
+        if nav is None:
+            nav = FundNav(trade_date=record.trade_date, fund_code=record.fund_code)
+            session.add(nav)
+        nav.unit_nav = record.unit_nav
+        nav.accumulated_nav = record.accumulated_nav
+        nav.source = record.source
+        imported_dates_by_fund[record.fund_code].add(record.trade_date)
+        count += 1
 
     session.flush()
 

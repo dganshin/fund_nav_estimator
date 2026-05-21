@@ -5,14 +5,25 @@ import csv
 import sys
 from pathlib import Path
 
+from sqlalchemy import select
+
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from src.backfill import (
+        backfill_history,
+        fetch_and_store_fund_navs,
+        fetch_and_store_stock_quotes,
+        get_active_holding_asset_codes,
+    )
+    from src.data_sources import AKShareDataSource, DataSourceError
     from src.db import get_session_factory
     from src.estimator import (
         build_calibrated_estimates,
         build_calibration_history,
         build_estimate_errors,
         build_fund_estimates,
+        build_estimate_history,
+        build_reconcile_history,
         calculate_calibration_stats,
         calculate_error_stats,
         format_hit_rate,
@@ -33,13 +44,23 @@ if __package__ in {None, ""}:
         parse_date,
     )
     from src.init_db import init_db
+    from src.models import ActualReturn, DailyQuote, FundNav
 else:
+    from .backfill import (
+        backfill_history,
+        fetch_and_store_fund_navs,
+        fetch_and_store_stock_quotes,
+        get_active_holding_asset_codes,
+    )
+    from .data_sources import AKShareDataSource, DataSourceError
     from .db import get_session_factory
     from .estimator import (
         build_calibrated_estimates,
         build_calibration_history,
         build_estimate_errors,
         build_fund_estimates,
+        build_estimate_history,
+        build_reconcile_history,
         calculate_calibration_stats,
         calculate_error_stats,
         format_hit_rate,
@@ -60,6 +81,7 @@ else:
         parse_date,
     )
     from .init_db import init_db
+    from .models import ActualReturn, DailyQuote, FundNav
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -74,7 +96,7 @@ DEFAULT_INDUSTRY_ALLOCATIONS_CSV = PROJECT_ROOT / "data" / "example_industry_all
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Fund NAV estimator stage 3 CLI")
+    parser = argparse.ArgumentParser(description="Fund NAV estimator stage 4 CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("init-db", help="Create SQLite tables")
@@ -104,9 +126,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser_estimate = subparsers.add_parser("estimate", help="Build raw fund estimates")
     parser_estimate.add_argument("--trade-date", required=True)
+    parser_estimate.add_argument("--fund-code")
+
+    parser_estimate_history = subparsers.add_parser("estimate-history", help="Build raw fund estimates for a date range")
+    parser_estimate_history.add_argument("--start-date", required=True)
+    parser_estimate_history.add_argument("--end-date", required=True)
+    parser_estimate_history.add_argument("--fund-code")
 
     parser_reconcile = subparsers.add_parser("reconcile", help="Build estimate error records")
     parser_reconcile.add_argument("--trade-date", required=True)
+    parser_reconcile.add_argument("--fund-code")
+
+    parser_reconcile_history = subparsers.add_parser("reconcile-history", help="Build estimate errors for a date range")
+    parser_reconcile_history.add_argument("--start-date", required=True)
+    parser_reconcile_history.add_argument("--end-date", required=True)
+    parser_reconcile_history.add_argument("--fund-code")
 
     parser_stats = subparsers.add_parser("stats", help="Show historical estimate error stats")
     parser_stats.add_argument("--fund-code")
@@ -131,6 +165,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser_calibration_stats.add_argument("--fund-code")
     parser_calibration_stats.add_argument("--window", type=int, default=20)
     parser_calibration_stats.add_argument("--base", choices=["raw", "coverage_adjusted"], default="raw")
+
+    parser_fetch_navs = subparsers.add_parser("fetch-fund-navs", help="Fetch historical fund navs from data source")
+    parser_fetch_navs.add_argument("--fund-code", required=True)
+    parser_fetch_navs.add_argument("--start-date", required=True)
+    parser_fetch_navs.add_argument("--end-date", required=True)
+
+    parser_fetch_quotes = subparsers.add_parser("fetch-stock-quotes", help="Fetch historical stock daily quotes from data source")
+    parser_fetch_quotes_group = parser_fetch_quotes.add_mutually_exclusive_group(required=True)
+    parser_fetch_quotes_group.add_argument("--asset-code")
+    parser_fetch_quotes_group.add_argument("--from-active-holdings", action="store_true")
+    parser_fetch_quotes.add_argument("--fund-code")
+    parser_fetch_quotes.add_argument("--start-date", required=True)
+    parser_fetch_quotes.add_argument("--end-date", required=True)
+    parser_fetch_quotes.add_argument("--sleep-seconds", type=float, default=0.2)
+
+    parser_backfill = subparsers.add_parser("backfill-history", help="Fetch historical data and run the full backfill pipeline")
+    parser_backfill.add_argument("--fund-code", required=True)
+    parser_backfill.add_argument("--start-date", required=True)
+    parser_backfill.add_argument("--end-date", required=True)
+    parser_backfill.add_argument("--window", type=int, default=20)
+    parser_backfill.add_argument("--base", choices=["raw", "coverage_adjusted"], default="coverage_adjusted")
+    parser_backfill.add_argument("--min-samples", type=int, default=5)
+    parser_backfill.add_argument("--sleep-seconds", type=float, default=0.2)
 
     parser_demo = subparsers.add_parser("demo-run", help="Run the full example flow")
     parser_demo.add_argument("--trade-date", required=True)
@@ -256,6 +313,56 @@ def print_calibration_stats_table(results) -> None:
     print_table(headers, rows)
 
 
+def print_nav_table(records) -> None:
+    headers = ["日期", "基金代码", "单位净值", "累计净值", "真实涨跌", "来源"]
+    rows = [
+        [
+            record["trade_date"],
+            record["fund_code"],
+            f"{record['unit_nav']:.4f}",
+            "N/A" if record["accumulated_nav"] is None else f"{record['accumulated_nav']:.4f}",
+            record["actual_return"],
+            record["source"],
+        ]
+        for record in records
+    ]
+    print_table(headers, rows)
+
+
+def print_quote_table(records) -> None:
+    headers = ["日期", "股票代码", "股票名称", "涨跌幅", "来源"]
+    rows = [
+        [
+            record["trade_date"],
+            record["asset_code"],
+            record["asset_name"],
+            format_percent(record["return_pct"], signed=True),
+            record["source"],
+        ]
+        for record in records
+    ]
+    print_table(headers, rows)
+
+
+def print_backfill_summary_table(summaries) -> None:
+    headers = ["基金代码", "基金名称", "日期区间", "估算样本数", "raw_MAE", "calibrated_MAE", "improvement", "方向命中率", "置信等级"]
+    rows = [
+        [
+            summary.fund_code,
+            summary.fund_name,
+            f"{summary.start_date.isoformat()}~{summary.end_date.isoformat()}",
+            str(summary.estimate_sample_count),
+            format_percent(summary.raw_mean_abs_error),
+            format_percent(summary.calibrated_mean_abs_error),
+            format_percent(summary.improvement_pct, signed=True),
+            format_hit_rate(summary.calibrated_direction_hit_rate),
+            summary.confidence_level or "N/A",
+        ]
+        for summary in summaries
+    ]
+    print_table(headers, rows)
+
+
 def load_trade_dates_from_quotes(csv_path: Path, max_trade_date: str) -> list[str]:
     latest_date = parse_date(max_trade_date)
     trade_dates: set[str] = set()
@@ -329,6 +436,62 @@ def run_demo(trade_date: str) -> None:
         print_calibration_stats_table(calibration_stats_results)
 
 
+def build_nav_preview(session, fund_code: str, start_date: str, end_date: str) -> list[dict[str, str | float | None]]:
+    start = parse_date(start_date)
+    end = parse_date(end_date)
+    stmt = (
+        select(FundNav, ActualReturn)
+        .join(
+            ActualReturn,
+            (ActualReturn.trade_date == FundNav.trade_date) & (ActualReturn.fund_code == FundNav.fund_code),
+            isouter=True,
+        )
+        .where(
+            FundNav.fund_code == fund_code,
+            FundNav.trade_date >= start,
+            FundNav.trade_date <= end,
+        )
+        .order_by(FundNav.trade_date.asc())
+    )
+    rows = []
+    for nav, actual in session.execute(stmt).all():
+        rows.append(
+            {
+                "trade_date": nav.trade_date.isoformat(),
+                "fund_code": nav.fund_code,
+                "unit_nav": nav.unit_nav,
+                "accumulated_nav": nav.accumulated_nav,
+                "actual_return": "N/A" if actual is None else format_percent(actual.actual_return, signed=True),
+                "source": nav.source,
+            }
+        )
+    return rows
+
+
+def build_quote_preview(session, asset_codes: list[str], start_date: str, end_date: str) -> list[dict[str, str | float]]:
+    start = parse_date(start_date)
+    end = parse_date(end_date)
+    stmt = (
+        select(DailyQuote)
+        .where(
+            DailyQuote.asset_code.in_(asset_codes),
+            DailyQuote.trade_date >= start,
+            DailyQuote.trade_date <= end,
+        )
+        .order_by(DailyQuote.trade_date.asc(), DailyQuote.asset_code.asc())
+    )
+    return [
+        {
+            "trade_date": quote.trade_date.isoformat(),
+            "asset_code": quote.asset_code,
+            "asset_name": quote.asset_name,
+            "return_pct": quote.return_pct,
+            "source": quote.source,
+        }
+        for quote in session.scalars(stmt).all()
+    ]
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -373,13 +536,31 @@ def main() -> None:
                 count = import_industry_allocations_from_csv(session, args.csv)
                 print(f"Imported industry allocations: {count}")
             elif args.command == "estimate":
-                results = build_fund_estimates(session, parse_date(args.trade_date))
+                results = build_fund_estimates(session, parse_date(args.trade_date), fund_code=args.fund_code)
                 print(f"Built estimates: {len(results)}")
                 print_estimate_table(results)
+            elif args.command == "estimate-history":
+                report = build_estimate_history(
+                    session,
+                    start_date=parse_date(args.start_date),
+                    end_date=parse_date(args.end_date),
+                    fund_code=args.fund_code,
+                )
+                print(f"Built historical estimates: {report.total_count}")
+                print_warnings(report.warnings)
             elif args.command == "reconcile":
-                report = build_estimate_errors(session, parse_date(args.trade_date))
+                report = build_estimate_errors(session, parse_date(args.trade_date), fund_code=args.fund_code)
                 print(f"Built estimate errors: {len(report.results)}")
                 print_reconcile_table(report.results)
+                print_warnings(report.warnings)
+            elif args.command == "reconcile-history":
+                report = build_reconcile_history(
+                    session,
+                    start_date=parse_date(args.start_date),
+                    end_date=parse_date(args.end_date),
+                    fund_code=args.fund_code,
+                )
+                print(f"Built historical estimate errors: {report.total_count}")
                 print_warnings(report.warnings)
             elif args.command == "stats":
                 results = calculate_error_stats(
@@ -419,7 +600,65 @@ def main() -> None:
                     base=args.base,
                 )
                 print_calibration_stats_table(results)
-    except DataImportError as exc:
+            elif args.command == "fetch-fund-navs":
+                data_source = AKShareDataSource()
+                report = fetch_and_store_fund_navs(
+                    session=session,
+                    data_source=data_source,
+                    fund_code=args.fund_code,
+                    start_date=parse_date(args.start_date),
+                    end_date=parse_date(args.end_date),
+                )
+                print(f"Imported fund nav rows: {report.imported_count}")
+                print(f"Generated actual returns from navs: {report.generated_actual_returns}")
+                print_nav_table(build_nav_preview(session, args.fund_code, args.start_date, args.end_date))
+                print_warnings(report.warnings)
+            elif args.command == "fetch-stock-quotes":
+                data_source = AKShareDataSource()
+                if args.from_active_holdings:
+                    if not args.fund_code:
+                        raise DataImportError("--fund-code is required with --from-active-holdings.")
+                    asset_codes = get_active_holding_asset_codes(
+                        session,
+                        fund_code=args.fund_code,
+                        trade_date=parse_date(args.end_date),
+                    )
+                    if not asset_codes:
+                        raise DataImportError(f"No active holding asset codes found for fund {args.fund_code}.")
+                else:
+                    asset_codes = [args.asset_code]
+                report = fetch_and_store_stock_quotes(
+                    session=session,
+                    data_source=data_source,
+                    start_date=parse_date(args.start_date),
+                    end_date=parse_date(args.end_date),
+                    asset_codes=asset_codes,
+                    sleep_seconds=args.sleep_seconds,
+                )
+                print(f"Imported daily quotes: {report.imported_count}")
+                print_quote_table(build_quote_preview(session, asset_codes, args.start_date, args.end_date)[:20])
+                print_warnings(report.warnings)
+            elif args.command == "backfill-history":
+                data_source = AKShareDataSource()
+                nav_report, quote_report, estimate_report, reconcile_report, calibration_count, summaries = backfill_history(
+                    session=session,
+                    data_source=data_source,
+                    fund_code=args.fund_code,
+                    start_date=parse_date(args.start_date),
+                    end_date=parse_date(args.end_date),
+                    window=args.window,
+                    base=args.base,
+                    min_samples=args.min_samples,
+                    sleep_seconds=args.sleep_seconds,
+                )
+                print(f"Imported fund nav rows: {nav_report.imported_count}")
+                print(f"Imported daily quotes: {quote_report.imported_count}")
+                print(f"Built historical estimates: {estimate_report.total_count}")
+                print(f"Built historical estimate errors: {reconcile_report.total_count}")
+                print(f"Built calibration history rows: {calibration_count}")
+                print_warnings(nav_report.warnings + quote_report.warnings + estimate_report.warnings + reconcile_report.warnings)
+                print_backfill_summary_table(summaries)
+    except (DataImportError, DataSourceError) as exc:
         print(f"Import error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
 

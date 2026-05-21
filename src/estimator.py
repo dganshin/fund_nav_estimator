@@ -41,6 +41,12 @@ class ReconcileReport:
 
 
 @dataclass
+class HistoryBuildReport:
+    total_count: int
+    warnings: list[str]
+
+
+@dataclass
 class StatsResult:
     fund_code: str
     fund_name: str
@@ -258,8 +264,15 @@ def compute_coverage_adjusted_estimate(
     ), warnings
 
 
-def build_fund_estimates(session: Session, trade_date: date) -> list[EstimateResult]:
-    funds = session.scalars(select(Fund).where(Fund.is_active.is_(True))).all()
+def build_fund_estimates(
+    session: Session,
+    trade_date: date,
+    fund_code: str | None = None,
+) -> list[EstimateResult]:
+    stmt = select(Fund).where(Fund.is_active.is_(True))
+    if fund_code:
+        stmt = stmt.where(Fund.fund_code == fund_code)
+    funds = session.scalars(stmt.order_by(Fund.fund_code.asc())).all()
     results: list[EstimateResult] = []
 
     for fund in funds:
@@ -327,10 +340,50 @@ def build_fund_estimates(session: Session, trade_date: date) -> list[EstimateRes
     return results
 
 
-def build_estimate_errors(session: Session, trade_date: date) -> ReconcileReport:
-    estimates = session.scalars(
-        select(FundEstimate).where(FundEstimate.trade_date == trade_date)
-    ).all()
+def build_estimate_history(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    fund_code: str | None = None,
+) -> HistoryBuildReport:
+    stmt = select(DailyQuote.trade_date).where(
+        DailyQuote.trade_date >= start_date,
+        DailyQuote.trade_date <= end_date,
+    )
+    trade_dates = sorted({item[0] for item in session.execute(stmt).all()})
+    total_count = 0
+    warnings: list[str] = []
+    if not trade_dates:
+        warnings.append(
+            f"Warning: no daily quotes found between {start_date} and {end_date}."
+        )
+        return HistoryBuildReport(total_count=0, warnings=warnings)
+
+    for current_trade_date in trade_dates:
+        results = build_fund_estimates(
+            session=session,
+            trade_date=current_trade_date,
+            fund_code=fund_code,
+        )
+        if not results:
+            warnings.append(
+                f"Warning: no estimates built for {current_trade_date}. Missing active holdings or quotes."
+            )
+            continue
+        total_count += len(results)
+
+    return HistoryBuildReport(total_count=total_count, warnings=warnings)
+
+
+def build_estimate_errors(
+    session: Session,
+    trade_date: date,
+    fund_code: str | None = None,
+) -> ReconcileReport:
+    stmt = select(FundEstimate).where(FundEstimate.trade_date == trade_date)
+    if fund_code:
+        stmt = stmt.where(FundEstimate.fund_code == fund_code)
+    estimates = session.scalars(stmt.order_by(FundEstimate.fund_code.asc())).all()
     results: list[ReconcileResult] = []
     warnings: list[str] = []
 
@@ -376,6 +429,39 @@ def build_estimate_errors(session: Session, trade_date: date) -> ReconcileReport
 
     session.commit()
     return ReconcileReport(results=results, warnings=warnings)
+
+
+def build_reconcile_history(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    fund_code: str | None = None,
+) -> HistoryBuildReport:
+    stmt = select(FundEstimate.trade_date).where(
+        FundEstimate.trade_date >= start_date,
+        FundEstimate.trade_date <= end_date,
+    )
+    if fund_code:
+        stmt = stmt.where(FundEstimate.fund_code == fund_code)
+    trade_dates = sorted({item[0] for item in session.execute(stmt).all()})
+
+    total_count = 0
+    warnings: list[str] = []
+    if not trade_dates:
+        warnings.append(
+            f"Warning: no fund estimates found between {start_date} and {end_date}."
+        )
+        return HistoryBuildReport(total_count=0, warnings=warnings)
+    for current_trade_date in trade_dates:
+        report = build_estimate_errors(
+            session=session,
+            trade_date=current_trade_date,
+            fund_code=fund_code,
+        )
+        total_count += len(report.results)
+        warnings.extend(report.warnings)
+
+    return HistoryBuildReport(total_count=total_count, warnings=warnings)
 
 
 def calculate_error_stats(

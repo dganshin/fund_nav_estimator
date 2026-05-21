@@ -1,28 +1,24 @@
 # fund_nav_estimator
 
-个人使用的基金盘中涨跌预计修正系统, 当前为阶段 3。
+个人使用的基金盘中涨跌预计修正系统, 当前为阶段 4。
 
-本阶段已完成:
+## 阶段 4 目标
 
-- 原始估值 `raw_estimate`
-- 真实涨跌回填 `actual_returns`
-- 基金净值导入 `fund_navs`
-- 误差记录 `reconcile`
-- 历史误差统计 `stats`
-- 滚动线性校准 `calibrated_estimate`
-- 覆盖率修正 `coverage_adjusted_estimate`
-- 资产配置导入
-- 行业配置导入
-- 历史批量校准
-- 校准效果统计
+- 保留阶段 1 到阶段 3 的手动 CSV 导入和估值链路
+- 新增 `data_sources` 抽象层
+- 优先接入 AKShare 作为第一版真实数据源
+- 自动抓取基金历史净值并回填 `fund_navs` 和 `actual_returns`
+- 自动抓取 active holdings 的股票历史日涨跌并回填 `daily_quotes`
+- 支持 `estimate-history`、`reconcile-history`、`backfill-history`
+- 在真实历史数据上比较 `raw_estimate`、`coverage_adjusted_estimate`、`calibrated_estimate`
 
 本阶段仍不包含:
 
-- 实时行情 API
+- 秒级实时行情
+- Web 前端
 - OCR
 - QDII
 - 买卖规则
-- Web 前端
 - 自动交易
 
 ## 目录结构
@@ -43,16 +39,23 @@ fund_nav_estimator/
     example_quotes.csv
   src/
     __init__.py
+    backfill.py
+    data_sources/
+      __init__.py
+      akshare_source.py
+      base.py
+      code_utils.py
     db.py
-    models.py
-    init_db.py
-    import_data.py
     estimator.py
+    import_data.py
+    init_db.py
     main.py
+    models.py
   tests/
     test_stage1.py
-    test_stage2.py
     test_stage3.py
+    test_stage2.py
+    test_stage4.py
 ```
 
 ## 环境要求
@@ -100,7 +103,13 @@ python3 src/main.py import-navs --csv data/example_fund_navs.csv
 python3 src/main.py import-asset-allocation --csv data/example_asset_allocations.csv
 python3 src/main.py import-industry-allocation --csv data/example_industry_allocations.csv
 python3 src/main.py estimate --trade-date 2026-05-21
+python3 src/main.py estimate --trade-date 2026-05-21 --fund-code 002207
+python3 src/main.py estimate-history --start-date 2026-04-01 --end-date 2026-05-21
+python3 src/main.py estimate-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
 python3 src/main.py reconcile --trade-date 2026-05-21
+python3 src/main.py reconcile --trade-date 2026-05-21 --fund-code 002207
+python3 src/main.py reconcile-history --start-date 2026-04-01 --end-date 2026-05-21
+python3 src/main.py reconcile-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
 python3 src/main.py stats
 python3 src/main.py stats --fund-code 000001
 python3 src/main.py stats --window 20
@@ -111,18 +120,34 @@ python3 src/main.py calibrate-history --start-date 2026-05-16 --end-date 2026-05
 python3 src/main.py calibration-stats
 python3 src/main.py calibration-stats --fund-code 000001
 python3 src/main.py calibration-stats --window 20 --base raw
+python3 src/main.py fetch-fund-navs --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
+python3 src/main.py fetch-stock-quotes --asset-code 600988.SH --start-date 2026-04-01 --end-date 2026-05-21
+python3 src/main.py fetch-stock-quotes --from-active-holdings --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
+python3 src/main.py backfill-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21 --window 20 --base coverage_adjusted
 python3 src/main.py demo-run --trade-date 2026-05-21
 ```
 
-## 阶段 3 数据表
+## 当前支持的数据源
 
-新增表:
+- `AKShare`
+
+说明:
+
+- 外部接口只封装在 `src/data_sources/`
+- 当前优先使用:
+  - `fund_open_fund_info_em` 抓开放式基金历史净值
+  - `stock_zh_a_hist` 抓 A 股历史日涨跌
+- 原始抓取结果会缓存到 `data/raw/akshare/`
+
+## 数据表
+
+阶段 3 新增表:
 
 - `fund_asset_allocations`
 - `fund_industry_allocations`
 - `calibrated_estimates`
 
-保留并继续使用:
+阶段 2 保留并继续使用:
 
 - `funds`
 - `holding_versions`
@@ -132,6 +157,28 @@ python3 src/main.py demo-run --trade-date 2026-05-21
 - `actual_returns`
 - `fund_navs`
 - `estimate_errors`
+
+阶段 4 没有新增数据库表, 主要新增了数据源层和历史回填命令。
+
+## 核心指标说明
+
+- `raw_estimate`: 只基于已知持仓和已抓到的股票日涨跌计算
+- `covered_weight`: 当天有行情覆盖的持仓权重之和
+- `missing_weight`: 持仓总权重减去 `covered_weight`
+- `coverage_adjusted_estimate`: 用 `raw_estimate / covered_weight * stock_weight` 做启发式放大
+- `calibrated_estimate`: 用历史滚动线性回归对 base estimate 做校准后的结果
+- `error = actual_return - raw_estimate`
+- `abs_error = abs(error)`
+- `direction_hit`: 估值方向和真实涨跌方向是否一致
+- `mean_abs_error`: 历史绝对误差均值
+- `direction_hit_rate`: 历史方向命中率
+- `corr`: 估值序列和真实涨跌序列的相关系数
+
+说明:
+
+- 百分数输入统一转内部小数
+- 例如 `9.5` 表示 `9.5%`, 内部存储为 `0.095`
+- 命令行展示时再转回百分比
 
 ## CSV 字段说明
 
@@ -258,6 +305,154 @@ actual_return = unit_nav_today / unit_nav_previous_trade_day - 1
 
 - 本阶段只导入和保存
 - 后续阶段可作为行业代理估值的基础数据
+
+## 真实数据抓取
+
+### 抓基金历史净值
+
+```bash
+python3 src/main.py fetch-fund-navs --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
+```
+
+行为:
+
+- 从数据源抓历史 `unit_nav` 和 `accumulated_nav`
+- 写入 `fund_navs`
+- 自动按前一交易日 `unit_nav` 计算 `actual_return`
+- 写入 `actual_returns`
+- 如果缺少前一交易日净值, 不会中断, 但该日 `actual_return` 会给 warning
+
+### 抓股票历史日行情
+
+单只股票:
+
+```bash
+python3 src/main.py fetch-stock-quotes --asset-code 600988.SH --start-date 2026-04-01 --end-date 2026-05-21
+```
+
+从 active holdings 自动抓股票池:
+
+```bash
+python3 src/main.py fetch-stock-quotes --from-active-holdings --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
+```
+
+行为:
+
+- 自动读取 active holding version 的 `asset_code`
+- 抓历史日涨跌幅
+- 写入 `daily_quotes`
+- 对停牌, 空数据, 接口失败给 warning, 但不会破坏已落库数据
+
+### 股票代码格式
+
+内部统一格式:
+
+- `600988.SH`
+- `000975.SZ`
+- `688981.SH`
+
+`src/data_sources/code_utils.py` 同时支持转成:
+
+- `600988`
+- `000975`
+- `sh600988`
+- `sz000975`
+
+## 历史批量命令
+
+### estimate-history
+
+```bash
+python3 src/main.py estimate-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
+```
+
+行为:
+
+- 对区间内已落库行情日期逐日运行 estimate
+- 没有 active holding 或没有行情时跳过并给 warning
+- 可重复运行
+
+### reconcile-history
+
+```bash
+python3 src/main.py reconcile-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
+```
+
+行为:
+
+- 对区间内已生成的 `fund_estimates` 逐日运行 reconcile
+- 缺少 `actual_return` 时只 warning, 不会整体失败
+- 可重复运行
+
+### backfill-history
+
+```bash
+python3 src/main.py backfill-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21 --window 20 --base coverage_adjusted
+```
+
+执行顺序:
+
+1. `fetch-fund-navs`
+2. `fetch-stock-quotes --from-active-holdings`
+3. `estimate-history`
+4. `reconcile-history`
+5. `calibrate-history`
+6. `calibration-stats`
+
+适用场景:
+
+- 真实基金历史回填
+- 快速检查 `raw` 和 `calibrated` 谁更准
+
+## 002207 真实使用示例
+
+在真实数据模式下, 你只需要先手动导入这些静态资料:
+
+- `funds.csv`
+- `holdings.csv`
+- `asset_allocations.csv`
+- `industry_allocations.csv`
+
+然后执行:
+
+```bash
+python3 src/main.py import-funds --csv funds.csv
+python3 src/main.py import-holdings --csv holdings.csv
+python3 src/main.py import-asset-allocation --csv asset_allocations.csv
+python3 src/main.py import-industry-allocation --csv industry_allocations.csv
+
+python3 src/main.py fetch-fund-navs --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
+python3 src/main.py fetch-stock-quotes --from-active-holdings --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
+python3 src/main.py estimate-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
+python3 src/main.py reconcile-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
+python3 src/main.py calibrate-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21 --window 20 --base coverage_adjusted
+python3 src/main.py calibration-stats --fund-code 002207 --window 20 --base coverage_adjusted
+```
+
+注意:
+
+- 仓库不硬编码真实净值或真实抓取结果
+- 真实抓取结果只会写到本地数据库和 `data/raw/akshare/`
+
+## 接口失败和缺失数据处理
+
+- 网络失败: 抛出清晰错误, 不会删除已有数据库数据
+- 字段变化: 会直接输出实际 columns, 便于调试 AKShare 接口变化
+- 空返回: 输出 warning, 不写入错误数据
+- 批量抓股票时可通过 `--sleep-seconds` 控制节流
+- 缺失股票行情时, `raw_estimate` 只按已覆盖部分计算, 不会中断
+
+## demo-run
+
+```bash
+python3 src/main.py demo-run --trade-date 2026-05-21
+```
+
+说明:
+
+- `demo-run` 仍然只使用仓库内 synthetic 示例数据
+- 不依赖真实网络
+- 可以重复运行
 
 ## 百分数输入与内部计算
 
