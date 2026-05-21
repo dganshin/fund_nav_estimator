@@ -57,14 +57,20 @@ def fetch_and_store_fund_navs(
     start_date: date,
     end_date: date,
 ) -> ImportReport:
+    if hasattr(data_source, "last_warnings"):
+        data_source.last_warnings = []  # type: ignore[attr-defined]
     records = data_source.fetch_fund_navs(
         fund_code=fund_code,
         start_date=start_date,
         end_date=end_date,
     )
+    warnings = list(getattr(data_source, "last_warnings", []))
     if not records:
-        return ImportReport(imported_count=0, warnings=[f"Warning: no fund navs fetched for {fund_code}."])
-    return import_nav_records(session, records)
+        warnings.append(f"Warning: no fund navs fetched for {fund_code}.")
+        return ImportReport(imported_count=0, warnings=warnings)
+    report = import_nav_records(session, records)
+    report.warnings = warnings + report.warnings
+    return report
 
 
 def fetch_and_store_stock_quotes(
@@ -77,16 +83,20 @@ def fetch_and_store_stock_quotes(
 ) -> ImportReport:
     if not asset_codes:
         return ImportReport(imported_count=0, warnings=["Warning: no asset codes available for quote fetch."])
+    if hasattr(data_source, "last_warnings"):
+        data_source.last_warnings = []  # type: ignore[attr-defined]
     records = data_source.fetch_stock_daily_quotes(
         asset_codes=asset_codes,
         start_date=start_date,
         end_date=end_date,
         sleep_seconds=sleep_seconds,
     )
+    warnings = list(getattr(data_source, "last_warnings", []))
     if not records:
-        return ImportReport(imported_count=0, warnings=["Warning: no stock quotes fetched."])
+        warnings.append("Warning: no stock quotes fetched.")
+        return ImportReport(imported_count=0, warnings=warnings)
     count = import_quote_records(session, records)
-    return ImportReport(imported_count=count, warnings=[])
+    return ImportReport(imported_count=count, warnings=warnings)
 
 
 def backfill_history(

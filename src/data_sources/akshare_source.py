@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 import time
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 
 from .base import DataSourceError, FundNavRecord, StockQuoteRecord
-from .code_utils import normalize_asset_code, to_plain_symbol
+from .code_utils import normalize_asset_code, to_plain_symbol, to_prefixed_symbol
 
 
 class AKShareDataSource:
     def __init__(self, raw_dir: str | Path | None = None) -> None:
         self.raw_dir = Path(raw_dir) if raw_dir else Path(__file__).resolve().parents[2] / "data" / "raw" / "akshare"
         self.raw_dir.mkdir(parents=True, exist_ok=True)
+        self.last_warnings: list[str] = []
         try:
             import akshare as ak
         except ImportError as exc:
@@ -95,51 +96,20 @@ class AKShareDataSource:
         end_date: date,
         sleep_seconds: float = 0.0,
     ) -> list[StockQuoteRecord]:
+        self.last_warnings = []
         records: list[StockQuoteRecord] = []
         for index, asset_code in enumerate(asset_codes):
-            plain_symbol = to_plain_symbol(asset_code)
             try:
-                quote_df = self.ak.stock_zh_a_hist(
-                    symbol=plain_symbol,
-                    period="daily",
-                    start_date=start_date.strftime("%Y%m%d"),
-                    end_date=end_date.strftime("%Y%m%d"),
-                    adjust="",
+                records.extend(
+                    self._fetch_stock_records_with_fallback(
+                        asset_code=asset_code,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
                 )
             except Exception as exc:
-                raise DataSourceError(f"AKShare fetch stock quotes failed for {asset_code}: {exc}") from exc
-
-            if quote_df is None or quote_df.empty:
-                if sleep_seconds > 0 and index < len(asset_codes) - 1:
-                    time.sleep(sleep_seconds)
-                continue
-
-            self._cache_dataframe(
-                quote_df,
-                f"stock_quotes_{normalize_asset_code(asset_code)}_{start_date}_{end_date}.csv",
-            )
-
-            expected_columns = {"日期", "涨跌幅"}
-            if not expected_columns.issubset(set(quote_df.columns)):
-                raise DataSourceError(
-                    f"AKShare stock quote columns changed for {asset_code}. Actual columns: {list(quote_df.columns)}"
-                )
-
-            quote_df = quote_df.copy()
-            quote_df["日期"] = pd.to_datetime(quote_df["日期"]).dt.date
-            name = self._extract_asset_name(quote_df, asset_code)
-            normalized_code = normalize_asset_code(asset_code)
-            for _, row in quote_df.iterrows():
-                if pd.isna(row["涨跌幅"]):
-                    continue
-                records.append(
-                    StockQuoteRecord(
-                        trade_date=row["日期"],
-                        asset_code=normalized_code,
-                        asset_name=name,
-                        return_pct=float(row["涨跌幅"]) / 100.0,
-                        source="akshare",
-                    )
+                self.last_warnings.append(
+                    f"Warning: stock quote fetch failed for {asset_code}: {exc}"
                 )
 
             if sleep_seconds > 0 and index < len(asset_codes) - 1:
@@ -201,3 +171,142 @@ class AKShareDataSource:
                 symbol=fund_code,
                 indicator=indicator,
             )
+
+    def _fetch_stock_records_with_fallback(
+        self,
+        asset_code: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[StockQuoteRecord]:
+        eastmoney_error: Exception | None = None
+        try:
+            return self._fetch_stock_records_from_eastmoney(
+                asset_code=asset_code,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except Exception as exc:
+            eastmoney_error = exc
+            self.last_warnings.append(
+                f"Warning: eastmoney stock history failed for {asset_code}, fallback to sina daily. Error: {exc}"
+            )
+
+        try:
+            return self._fetch_stock_records_from_sina(
+                asset_code=asset_code,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except Exception as exc:
+            raise DataSourceError(
+                f"AKShare fetch stock quotes failed for {asset_code}. "
+                f"eastmoney_error={eastmoney_error}; sina_error={exc}"
+            ) from exc
+
+    def _fetch_stock_records_from_eastmoney(
+        self,
+        asset_code: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[StockQuoteRecord]:
+        quote_df = self.ak.stock_zh_a_hist(
+            symbol=to_plain_symbol(asset_code),
+            period="daily",
+            start_date=start_date.strftime("%Y%m%d"),
+            end_date=end_date.strftime("%Y%m%d"),
+            adjust="",
+        )
+        if quote_df is None or quote_df.empty:
+            return []
+
+        self._cache_dataframe(
+            quote_df,
+            f"stock_quotes_{normalize_asset_code(asset_code)}_{start_date}_{end_date}.csv",
+        )
+
+        expected_columns = {"日期", "涨跌幅"}
+        if not expected_columns.issubset(set(quote_df.columns)):
+            raise DataSourceError(
+                f"AKShare stock quote columns changed for {asset_code}. Actual columns: {list(quote_df.columns)}"
+            )
+
+        quote_df = quote_df.copy()
+        quote_df["日期"] = pd.to_datetime(quote_df["日期"]).dt.date
+        name = self._extract_asset_name(quote_df, asset_code)
+        normalized_code = normalize_asset_code(asset_code)
+        records: list[StockQuoteRecord] = []
+        for _, row in quote_df.iterrows():
+            if pd.isna(row["涨跌幅"]):
+                continue
+            records.append(
+                StockQuoteRecord(
+                    trade_date=row["日期"],
+                    asset_code=normalized_code,
+                    asset_name=name,
+                    return_pct=float(row["涨跌幅"]) / 100.0,
+                    source="akshare",
+                )
+            )
+        return records
+
+    def _fetch_stock_records_from_sina(
+        self,
+        asset_code: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[StockQuoteRecord]:
+        lookup_start = start_date - timedelta(days=10)
+        quote_df = self.ak.stock_zh_a_daily(
+            symbol=to_prefixed_symbol(asset_code),
+            start_date=lookup_start.strftime("%Y%m%d"),
+            end_date=end_date.strftime("%Y%m%d"),
+            adjust="",
+        )
+        if quote_df is None or quote_df.empty:
+            return []
+
+        self._cache_dataframe(
+            quote_df,
+            f"stock_quotes_sina_{normalize_asset_code(asset_code)}_{start_date}_{end_date}.csv",
+        )
+
+        quote_df = quote_df.copy()
+        if "date" in quote_df.columns:
+            quote_df["date"] = pd.to_datetime(quote_df["date"]).dt.date
+        else:
+            quote_df = quote_df.reset_index()
+            if "date" not in quote_df.columns:
+                raise DataSourceError(
+                    f"AKShare sina stock quote columns changed for {asset_code}. Actual columns: {list(quote_df.columns)}"
+                )
+            quote_df["date"] = pd.to_datetime(quote_df["date"]).dt.date
+
+        expected_columns = {"date", "close"}
+        if not expected_columns.issubset(set(quote_df.columns)):
+            raise DataSourceError(
+                f"AKShare sina stock quote columns changed for {asset_code}. Actual columns: {list(quote_df.columns)}"
+            )
+
+        quote_df = quote_df.sort_values("date").copy()
+        quote_df["prev_close"] = quote_df["close"].shift(1)
+        quote_df["return_pct"] = quote_df["close"] / quote_df["prev_close"] - 1
+        quote_df = quote_df[
+            (quote_df["date"] >= start_date)
+            & (quote_df["date"] <= end_date)
+        ]
+
+        normalized_code = normalize_asset_code(asset_code)
+        records: list[StockQuoteRecord] = []
+        for _, row in quote_df.iterrows():
+            if pd.isna(row["return_pct"]):
+                continue
+            records.append(
+                StockQuoteRecord(
+                    trade_date=row["date"],
+                    asset_code=normalized_code,
+                    asset_name=normalized_code,
+                    return_pct=float(row["return_pct"]),
+                    source="akshare:sina_daily",
+                )
+            )
+        return records
