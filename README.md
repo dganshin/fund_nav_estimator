@@ -1,6 +1,6 @@
 # fund_nav_estimator
 
-个人使用的基金盘中涨跌预计修正系统, 当前为阶段 4。
+个人使用的基金盘中涨跌预计修正系统, 当前为阶段 5, 并新增了本地 Web 录入台。
 
 ## 阶段 4 目标
 
@@ -11,11 +11,11 @@
 - 自动抓取 active holdings 的股票历史日涨跌并回填 `daily_quotes`
 - 支持 `estimate-history`、`reconcile-history`、`backfill-history`
 - 在真实历史数据上比较 `raw_estimate`、`coverage_adjusted_estimate`、`calibrated_estimate`
+- 支持本地 Streamlit Web 页面, 可以直接在表格中维护基金池、持仓、资产配置、行业配置
 
-本阶段仍不包含:
+当前仍不包含:
 
 - 秒级实时行情
-- Web 前端
 - OCR
 - QDII
 - 买卖规则
@@ -51,6 +51,8 @@ fund_nav_estimator/
     init_db.py
     main.py
     models.py
+    web_app.py
+    web_services.py
   tests/
     test_stage1.py
     test_stage3.py
@@ -70,6 +72,23 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+## 启动本地 Web
+
+```bash
+cd /Users/jiangxing/Documents/repo/fund_nav_estimator
+source .venv/bin/activate
+streamlit run src/web_app.py
+```
+
+Web 页面当前支持:
+
+- 直接在表格里录入和修改 `funds`
+- 直接在表格里录入和修改 active `holdings`
+- 直接在表格里录入和修改 active `asset_allocations`
+- 直接在表格里录入和修改 active `industry_allocations`
+- 点击按钮抓基金净值、抓股票行情、一键执行 `backfill-history`
+- 页面内查看 `stats`、`compare-estimates`、`calibration-stats`、`selected-stats`
 
 ## 初始化数据库
 
@@ -132,6 +151,7 @@ python3 src/main.py fetch-stock-quotes --asset-code 600988.SH --start-date 2026-
 python3 src/main.py fetch-stock-quotes --from-active-holdings --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
 python3 src/main.py backfill-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21 --window 20 --base coverage_adjusted
 python3 src/main.py demo-run --trade-date 2026-05-21
+streamlit run src/web_app.py
 ```
 
 ## 当前支持的数据源

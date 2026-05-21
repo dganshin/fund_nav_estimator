@@ -26,6 +26,9 @@ class ImportReport:
     generated_actual_returns: int = 0
 
 
+WEB_INPUT_PATH = Path("web_input")
+
+
 def validate_required_columns(fieldnames: list[str] | None, required_fields: Iterable[str], csv_path: Path) -> None:
     if fieldnames is None:
         raise DataImportError(f"{csv_path} is missing header row.")
@@ -46,6 +49,30 @@ def read_required_value(row: dict[str, str], field_name: str, row_number: int, c
     if value == "":
         raise DataImportError(f"{csv_path} row {row_number}: empty value for {field_name}.")
     return value
+
+
+def coerce_row_value(value: object | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value).strip()
+
+
+def normalize_rows(rows: Iterable[dict[str, object]]) -> list[dict[str, str]]:
+    normalized_rows: list[dict[str, str]] = []
+    for row in rows:
+        normalized_row: dict[str, str] = {}
+        for key, value in row.items():
+            normalized_row[str(key)] = coerce_row_value(value) or ""
+        normalized_rows.append(normalized_row)
+    return normalized_rows
+
+
+def filter_blank_rows(rows: Iterable[dict[str, str]]) -> list[dict[str, str]]:
+    return [row for row in rows if any(value.strip() for value in row.values())]
 
 
 def read_optional_value(row: dict[str, str], field_name: str) -> str | None:
@@ -145,30 +172,40 @@ def import_funds_from_yaml(session: Session, yaml_path: str | Path) -> int:
     return count
 
 
-def import_funds_from_csv(session: Session, csv_path: str | Path) -> int:
-    csv_file = Path(csv_path)
+def import_funds_from_rows(
+    session: Session,
+    rows: Iterable[dict[str, object]],
+    source_path: Path | None = None,
+) -> int:
+    csv_path = source_path or WEB_INPUT_PATH
+    normalized_rows = filter_blank_rows(normalize_rows(rows))
     required_fields = ["fund_code", "fund_name", "fund_type", "market", "is_active"]
     count = 0
 
-    with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        validate_required_columns(reader.fieldnames, required_fields, csv_file)
+    for row_number, row in enumerate(normalized_rows, start=2):
+        validate_required_columns(list(row.keys()), required_fields, csv_path)
+        fund_code = read_required_value(row, "fund_code", row_number, csv_path)
+        fund = session.get(Fund, fund_code)
+        if fund is None:
+            fund = Fund(fund_code=fund_code)
+            session.add(fund)
 
-        for row_number, row in enumerate(reader, start=2):
-            fund_code = read_required_value(row, "fund_code", row_number, csv_file)
-            fund = session.get(Fund, fund_code)
-            if fund is None:
-                fund = Fund(fund_code=fund_code)
-                session.add(fund)
-
-            fund.fund_name = read_required_value(row, "fund_name", row_number, csv_file)
-            fund.fund_type = read_required_value(row, "fund_type", row_number, csv_file)
-            fund.market = read_required_value(row, "market", row_number, csv_file)
-            fund.is_active = parse_bool(read_required_value(row, "is_active", row_number, csv_file))
-            count += 1
+        fund.fund_name = read_required_value(row, "fund_name", row_number, csv_path)
+        fund.fund_type = read_required_value(row, "fund_type", row_number, csv_path)
+        fund.market = read_required_value(row, "market", row_number, csv_path)
+        fund.is_active = parse_bool(read_required_value(row, "is_active", row_number, csv_path))
+        count += 1
 
     session.commit()
     return count
+
+
+def import_funds_from_csv(session: Session, csv_path: str | Path) -> int:
+    csv_file = Path(csv_path)
+
+    with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        return import_funds_from_rows(session, list(reader), csv_file)
 
 
 def get_weight_value(row: dict[str, str], row_number: int, csv_path: Path) -> tuple[str, str]:
@@ -191,34 +228,36 @@ def get_actual_return_value(row: dict[str, str], row_number: int, csv_path: Path
     )
 
 
-def import_holdings_from_csv(session: Session, csv_path: str | Path) -> int:
-    csv_file = Path(csv_path)
+def import_holdings_from_rows(
+    session: Session,
+    rows: Iterable[dict[str, object]],
+    source_path: Path | None = None,
+) -> int:
+    csv_path = source_path or WEB_INPUT_PATH
+    normalized_rows = filter_blank_rows(normalize_rows(rows))
     grouped_rows: dict[tuple[str, date, str], list[dict[str, str]]] = defaultdict(list)
     required_fields = ["fund_code", "report_date", "source", "asset_code", "asset_name", "asset_type"]
 
-    with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        validate_required_columns(reader.fieldnames, required_fields, csv_file)
+    for row_number, row in enumerate(normalized_rows, start=2):
+        validate_required_columns(list(row.keys()), required_fields, csv_path)
+        fund_code = read_required_value(row, "fund_code", row_number, csv_path)
+        report_date = parse_csv_date(read_required_value(row, "report_date", row_number, csv_path), "report_date", row_number, csv_path)
+        source = read_required_value(row, "source", row_number, csv_path)
+        asset_code = read_required_value(row, "asset_code", row_number, csv_path)
+        asset_name = read_required_value(row, "asset_name", row_number, csv_path)
+        asset_type = read_required_value(row, "asset_type", row_number, csv_path)
+        weight_field_name, weight_value = get_weight_value(row, row_number, csv_path)
+        weight_decimal = parse_percent_to_decimal(weight_value, weight_field_name, row_number, csv_path)
 
-        for row_number, row in enumerate(reader, start=2):
-            fund_code = read_required_value(row, "fund_code", row_number, csv_file)
-            report_date = parse_csv_date(read_required_value(row, "report_date", row_number, csv_file), "report_date", row_number, csv_file)
-            source = read_required_value(row, "source", row_number, csv_file)
-            asset_code = read_required_value(row, "asset_code", row_number, csv_file)
-            asset_name = read_required_value(row, "asset_name", row_number, csv_file)
-            asset_type = read_required_value(row, "asset_type", row_number, csv_file)
-            weight_field_name, weight_value = get_weight_value(row, row_number, csv_file)
-            weight_decimal = parse_percent_to_decimal(weight_value, weight_field_name, row_number, csv_file)
-
-            key = (fund_code, report_date, source)
-            grouped_rows[key].append(
-                {
-                    "asset_code": asset_code,
-                    "asset_name": asset_name,
-                    "asset_type": asset_type,
-                    "weight_decimal": f"{weight_decimal:.12f}",
-                }
-            )
+        key = (fund_code, report_date, source)
+        grouped_rows[key].append(
+            {
+                "asset_code": asset_code,
+                "asset_name": asset_name,
+                "asset_type": asset_type,
+                "weight_decimal": f"{weight_decimal:.12f}",
+            }
+        )
 
     created_or_updated = 0
     fund_latest_key: dict[str, tuple[str, date, str]] = {}
@@ -297,6 +336,13 @@ def import_holdings_from_csv(session: Session, csv_path: str | Path) -> int:
 
     session.commit()
     return created_or_updated
+
+
+def import_holdings_from_csv(session: Session, csv_path: str | Path) -> int:
+    csv_file = Path(csv_path)
+    with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        return import_holdings_from_rows(session, list(reader), csv_file)
 
 
 def import_quotes_from_csv(session: Session, csv_path: str | Path) -> int:
@@ -553,39 +599,41 @@ def parse_optional_percent_to_decimal(
     return parse_percent_to_decimal(raw_value, field_name, row_number, csv_path)
 
 
-def import_asset_allocations_from_csv(session: Session, csv_path: str | Path) -> int:
-    csv_file = Path(csv_path)
+def import_asset_allocations_from_rows(
+    session: Session,
+    rows: Iterable[dict[str, object]],
+    source_path: Path | None = None,
+) -> int:
+    csv_path = source_path or WEB_INPUT_PATH
+    normalized_rows = filter_blank_rows(normalize_rows(rows))
     required_fields = ["fund_code", "report_date", "source"]
     rows_by_key: dict[tuple[str, date, str], dict[str, float]] = {}
     latest_keys: dict[str, tuple[str, date, str]] = {}
 
-    with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        validate_required_columns(reader.fieldnames, required_fields, csv_file)
+    for row_number, row in enumerate(normalized_rows, start=2):
+        validate_required_columns(list(row.keys()), required_fields, csv_path)
+        fund_code = read_required_value(row, "fund_code", row_number, csv_path)
+        report_date = parse_csv_date(
+            read_required_value(row, "report_date", row_number, csv_path),
+            "report_date",
+            row_number,
+            csv_path,
+        )
+        source = read_required_value(row, "source", row_number, csv_path)
+        if session.get(Fund, fund_code) is None:
+            raise DataImportError(f"Fund {fund_code} not found. Import funds first.")
 
-        for row_number, row in enumerate(reader, start=2):
-            fund_code = read_required_value(row, "fund_code", row_number, csv_file)
-            report_date = parse_csv_date(
-                read_required_value(row, "report_date", row_number, csv_file),
-                "report_date",
-                row_number,
-                csv_file,
-            )
-            source = read_required_value(row, "source", row_number, csv_file)
-            if session.get(Fund, fund_code) is None:
-                raise DataImportError(f"Fund {fund_code} not found. Import funds first.")
+        key = (fund_code, report_date, source)
+        rows_by_key[key] = {
+            "stock_weight": parse_optional_percent_to_decimal(row, "stock_weight_pct", row_number, csv_path),
+            "bond_weight": parse_optional_percent_to_decimal(row, "bond_weight_pct", row_number, csv_path),
+            "cash_weight": parse_optional_percent_to_decimal(row, "cash_weight_pct", row_number, csv_path),
+            "other_weight": parse_optional_percent_to_decimal(row, "other_weight_pct", row_number, csv_path),
+        }
 
-            key = (fund_code, report_date, source)
-            rows_by_key[key] = {
-                "stock_weight": parse_optional_percent_to_decimal(row, "stock_weight_pct", row_number, csv_file),
-                "bond_weight": parse_optional_percent_to_decimal(row, "bond_weight_pct", row_number, csv_file),
-                "cash_weight": parse_optional_percent_to_decimal(row, "cash_weight_pct", row_number, csv_file),
-                "other_weight": parse_optional_percent_to_decimal(row, "other_weight_pct", row_number, csv_file),
-            }
-
-            latest_key = latest_keys.get(fund_code)
-            if latest_key is None or (report_date, source) > (latest_key[1], latest_key[2]):
-                latest_keys[fund_code] = key
+        latest_key = latest_keys.get(fund_code)
+        if latest_key is None or (report_date, source) > (latest_key[1], latest_key[2]):
+            latest_keys[fund_code] = key
 
     count = 0
     for key, weights in rows_by_key.items():
@@ -626,40 +674,49 @@ def import_asset_allocations_from_csv(session: Session, csv_path: str | Path) ->
     return count
 
 
-def import_industry_allocations_from_csv(session: Session, csv_path: str | Path) -> int:
+def import_asset_allocations_from_csv(session: Session, csv_path: str | Path) -> int:
     csv_file = Path(csv_path)
+    with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        return import_asset_allocations_from_rows(session, list(reader), csv_file)
+
+
+def import_industry_allocations_from_rows(
+    session: Session,
+    rows: Iterable[dict[str, object]],
+    source_path: Path | None = None,
+) -> int:
+    csv_path = source_path or WEB_INPUT_PATH
+    normalized_rows = filter_blank_rows(normalize_rows(rows))
     required_fields = ["fund_code", "report_date", "source", "industry_name", "weight_pct"]
     grouped_rows: dict[tuple[str, date, str], list[dict[str, str]]] = defaultdict(list)
     latest_keys: dict[str, tuple[str, date, str]] = {}
 
-    with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        validate_required_columns(reader.fieldnames, required_fields, csv_file)
+    for row_number, row in enumerate(normalized_rows, start=2):
+        validate_required_columns(list(row.keys()), required_fields, csv_path)
+        fund_code = read_required_value(row, "fund_code", row_number, csv_path)
+        report_date = parse_csv_date(
+            read_required_value(row, "report_date", row_number, csv_path),
+            "report_date",
+            row_number,
+            csv_path,
+        )
+        source = read_required_value(row, "source", row_number, csv_path)
+        if session.get(Fund, fund_code) is None:
+            raise DataImportError(f"Fund {fund_code} not found. Import funds first.")
 
-        for row_number, row in enumerate(reader, start=2):
-            fund_code = read_required_value(row, "fund_code", row_number, csv_file)
-            report_date = parse_csv_date(
-                read_required_value(row, "report_date", row_number, csv_file),
-                "report_date",
-                row_number,
-                csv_file,
-            )
-            source = read_required_value(row, "source", row_number, csv_file)
-            if session.get(Fund, fund_code) is None:
-                raise DataImportError(f"Fund {fund_code} not found. Import funds first.")
+        key = (fund_code, report_date, source)
+        grouped_rows[key].append(
+            {
+                "industry_name": read_required_value(row, "industry_name", row_number, csv_path),
+                "industry_code": read_optional_value(row, "industry_code") or "",
+                "weight": f"{parse_percent_to_decimal(read_required_value(row, 'weight_pct', row_number, csv_path), 'weight_pct', row_number, csv_path):.12f}",
+            }
+        )
 
-            key = (fund_code, report_date, source)
-            grouped_rows[key].append(
-                {
-                    "industry_name": read_required_value(row, "industry_name", row_number, csv_file),
-                    "industry_code": read_optional_value(row, "industry_code") or "",
-                    "weight": f"{parse_percent_to_decimal(read_required_value(row, 'weight_pct', row_number, csv_file), 'weight_pct', row_number, csv_file):.12f}",
-                }
-            )
-
-            latest_key = latest_keys.get(fund_code)
-            if latest_key is None or (report_date, source) > (latest_key[1], latest_key[2]):
-                latest_keys[fund_code] = key
+        latest_key = latest_keys.get(fund_code)
+        if latest_key is None or (report_date, source) > (latest_key[1], latest_key[2]):
+            latest_keys[fund_code] = key
 
     count = 0
     for key, rows in grouped_rows.items():
@@ -709,3 +766,10 @@ def import_industry_allocations_from_csv(session: Session, csv_path: str | Path)
 
     session.commit()
     return count
+
+
+def import_industry_allocations_from_csv(session: Session, csv_path: str | Path) -> int:
+    csv_file = Path(csv_path)
+    with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        return import_industry_allocations_from_rows(session, list(reader), csv_file)
