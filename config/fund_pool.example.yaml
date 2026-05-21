@@ -1,0 +1,12 @@
+funds:
+  - fund_code: "000001"
+    fund_name: "示例成长混合"
+    fund_type: "equity_mixed"
+    market: "CN"
+    is_active: true
+  - fund_code: "000002"
+    fund_name: "示例科技混合"
+    fund_type: "equity_mixed"
+    market: "CN"
+    is_active: true
+
