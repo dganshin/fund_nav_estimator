@@ -24,9 +24,12 @@ if __package__ in {None, ""}:
         build_fund_estimates,
         build_estimate_history,
         build_reconcile_history,
+        build_selected_estimates,
+        build_selection_history,
         calculate_calibration_stats,
         calculate_compare_estimates,
         calculate_error_stats,
+        calculate_selected_stats,
         format_hit_rate,
         format_missing_assets,
         format_percent,
@@ -62,9 +65,12 @@ else:
         build_fund_estimates,
         build_estimate_history,
         build_reconcile_history,
+        build_selected_estimates,
+        build_selection_history,
         calculate_calibration_stats,
         calculate_compare_estimates,
         calculate_error_stats,
+        calculate_selected_stats,
         format_hit_rate,
         format_missing_assets,
         format_percent,
@@ -178,6 +184,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser_compare.add_argument("--base", choices=["raw", "coverage_adjusted"], default="coverage_adjusted")
     parser_compare.add_argument("--start-date")
     parser_compare.add_argument("--end-date")
+
+    parser_select = subparsers.add_parser("select-estimate", help="Select best estimate for a trade date")
+    parser_select.add_argument("--trade-date", required=True)
+    parser_select.add_argument("--fund-code")
+    parser_select.add_argument("--selection-window", type=int, default=20)
+    parser_select.add_argument("--min-samples", type=int, default=10)
+    parser_select.add_argument("--min-improvement-bps", type=int, default=3)
+
+    parser_select_history = subparsers.add_parser("select-history", help="Build selected estimates for a date range")
+    parser_select_history.add_argument("--start-date", required=True)
+    parser_select_history.add_argument("--end-date", required=True)
+    parser_select_history.add_argument("--fund-code")
+    parser_select_history.add_argument("--selection-window", type=int, default=20)
+    parser_select_history.add_argument("--min-samples", type=int, default=10)
+    parser_select_history.add_argument("--min-improvement-bps", type=int, default=3)
+
+    parser_selected_stats = subparsers.add_parser("selected-stats", help="Show historical best estimate performance")
+    parser_selected_stats.add_argument("--fund-code")
+    parser_selected_stats.add_argument("--start-date")
+    parser_selected_stats.add_argument("--end-date")
+    parser_selected_stats.add_argument("--selection-window", type=int, default=20)
 
     parser_fetch_navs = subparsers.add_parser("fetch-fund-navs", help="Fetch historical fund navs from data source")
     parser_fetch_navs.add_argument("--fund-code", required=True)
@@ -383,20 +410,67 @@ def print_quote_table(records) -> None:
 
 
 def print_backfill_summary_table(summaries) -> None:
-    headers = ["基金代码", "基金名称", "日期区间", "估算样本数", "raw_MAE", "calibrated_MAE", "improvement", "方向命中率", "置信等级"]
+    headers = ["基金代码", "基金名称", "日期区间", "样本数", "raw_MAE", "coverage_MAE", "calibrated_MAE", "best_MAE", "best方法分布", "置信等级"]
     rows = [
         [
             summary.fund_code,
             summary.fund_name,
             f"{summary.start_date.isoformat()}~{summary.end_date.isoformat()}",
-            str(summary.estimate_sample_count),
+            str(summary.sample_count),
             format_percent(summary.raw_mean_abs_error),
+            format_percent(summary.coverage_mean_abs_error),
             format_percent(summary.calibrated_mean_abs_error),
-            format_percent(summary.improvement_pct, signed=True),
-            format_hit_rate(summary.calibrated_direction_hit_rate),
+            format_percent(summary.best_mean_abs_error),
+            summary.best_method_distribution,
             summary.confidence_level or "N/A",
         ]
         for summary in summaries
+    ]
+    print_table(headers, rows)
+
+
+def print_selected_estimates_table(results) -> None:
+    headers = ["基金代码", "基金名称", "raw", "coverage", "calibrated", "best", "方法", "样本数", "raw_MAE", "coverage_MAE", "calibrated_MAE", "置信度", "状态", "理由"]
+    rows = [
+        [
+            result.fund_code,
+            result.fund_name,
+            format_percent(result.raw_estimate, signed=True),
+            format_percent(result.coverage_adjusted_estimate, signed=True),
+            format_percent(result.calibrated_estimate, signed=True),
+            format_percent(result.best_estimate, signed=True),
+            result.best_method,
+            str(result.sample_count),
+            format_percent(result.raw_mae),
+            format_percent(result.coverage_adjusted_mae),
+            format_percent(result.calibrated_mae),
+            result.confidence_level or "N/A",
+            result.best_status,
+            result.decision_reason,
+        ]
+        for result in results
+    ]
+    print_table(headers, rows)
+
+
+def print_selected_stats_table(results) -> None:
+    headers = ["基金代码", "基金名称", "日期区间", "样本数", "raw_MAE", "coverage_MAE", "calibrated_MAE", "best_MAE", "最优单一方法", "best_method分布", "best方向命中率", "best_corr"]
+    rows = [
+        [
+            result.fund_code,
+            result.fund_name,
+            f"{result.start_date.isoformat()}~{result.end_date.isoformat()}" if result.start_date and result.end_date else "N/A",
+            str(result.sample_count),
+            format_percent(result.raw_mean_abs_error),
+            format_percent(result.coverage_adjusted_mean_abs_error),
+            format_percent(result.calibrated_mean_abs_error),
+            format_percent(result.best_mean_abs_error),
+            result.best_single_method or "N/A",
+            result.best_method_distribution,
+            format_hit_rate(result.best_direction_hit_rate),
+            format_ratio(result.best_corr),
+        ]
+        for result in results
     ]
     print_table(headers, rows)
 
@@ -544,6 +618,7 @@ def main() -> None:
             run_demo(args.trade_date)
             return
 
+        init_db()
         session_factory = get_session_factory()
         with session_factory() as session:
             if args.command == "import-funds":
@@ -652,6 +727,38 @@ def main() -> None:
                     end_date=parse_date(args.end_date) if args.end_date else None,
                 )
                 print_compare_estimates_table(results)
+            elif args.command == "select-estimate":
+                results = build_selected_estimates(
+                    session,
+                    trade_date=parse_date(args.trade_date),
+                    fund_code=args.fund_code,
+                    selection_window=args.selection_window,
+                    min_samples=args.min_samples,
+                    min_improvement_bps=args.min_improvement_bps,
+                )
+                print_selected_estimates_table(results)
+                for result in results:
+                    print_warnings(result.warning_json)
+            elif args.command == "select-history":
+                count = build_selection_history(
+                    session,
+                    start_date=parse_date(args.start_date),
+                    end_date=parse_date(args.end_date),
+                    fund_code=args.fund_code,
+                    selection_window=args.selection_window,
+                    min_samples=args.min_samples,
+                    min_improvement_bps=args.min_improvement_bps,
+                )
+                print(f"Built selected estimate rows: {count}")
+            elif args.command == "selected-stats":
+                results = calculate_selected_stats(
+                    session,
+                    fund_code=args.fund_code,
+                    start_date=parse_date(args.start_date) if args.start_date else None,
+                    end_date=parse_date(args.end_date) if args.end_date else None,
+                    selection_window=args.selection_window,
+                )
+                print_selected_stats_table(results)
             elif args.command == "fetch-fund-navs":
                 data_source = AKShareDataSource()
                 report = fetch_and_store_fund_navs(
@@ -692,7 +799,7 @@ def main() -> None:
                 print_warnings(report.warnings)
             elif args.command == "backfill-history":
                 data_source = AKShareDataSource()
-                nav_report, quote_report, estimate_report, reconcile_report, calibration_count, summaries = backfill_history(
+                nav_report, quote_report, estimate_report, reconcile_report, calibration_count, selection_count, summaries = backfill_history(
                     session=session,
                     data_source=data_source,
                     fund_code=args.fund_code,
@@ -708,6 +815,7 @@ def main() -> None:
                 print(f"Built historical estimates: {estimate_report.total_count}")
                 print(f"Built historical estimate errors: {reconcile_report.total_count}")
                 print(f"Built calibration history rows: {calibration_count}")
+                print(f"Built selected estimate rows: {selection_count}")
                 print_warnings(nav_report.warnings + quote_report.warnings + estimate_report.warnings + reconcile_report.warnings)
                 print_backfill_summary_table(summaries)
     except (DataImportError, DataSourceError) as exc:

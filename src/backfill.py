@@ -12,7 +12,8 @@ from .estimator import (
     build_calibration_history,
     build_estimate_history,
     build_reconcile_history,
-    calculate_calibration_stats,
+    build_selection_history,
+    calculate_selected_stats,
 )
 from .import_data import ImportReport, import_nav_records, import_quote_records
 from .models import Fund, FundEstimate, HoldingVersion
@@ -24,11 +25,12 @@ class BackfillSummary:
     fund_name: str
     start_date: date
     end_date: date
-    estimate_sample_count: int
+    sample_count: int
     raw_mean_abs_error: float | None
+    coverage_mean_abs_error: float | None
     calibrated_mean_abs_error: float | None
-    improvement_pct: float | None
-    calibrated_direction_hit_rate: float | None
+    best_mean_abs_error: float | None
+    best_method_distribution: str
     confidence_level: str | None
 
 
@@ -109,7 +111,7 @@ def backfill_history(
     base: str = "coverage_adjusted",
     min_samples: int = 5,
     sleep_seconds: float = 0.0,
-) -> tuple[ImportReport, ImportReport, HistoryBuildReport, HistoryBuildReport, int, list[BackfillSummary]]:
+) -> tuple[ImportReport, ImportReport, HistoryBuildReport, HistoryBuildReport, int, int, list[BackfillSummary]]:
     nav_report = fetch_and_store_fund_navs(
         session=session,
         data_source=data_source,
@@ -147,40 +149,41 @@ def backfill_history(
         fund_code=fund_code,
         min_samples=min_samples,
     )
-    calibration_stats = calculate_calibration_stats(
+    selection_count = build_selection_history(
+        session=session,
+        start_date=start_date,
+        end_date=end_date,
+        fund_code=fund_code,
+        selection_window=window,
+        min_samples=max(10, min_samples),
+        min_improvement_bps=3,
+    )
+    selected_stats = calculate_selected_stats(
         session=session,
         fund_code=fund_code,
-        window=window,
-        base=base,
+        start_date=start_date,
+        end_date=end_date,
+        selection_window=window,
     )
 
     summaries: list[BackfillSummary] = []
     fund = session.get(Fund, fund_code)
-    for stat in calibration_stats:
+    for stat in selected_stats:
+        from .models import SelectedEstimate
+
         latest_estimate = session.scalars(
-            select(FundEstimate)
+            select(SelectedEstimate)
             .where(
-                FundEstimate.fund_code == stat.fund_code,
-                FundEstimate.trade_date >= start_date,
-                FundEstimate.trade_date <= end_date,
+                SelectedEstimate.fund_code == stat.fund_code,
+                SelectedEstimate.trade_date >= start_date,
+                SelectedEstimate.trade_date <= end_date,
+                SelectedEstimate.selection_window == window,
             )
-            .order_by(FundEstimate.trade_date.desc())
+            .order_by(SelectedEstimate.trade_date.desc())
         ).first()
         confidence_level = None
         if latest_estimate is not None:
-            from .models import CalibratedEstimate
-
-            calibrated = session.scalars(
-                select(CalibratedEstimate)
-                .where(
-                    CalibratedEstimate.fund_code == stat.fund_code,
-                    CalibratedEstimate.trade_date == latest_estimate.trade_date,
-                    CalibratedEstimate.window == window,
-                    CalibratedEstimate.base_estimate_type == base,
-                )
-                .order_by(CalibratedEstimate.created_at.desc())
-            ).first()
-            confidence_level = calibrated.confidence_level if calibrated is not None else None
+            confidence_level = latest_estimate.confidence_level
 
         summaries.append(
             BackfillSummary(
@@ -188,13 +191,14 @@ def backfill_history(
                 fund_name=fund.fund_name if fund is not None else stat.fund_code,
                 start_date=start_date,
                 end_date=end_date,
-                estimate_sample_count=stat.sample_count,
+                sample_count=stat.sample_count,
                 raw_mean_abs_error=stat.raw_mean_abs_error,
+                coverage_mean_abs_error=stat.coverage_adjusted_mean_abs_error,
                 calibrated_mean_abs_error=stat.calibrated_mean_abs_error,
-                improvement_pct=stat.improvement_pct,
-                calibrated_direction_hit_rate=stat.calibrated_direction_hit_rate,
+                best_mean_abs_error=stat.best_mean_abs_error,
+                best_method_distribution=stat.best_method_distribution,
                 confidence_level=confidence_level,
             )
         )
 
-    return nav_report, quote_report, estimate_report, reconcile_report, calibration_count, summaries
+    return nav_report, quote_report, estimate_report, reconcile_report, calibration_count, selection_count, summaries

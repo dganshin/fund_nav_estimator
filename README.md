@@ -124,6 +124,9 @@ python3 src/main.py calibration-stats --window 20 --base raw
 python3 src/main.py calibration-stats --fund-code 002207 --window 20 --base coverage_adjusted --start-date 2026-04-22 --end-date 2026-05-20
 python3 src/main.py compare-estimates --fund-code 002207 --window 20 --base coverage_adjusted
 python3 src/main.py compare-estimates --fund-code 002207 --start-date 2026-04-22 --end-date 2026-05-20 --window 20 --base coverage_adjusted
+python3 src/main.py select-estimate --trade-date 2026-05-20 --fund-code 002207
+python3 src/main.py select-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-20 --selection-window 20
+python3 src/main.py selected-stats --fund-code 002207 --start-date 2026-04-22 --end-date 2026-05-20 --selection-window 20
 python3 src/main.py fetch-fund-navs --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
 python3 src/main.py fetch-stock-quotes --asset-code 600988.SH --start-date 2026-04-01 --end-date 2026-05-21
 python3 src/main.py fetch-stock-quotes --from-active-holdings --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
@@ -491,6 +494,120 @@ python3 src/main.py compare-estimates --fund-code 002207 --start-date 2026-04-01
 python3 src/main.py compare-estimates --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-20 --window 20 --base coverage_adjusted
 python3 src/main.py compare-estimates --fund-code 002207 --start-date 2026-04-22 --end-date 2026-05-20 --window 20 --base coverage_adjusted
 ```
+
+## 阶段 5: best_estimate
+
+为什么不能默认使用 `calibrated_estimate`:
+
+- `calibrated_estimate` 可能在某些区间优于 `coverage_adjusted_estimate`
+- 但也可能只是微弱领先, 甚至反而更差
+- 因此系统需要一个选择保护层, 而不是默认把回归结果当最终答案
+
+四种估值字段:
+
+- `raw_estimate`: 原始持仓估值
+- `coverage_adjusted_estimate`: 覆盖率修正估值
+- `calibrated_estimate`: 滚动校准估值
+- `best_estimate`: 三者中按历史表现选出的最终估值
+
+### best_method 选择规则
+
+- `selection_window`: 默认 `20`, 只看目标 `trade_date` 之前最近 20 个有效样本
+- `min_samples`: 默认 `10`, 样本不足时走 fallback
+- `min_improvement_bps`: 默认 `3`, 即 `0.03%`
+
+选择顺序:
+
+- 样本不足时:
+  - `coverage_adjusted_estimate` 可用则优先选它
+  - 否则退回 `raw_estimate`
+- 样本足够时:
+  - 先比较 `raw` 和 `coverage_adjusted`
+  - 只有当 `coverage_adjusted` 至少好 `3 bps` 才切换
+  - 再比较当前最佳 base 方法和 `calibrated`
+  - 只有当 `calibrated` 至少好 `3 bps` 才允许切换
+- 如果 `calibrated` 只是微弱领先, 会继续保留更简单更稳的 base 方法
+- 选择时不能使用当天和未来数据, 避免 look-ahead bias
+
+### select-estimate
+
+```bash
+python3 src/main.py select-estimate --trade-date 2026-05-20 --fund-code 002207
+python3 src/main.py select-estimate --trade-date 2026-05-20 --fund-code 002207 --selection-window 20
+python3 src/main.py select-estimate --trade-date 2026-05-20 --fund-code 002207 --min-samples 10
+python3 src/main.py select-estimate --trade-date 2026-05-20 --fund-code 002207 --min-improvement-bps 3
+```
+
+输出:
+
+- `raw`
+- `coverage`
+- `calibrated`
+- `best`
+- `方法`
+- `样本数`
+- `raw_MAE`
+- `coverage_MAE`
+- `calibrated_MAE`
+- `置信度`
+- `状态`
+- `理由`
+
+### select-history
+
+```bash
+python3 src/main.py select-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-20 --selection-window 20
+python3 src/main.py select-history --fund-code 002207 --start-date 2026-04-22 --end-date 2026-05-20 --selection-window 20
+```
+
+说明:
+
+- 对区间内每个交易日生成 `selected_estimates`
+- 每一天都只使用该日期之前的样本
+- 可重复运行, 不会生成重复脏数据
+
+### selected-stats
+
+```bash
+python3 src/main.py selected-stats --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-20 --selection-window 20
+python3 src/main.py selected-stats --fund-code 002207 --start-date 2026-04-22 --end-date 2026-05-20 --selection-window 20
+```
+
+输出:
+
+- `raw_MAE`
+- `coverage_MAE`
+- `calibrated_MAE`
+- `best_MAE`
+- `最优单一方法`
+- `best_method分布`
+- `best方向命中率`
+- `best_corr`
+
+`best_method分布` 示例:
+
+- `coverage_adjusted: 80%, calibrated: 20%`
+
+### backfill-history
+
+`backfill-history` 现在会自动执行:
+
+1. `fetch-fund-navs`
+2. `fetch-stock-quotes`
+3. `estimate-history`
+4. `reconcile-history`
+5. `calibrate-history`
+6. `select-history`
+7. `selected-stats`
+
+最终汇总优先展示:
+
+- `raw_MAE`
+- `coverage_MAE`
+- `calibrated_MAE`
+- `best_MAE`
+- `best方法分布`
+- `置信等级`
 
 ## 接口失败和缺失数据处理
 

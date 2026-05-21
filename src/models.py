@@ -30,6 +30,7 @@ class Fund(Base):
     asset_allocations: Mapped[list["FundAssetAllocation"]] = relationship(back_populates="fund")
     industry_allocations: Mapped[list["FundIndustryAllocation"]] = relationship(back_populates="fund")
     calibrated_estimates: Mapped[list["CalibratedEstimate"]] = relationship(back_populates="fund")
+    selected_estimates: Mapped[list["SelectedEstimate"]] = relationship(back_populates="fund")
 
 
 class HoldingVersion(Base):
@@ -241,3 +242,45 @@ class CalibratedEstimate(Base):
     )
 
     fund: Mapped["Fund"] = relationship(back_populates="calibrated_estimates")
+
+
+class SelectedEstimate(Base):
+    __tablename__ = "selected_estimates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False, index=True)
+    holding_version_id: Mapped[int] = mapped_column(ForeignKey("holding_versions.id"), nullable=False)
+    raw_estimate: Mapped[float] = mapped_column(Float, nullable=False)
+    coverage_adjusted_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calibrated_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    best_estimate: Mapped[float] = mapped_column(Float, nullable=False)
+    best_method: Mapped[str] = mapped_column(String(32), nullable=False)
+    selection_window: Mapped[int] = mapped_column(Integer, nullable=False)
+    min_samples: Mapped[int] = mapped_column(Integer, nullable=False)
+    min_improvement_bps: Mapped[int] = mapped_column(Integer, nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_mae: Mapped[float | None] = mapped_column(Float, nullable=True)
+    coverage_adjusted_mae: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calibrated_mae: Mapped[float | None] = mapped_column(Float, nullable=True)
+    raw_direction_hit_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    coverage_direction_hit_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calibrated_direction_hit_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    decision_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence_level: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    best_status: Mapped[str] = mapped_column(String(64), nullable=False)
+    warning_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "trade_date",
+            "fund_code",
+            "holding_version_id",
+            "selection_window",
+            name="uq_selected_estimate",
+        ),
+    )
+
+    fund: Mapped["Fund"] = relationship(back_populates="selected_estimates")

@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
-from .models import ActualReturn, CalibratedEstimate, DailyQuote, EstimateError, Fund, FundAssetAllocation, FundEstimate, HoldingVersion
+from .models import ActualReturn, CalibratedEstimate, DailyQuote, EstimateError, Fund, FundAssetAllocation, FundEstimate, HoldingVersion, SelectedEstimate
 
 
 @dataclass
@@ -135,6 +135,43 @@ class CompareEstimatesResult:
     raw_corr: float | None
     coverage_corr: float | None
     calibrated_corr: float | None
+
+
+@dataclass
+class SelectedEstimateResult:
+    fund_code: str
+    fund_name: str
+    raw_estimate: float
+    coverage_adjusted_estimate: float | None
+    calibrated_estimate: float | None
+    best_estimate: float
+    best_method: str
+    sample_count: int
+    raw_mae: float | None
+    coverage_adjusted_mae: float | None
+    calibrated_mae: float | None
+    confidence_score: float | None
+    confidence_level: str | None
+    best_status: str
+    decision_reason: str
+    warning_json: list[str]
+
+
+@dataclass
+class SelectedStatsResult:
+    fund_code: str
+    fund_name: str
+    start_date: date | None
+    end_date: date | None
+    sample_count: int
+    raw_mean_abs_error: float | None
+    coverage_adjusted_mean_abs_error: float | None
+    calibrated_mean_abs_error: float | None
+    best_mean_abs_error: float | None
+    best_single_method: str | None
+    best_method_distribution: str
+    best_direction_hit_rate: float | None
+    best_corr: float | None
 
 
 def format_percent(value: float | None, signed: bool = False) -> str:
@@ -1033,3 +1070,557 @@ def _pick_best_method(mae_by_method: dict[str, float | None]) -> str | None:
     if not available:
         return None
     return min(available, key=lambda item: item[1])[0]
+
+
+def build_selected_estimates(
+    session: Session,
+    trade_date: date,
+    fund_code: str | None = None,
+    selection_window: int = 20,
+    min_samples: int = 10,
+    min_improvement_bps: int = 3,
+) -> list[SelectedEstimateResult]:
+    stmt = (
+        select(FundEstimate, Fund)
+        .join(Fund, Fund.fund_code == FundEstimate.fund_code)
+        .where(FundEstimate.trade_date == trade_date)
+        .order_by(FundEstimate.fund_code.asc())
+    )
+    if fund_code:
+        stmt = stmt.where(FundEstimate.fund_code == fund_code)
+
+    results: list[SelectedEstimateResult] = []
+    improvement_threshold = min_improvement_bps / 10000.0
+
+    for estimate, fund in session.execute(stmt).all():
+        warnings: list[str] = []
+        coverage_adjusted_estimate, coverage_warnings = compute_coverage_adjusted_estimate(
+            session=session,
+            fund_code=estimate.fund_code,
+            trade_date=trade_date,
+            raw_estimate=estimate.raw_estimate,
+            covered_weight=estimate.covered_weight,
+        )
+        warnings.extend(coverage_warnings)
+
+        calibrated_row = _select_calibrated_row(
+            session=session,
+            fund_code=estimate.fund_code,
+            trade_date=trade_date,
+            holding_version_id=estimate.holding_version_id,
+            window=selection_window,
+        )
+        calibrated_estimate = None if calibrated_row is None else calibrated_row.calibrated_estimate
+        if calibrated_row is None:
+            warnings.append(
+                f"Warning: fund {estimate.fund_code} on {trade_date} is missing calibrated_estimate for window {selection_window}."
+            )
+
+        history_rows = _collect_selection_history(
+            session=session,
+            fund_code=estimate.fund_code,
+            trade_date=trade_date,
+            selection_window=selection_window,
+        )
+        sample_count = len(history_rows)
+        method_errors = _build_method_error_history(history_rows)
+        raw_mae = _calculate_mae_from_errors(method_errors["raw"])
+        coverage_mae = _calculate_mae_from_errors(method_errors["coverage_adjusted"])
+        calibrated_mae = _calculate_mae_from_errors(method_errors["calibrated"])
+        raw_hit_rate = _calculate_hit_rate_from_errors(method_errors["raw"])
+        coverage_hit_rate = _calculate_hit_rate_from_errors(method_errors["coverage_adjusted"])
+        calibrated_hit_rate = _calculate_hit_rate_from_errors(method_errors["calibrated"])
+
+        best_method = "raw"
+        best_estimate = estimate.raw_estimate
+        best_status = "ok"
+        decision_reason = "raw 为默认基线方法。"
+
+        if sample_count < min_samples:
+            if coverage_adjusted_estimate is not None:
+                best_method = "coverage_adjusted"
+                best_estimate = coverage_adjusted_estimate
+                decision_reason = "历史样本不足, coverage_adjusted 可用, 使用 coverage_adjusted fallback。"
+            else:
+                decision_reason = "历史样本不足, coverage_adjusted 不可用, 使用 raw fallback。"
+            best_status = "insufficient_samples_fallback"
+        else:
+            current_best_method = "raw"
+            current_best_estimate = estimate.raw_estimate
+            current_best_mae = raw_mae
+            current_reason = "raw 为默认基线方法。"
+
+            if (
+                coverage_adjusted_estimate is not None
+                and coverage_mae is not None
+                and raw_mae is not None
+                and len(method_errors["coverage_adjusted"]) >= min_samples
+            ):
+                if coverage_mae <= raw_mae - improvement_threshold:
+                    if _recent_underperform_count(
+                        candidate_errors=method_errors["coverage_adjusted"],
+                        baseline_errors=method_errors["raw"],
+                    ) >= 2:
+                        warnings.append(
+                            "Warning: coverage_adjusted recent underperform protection triggered, keep raw."
+                        )
+                    else:
+                        current_best_method = "coverage_adjusted"
+                        current_best_estimate = coverage_adjusted_estimate
+                        current_best_mae = coverage_mae
+                        current_reason = (
+                            f"coverage_adjusted 历史 MAE 比 raw 低 {format_percent(raw_mae - coverage_mae)},"
+                            f" 超过切换阈值 {min_improvement_bps} bps。"
+                        )
+                else:
+                    current_reason = (
+                        f"coverage_adjusted 相比 raw 的改进未超过切换阈值 {min_improvement_bps} bps, 保持 raw。"
+                    )
+
+            if (
+                calibrated_estimate is not None
+                and calibrated_mae is not None
+                and current_best_mae is not None
+                and len(method_errors["calibrated"]) >= min_samples
+            ):
+                if calibrated_mae <= current_best_mae - improvement_threshold:
+                    baseline_method = current_best_method
+                    if _recent_underperform_count(
+                        candidate_errors=method_errors["calibrated"],
+                        baseline_errors=method_errors[baseline_method],
+                    ) >= 2:
+                        warnings.append(
+                            "Warning: calibrated recent underperform protection triggered, keep base method."
+                        )
+                        best_status = "protected_switch_blocked"
+                    else:
+                        current_best_method = "calibrated"
+                        current_best_estimate = calibrated_estimate
+                        current_best_mae = calibrated_mae
+                        current_reason = (
+                            f"calibrated 历史 MAE 比 {baseline_method} 低 "
+                            f"{format_percent((method_errors_mae(method_errors[baseline_method]) or 0) - calibrated_mae)},"
+                            f" 超过切换阈值 {min_improvement_bps} bps。"
+                        )
+                else:
+                    baseline_label = current_best_method
+                    current_reason = (
+                        f"calibrated 仅小幅领先 {baseline_label}, 未超过切换阈值 {min_improvement_bps} bps,"
+                        f" 选择更稳的 {baseline_label}。"
+                    )
+
+            best_method = current_best_method
+            best_estimate = current_best_estimate
+            decision_reason = current_reason
+
+        best_mae = {
+            "raw": raw_mae,
+            "coverage_adjusted": coverage_mae,
+            "calibrated": calibrated_mae,
+        }.get(best_method)
+        best_hit_rate = {
+            "raw": raw_hit_rate,
+            "coverage_adjusted": coverage_hit_rate,
+            "calibrated": calibrated_hit_rate,
+        }.get(best_method)
+        best_corr = _calculate_corr_from_error_history(method_errors[best_method])
+        confidence_score, confidence_level = determine_selected_confidence(
+            sample_count=sample_count,
+            min_samples=min_samples,
+            mean_abs_error=best_mae,
+            direction_hit_rate=best_hit_rate,
+            corr=best_corr,
+            best_status=best_status,
+        )
+
+        selected_row = upsert_selected_estimate(
+            session=session,
+            trade_date=trade_date,
+            fund_code=estimate.fund_code,
+            holding_version_id=estimate.holding_version_id,
+            selection_window=selection_window,
+        )
+        selected_row.raw_estimate = estimate.raw_estimate
+        selected_row.coverage_adjusted_estimate = coverage_adjusted_estimate
+        selected_row.calibrated_estimate = calibrated_estimate
+        selected_row.best_estimate = round(best_estimate, 8)
+        selected_row.best_method = best_method
+        selected_row.selection_window = selection_window
+        selected_row.min_samples = min_samples
+        selected_row.min_improvement_bps = min_improvement_bps
+        selected_row.sample_count = sample_count
+        selected_row.raw_mae = None if raw_mae is None else round(raw_mae, 8)
+        selected_row.coverage_adjusted_mae = None if coverage_mae is None else round(coverage_mae, 8)
+        selected_row.calibrated_mae = None if calibrated_mae is None else round(calibrated_mae, 8)
+        selected_row.raw_direction_hit_rate = raw_hit_rate
+        selected_row.coverage_direction_hit_rate = coverage_hit_rate
+        selected_row.calibrated_direction_hit_rate = calibrated_hit_rate
+        selected_row.decision_reason = decision_reason
+        selected_row.confidence_score = confidence_score
+        selected_row.confidence_level = confidence_level
+        selected_row.best_status = best_status
+        selected_row.warning_json = json.dumps(warnings, ensure_ascii=False)
+        selected_row.created_at = datetime.now(UTC).replace(tzinfo=None)
+
+        results.append(
+            SelectedEstimateResult(
+                fund_code=estimate.fund_code,
+                fund_name=fund.fund_name,
+                raw_estimate=estimate.raw_estimate,
+                coverage_adjusted_estimate=coverage_adjusted_estimate,
+                calibrated_estimate=calibrated_estimate,
+                best_estimate=selected_row.best_estimate,
+                best_method=best_method,
+                sample_count=sample_count,
+                raw_mae=raw_mae,
+                coverage_adjusted_mae=coverage_mae,
+                calibrated_mae=calibrated_mae,
+                confidence_score=confidence_score,
+                confidence_level=confidence_level,
+                best_status=best_status,
+                decision_reason=decision_reason,
+                warning_json=warnings,
+            )
+        )
+
+    session.commit()
+    return results
+
+
+def build_selection_history(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    fund_code: str | None = None,
+    selection_window: int = 20,
+    min_samples: int = 10,
+    min_improvement_bps: int = 3,
+) -> int:
+    stmt = select(FundEstimate.trade_date).where(
+        FundEstimate.trade_date >= start_date,
+        FundEstimate.trade_date <= end_date,
+    )
+    if fund_code:
+        stmt = stmt.where(FundEstimate.fund_code == fund_code)
+    trade_dates = sorted({item[0] for item in session.execute(stmt).all()})
+
+    total_count = 0
+    for current_trade_date in trade_dates:
+        results = build_selected_estimates(
+            session=session,
+            trade_date=current_trade_date,
+            fund_code=fund_code,
+            selection_window=selection_window,
+            min_samples=min_samples,
+            min_improvement_bps=min_improvement_bps,
+        )
+        total_count += len(results)
+    return total_count
+
+
+def calculate_selected_stats(
+    session: Session,
+    fund_code: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    selection_window: int = 20,
+) -> list[SelectedStatsResult]:
+    stmt = (
+        select(SelectedEstimate, ActualReturn, Fund)
+        .join(
+            ActualReturn,
+            and_(
+                ActualReturn.trade_date == SelectedEstimate.trade_date,
+                ActualReturn.fund_code == SelectedEstimate.fund_code,
+            ),
+        )
+        .join(Fund, Fund.fund_code == SelectedEstimate.fund_code)
+        .where(SelectedEstimate.selection_window == selection_window)
+        .order_by(SelectedEstimate.fund_code.asc(), SelectedEstimate.trade_date.asc())
+    )
+    if fund_code:
+        stmt = stmt.where(SelectedEstimate.fund_code == fund_code)
+    if start_date is not None:
+        stmt = stmt.where(SelectedEstimate.trade_date >= start_date)
+    if end_date is not None:
+        stmt = stmt.where(SelectedEstimate.trade_date <= end_date)
+
+    grouped_rows: dict[str, tuple[str, list[tuple[SelectedEstimate, ActualReturn]]]] = {}
+    for selected_row, actual, fund in session.execute(stmt).all():
+        grouped_rows.setdefault(selected_row.fund_code, (fund.fund_name, []))[1].append((selected_row, actual))
+
+    results: list[SelectedStatsResult] = []
+    for current_fund_code, (fund_name, rows) in grouped_rows.items():
+        raw_pairs = [(row.raw_estimate, actual.actual_return) for row, actual in rows]
+        coverage_pairs = [
+            (row.coverage_adjusted_estimate, actual.actual_return)
+            for row, actual in rows
+            if row.coverage_adjusted_estimate is not None
+        ]
+        calibrated_pairs = [
+            (row.calibrated_estimate, actual.actual_return)
+            for row, actual in rows
+            if row.calibrated_estimate is not None
+        ]
+        best_pairs = [(row.best_estimate, actual.actual_return) for row, actual in rows]
+
+        raw_mae = _calculate_mae(raw_pairs)
+        coverage_mae = _calculate_mae(coverage_pairs)
+        calibrated_mae = _calculate_mae(calibrated_pairs)
+        best_mae = _calculate_mae(best_pairs)
+        best_single_method = _pick_best_method(
+            {
+                "raw": raw_mae,
+                "coverage_adjusted": coverage_mae,
+                "calibrated": calibrated_mae,
+            }
+        )
+        distribution = _format_best_method_distribution([row.best_method for row, _ in rows])
+
+        results.append(
+            SelectedStatsResult(
+                fund_code=current_fund_code,
+                fund_name=fund_name,
+                start_date=rows[0][0].trade_date,
+                end_date=rows[-1][0].trade_date,
+                sample_count=len(rows),
+                raw_mean_abs_error=raw_mae,
+                coverage_adjusted_mean_abs_error=coverage_mae,
+                calibrated_mean_abs_error=calibrated_mae,
+                best_mean_abs_error=best_mae,
+                best_single_method=best_single_method,
+                best_method_distribution=distribution,
+                best_direction_hit_rate=_calculate_hit_rate(best_pairs),
+                best_corr=_calculate_corr_from_pairs(best_pairs),
+            )
+        )
+
+    return results
+
+
+def upsert_selected_estimate(
+    session: Session,
+    trade_date: date,
+    fund_code: str,
+    holding_version_id: int,
+    selection_window: int,
+) -> SelectedEstimate:
+    selected_row = session.scalar(
+        select(SelectedEstimate).where(
+            SelectedEstimate.trade_date == trade_date,
+            SelectedEstimate.fund_code == fund_code,
+            SelectedEstimate.holding_version_id == holding_version_id,
+            SelectedEstimate.selection_window == selection_window,
+        )
+    )
+    if selected_row is None:
+        selected_row = SelectedEstimate(
+            trade_date=trade_date,
+            fund_code=fund_code,
+            holding_version_id=holding_version_id,
+            selection_window=selection_window,
+        )
+        session.add(selected_row)
+    return selected_row
+
+
+def determine_selected_confidence(
+    sample_count: int,
+    min_samples: int,
+    mean_abs_error: float | None,
+    direction_hit_rate: float | None,
+    corr: float | None,
+    best_status: str,
+) -> tuple[float | None, str | None]:
+    if best_status != "ok":
+        if sample_count >= 5:
+            return 0.55, "C"
+        return 0.25, "D"
+    if (
+        sample_count >= 20
+        and mean_abs_error is not None
+        and mean_abs_error <= 0.003
+        and direction_hit_rate is not None
+        and direction_hit_rate >= 0.75
+        and corr is not None
+        and corr >= 0.70
+    ):
+        return 0.9, "A"
+    if (
+        sample_count >= max(10, min_samples)
+        and mean_abs_error is not None
+        and mean_abs_error <= 0.006
+        and direction_hit_rate is not None
+        and direction_hit_rate >= 0.65
+    ):
+        return 0.75, "B"
+    if sample_count >= 5:
+        return 0.6, "C"
+    return 0.25, "D"
+
+
+def _select_calibrated_row(
+    session: Session,
+    fund_code: str,
+    trade_date: date,
+    holding_version_id: int,
+    window: int,
+    base_type: str = "coverage_adjusted",
+) -> CalibratedEstimate | None:
+    return session.scalar(
+        select(CalibratedEstimate).where(
+            CalibratedEstimate.trade_date == trade_date,
+            CalibratedEstimate.fund_code == fund_code,
+            CalibratedEstimate.holding_version_id == holding_version_id,
+            CalibratedEstimate.window == window,
+            CalibratedEstimate.base_estimate_type == base_type,
+        )
+    )
+
+
+def _collect_selection_history(
+    session: Session,
+    fund_code: str,
+    trade_date: date,
+    selection_window: int,
+) -> list[dict[str, float | date | None]]:
+    stmt = (
+        select(FundEstimate, ActualReturn, CalibratedEstimate)
+        .join(
+            ActualReturn,
+            and_(
+                ActualReturn.trade_date == FundEstimate.trade_date,
+                ActualReturn.fund_code == FundEstimate.fund_code,
+            ),
+        )
+        .join(
+            CalibratedEstimate,
+            and_(
+                CalibratedEstimate.trade_date == FundEstimate.trade_date,
+                CalibratedEstimate.fund_code == FundEstimate.fund_code,
+                CalibratedEstimate.holding_version_id == FundEstimate.holding_version_id,
+                CalibratedEstimate.window == selection_window,
+                CalibratedEstimate.base_estimate_type == "coverage_adjusted",
+            ),
+            isouter=True,
+        )
+        .where(
+            FundEstimate.fund_code == fund_code,
+            FundEstimate.trade_date < trade_date,
+        )
+        .order_by(FundEstimate.trade_date.desc())
+    )
+    rows = session.execute(stmt).all()[:selection_window]
+    history: list[dict[str, float | date | None]] = []
+    for estimate, actual, calibrated in rows:
+        coverage_estimate = None
+        if calibrated is not None and calibrated.coverage_adjusted_estimate is not None:
+            coverage_estimate = calibrated.coverage_adjusted_estimate
+        else:
+            coverage_estimate, _ = compute_coverage_adjusted_estimate(
+                session=session,
+                fund_code=estimate.fund_code,
+                trade_date=estimate.trade_date,
+                raw_estimate=estimate.raw_estimate,
+                covered_weight=estimate.covered_weight,
+            )
+        history.append(
+            {
+                "trade_date": estimate.trade_date,
+                "actual_return": actual.actual_return,
+                "raw_estimate": estimate.raw_estimate,
+                "coverage_adjusted_estimate": coverage_estimate,
+                "calibrated_estimate": None if calibrated is None else calibrated.calibrated_estimate,
+            }
+        )
+    history.reverse()
+    return history
+
+
+def _build_method_error_history(
+    history_rows: list[dict[str, float | date | None]],
+) -> dict[str, list[dict[str, float | date]]]:
+    history: dict[str, list[dict[str, float | date]]] = {
+        "raw": [],
+        "coverage_adjusted": [],
+        "calibrated": [],
+    }
+    for row in history_rows:
+        actual_return = row["actual_return"]
+        for method_name, field_name in (
+            ("raw", "raw_estimate"),
+            ("coverage_adjusted", "coverage_adjusted_estimate"),
+            ("calibrated", "calibrated_estimate"),
+        ):
+            estimate = row[field_name]
+            if estimate is None:
+                continue
+            history[method_name].append(
+                {
+                    "trade_date": row["trade_date"],
+                    "estimate": float(estimate),
+                    "actual_return": float(actual_return),
+                    "abs_error": abs(float(actual_return) - float(estimate)),
+                }
+            )
+    return history
+
+
+def _calculate_mae_from_errors(error_history: list[dict[str, float | date]]) -> float | None:
+    if not error_history:
+        return None
+    return sum(float(item["abs_error"]) for item in error_history) / len(error_history)
+
+
+def _calculate_hit_rate_from_errors(error_history: list[dict[str, float | date]]) -> float | None:
+    if not error_history:
+        return None
+    return sum(
+        1
+        for item in error_history
+        if is_direction_hit(float(item["estimate"]), float(item["actual_return"]))
+    ) / len(error_history)
+
+
+def _calculate_corr_from_error_history(error_history: list[dict[str, float | date]]) -> float | None:
+    if not error_history:
+        return None
+    return calculate_correlation(
+        [float(item["estimate"]) for item in error_history],
+        [float(item["actual_return"]) for item in error_history],
+    )
+
+
+def _recent_underperform_count(
+    candidate_errors: list[dict[str, float | date]],
+    baseline_errors: list[dict[str, float | date]],
+    threshold: float = 0.001,
+) -> int:
+    baseline_by_date = {item["trade_date"]: float(item["abs_error"]) for item in baseline_errors}
+    shared = [
+        item for item in candidate_errors
+        if item["trade_date"] in baseline_by_date
+    ]
+    shared = shared[-3:]
+    return sum(
+        1
+        for item in shared
+        if float(item["abs_error"]) > baseline_by_date[item["trade_date"]] + threshold
+    )
+
+
+def method_errors_mae(error_history: list[dict[str, float | date]]) -> float | None:
+    return _calculate_mae_from_errors(error_history)
+
+
+def _format_best_method_distribution(methods: list[str]) -> str:
+    if not methods:
+        return "N/A"
+    total = len(methods)
+    parts: list[str] = []
+    for method in ("coverage_adjusted", "calibrated", "raw"):
+        count = sum(1 for item in methods if item == method)
+        if count == 0:
+            continue
+        parts.append(f"{method}: {count / total * 100:.0f}%")
+    return ", ".join(parts) if parts else "N/A"

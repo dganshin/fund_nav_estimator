@@ -276,8 +276,8 @@ def test_backfill_history_flow_order_and_idempotency(tmp_path):
     assert quote_count == 6
     assert estimate_count == 3
     assert error_count == 2
-    assert first[5][0].fund_code == "002207"
-    assert second[5][0].fund_code == "002207"
+    assert first[6][0].fund_code == "002207"
+    assert second[6][0].fund_code == "002207"
 
 
 def test_empty_data_source_does_not_write_bad_rows(tmp_path):
