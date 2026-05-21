@@ -1,5 +1,13 @@
 trade_date,fund_code,actual_return_pct,source
-2026-05-20,000001,0.36,manual_sample
-2026-05-20,000002,0.80,manual_sample
-2026-05-21,000001,0.62,manual_sample
-2026-05-21,000002,0.80,manual_sample
+2026-05-16,000001,0.4524,manual_sample
+2026-05-17,000001,0.5580,manual_sample
+2026-05-18,000001,-0.2868,manual_sample
+2026-05-19,000001,0.8220,manual_sample
+2026-05-20,000001,0.3468,manual_sample
+2026-05-21,000001,0.5580,manual_sample
+2026-05-16,000002,0.7264,manual_sample
+2026-05-17,000002,0.9080,manual_sample
+2026-05-18,000002,-0.5448,manual_sample
+2026-05-19,000002,1.3620,manual_sample
+2026-05-20,000002,0.5448,manual_sample
+2026-05-21,000002,0.9080,manual_sample

@@ -11,7 +11,7 @@ import yaml
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import ActualReturn, DailyQuote, Fund, FundNav, HoldingItem, HoldingVersion
+from .models import ActualReturn, DailyQuote, Fund, FundAssetAllocation, FundIndustryAllocation, FundNav, HoldingItem, HoldingVersion
 
 
 class DataImportError(ValueError):
@@ -454,3 +454,173 @@ def import_navs_from_csv(session: Session, csv_path: str | Path) -> ImportReport
         warnings=warnings,
         generated_actual_returns=generated_actual_returns,
     )
+
+
+def parse_optional_percent_to_decimal(
+    row: dict[str, str],
+    field_name: str,
+    row_number: int,
+    csv_path: Path,
+) -> float:
+    raw_value = row.get(field_name)
+    if raw_value is None or raw_value.strip() == "":
+        return 0.0
+    return parse_percent_to_decimal(raw_value, field_name, row_number, csv_path)
+
+
+def import_asset_allocations_from_csv(session: Session, csv_path: str | Path) -> int:
+    csv_file = Path(csv_path)
+    required_fields = ["fund_code", "report_date", "source"]
+    rows_by_key: dict[tuple[str, date, str], dict[str, float]] = {}
+    latest_keys: dict[str, tuple[str, date, str]] = {}
+
+    with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        validate_required_columns(reader.fieldnames, required_fields, csv_file)
+
+        for row_number, row in enumerate(reader, start=2):
+            fund_code = read_required_value(row, "fund_code", row_number, csv_file)
+            report_date = parse_csv_date(
+                read_required_value(row, "report_date", row_number, csv_file),
+                "report_date",
+                row_number,
+                csv_file,
+            )
+            source = read_required_value(row, "source", row_number, csv_file)
+            if session.get(Fund, fund_code) is None:
+                raise DataImportError(f"Fund {fund_code} not found. Import funds first.")
+
+            key = (fund_code, report_date, source)
+            rows_by_key[key] = {
+                "stock_weight": parse_optional_percent_to_decimal(row, "stock_weight_pct", row_number, csv_file),
+                "bond_weight": parse_optional_percent_to_decimal(row, "bond_weight_pct", row_number, csv_file),
+                "cash_weight": parse_optional_percent_to_decimal(row, "cash_weight_pct", row_number, csv_file),
+                "other_weight": parse_optional_percent_to_decimal(row, "other_weight_pct", row_number, csv_file),
+            }
+
+            latest_key = latest_keys.get(fund_code)
+            if latest_key is None or (report_date, source) > (latest_key[1], latest_key[2]):
+                latest_keys[fund_code] = key
+
+    count = 0
+    for key, weights in rows_by_key.items():
+        fund_code, report_date, source = key
+        allocation = session.scalar(
+            select(FundAssetAllocation).where(
+                FundAssetAllocation.fund_code == fund_code,
+                FundAssetAllocation.report_date == report_date,
+                FundAssetAllocation.source == source,
+            )
+        )
+        if allocation is None:
+            allocation = FundAssetAllocation(
+                fund_code=fund_code,
+                report_date=report_date,
+                source=source,
+            )
+            session.add(allocation)
+
+        allocation.stock_weight = weights["stock_weight"]
+        allocation.bond_weight = weights["bond_weight"]
+        allocation.cash_weight = weights["cash_weight"]
+        allocation.other_weight = weights["other_weight"]
+        allocation.is_active = latest_keys[fund_code] == key
+        count += 1
+
+    for fund_code, latest_key in latest_keys.items():
+        session.query(FundAssetAllocation).filter(
+            FundAssetAllocation.fund_code == fund_code,
+        ).update({"is_active": False}, synchronize_session=False)
+        session.query(FundAssetAllocation).filter(
+            FundAssetAllocation.fund_code == fund_code,
+            FundAssetAllocation.report_date == latest_key[1],
+            FundAssetAllocation.source == latest_key[2],
+        ).update({"is_active": True}, synchronize_session=False)
+
+    session.commit()
+    return count
+
+
+def import_industry_allocations_from_csv(session: Session, csv_path: str | Path) -> int:
+    csv_file = Path(csv_path)
+    required_fields = ["fund_code", "report_date", "source", "industry_name", "weight_pct"]
+    grouped_rows: dict[tuple[str, date, str], list[dict[str, str]]] = defaultdict(list)
+    latest_keys: dict[str, tuple[str, date, str]] = {}
+
+    with csv_file.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        validate_required_columns(reader.fieldnames, required_fields, csv_file)
+
+        for row_number, row in enumerate(reader, start=2):
+            fund_code = read_required_value(row, "fund_code", row_number, csv_file)
+            report_date = parse_csv_date(
+                read_required_value(row, "report_date", row_number, csv_file),
+                "report_date",
+                row_number,
+                csv_file,
+            )
+            source = read_required_value(row, "source", row_number, csv_file)
+            if session.get(Fund, fund_code) is None:
+                raise DataImportError(f"Fund {fund_code} not found. Import funds first.")
+
+            key = (fund_code, report_date, source)
+            grouped_rows[key].append(
+                {
+                    "industry_name": read_required_value(row, "industry_name", row_number, csv_file),
+                    "industry_code": read_optional_value(row, "industry_code") or "",
+                    "weight": f"{parse_percent_to_decimal(read_required_value(row, 'weight_pct', row_number, csv_file), 'weight_pct', row_number, csv_file):.12f}",
+                }
+            )
+
+            latest_key = latest_keys.get(fund_code)
+            if latest_key is None or (report_date, source) > (latest_key[1], latest_key[2]):
+                latest_keys[fund_code] = key
+
+    count = 0
+    for key, rows in grouped_rows.items():
+        fund_code, report_date, source = key
+        allocation_rows = session.scalars(
+            select(FundIndustryAllocation).where(
+                FundIndustryAllocation.fund_code == fund_code,
+                FundIndustryAllocation.report_date == report_date,
+                FundIndustryAllocation.source == source,
+            )
+        ).all()
+        for allocation in allocation_rows:
+            session.delete(allocation)
+        session.flush()
+
+        seen_industries: set[tuple[str, str]] = set()
+        for row in rows:
+            industry_key = (row["industry_name"], row["industry_code"])
+            if industry_key in seen_industries:
+                raise DataImportError(
+                    f"{csv_path} duplicate industry allocation {industry_key} for fund {fund_code} "
+                    f"report_date {report_date} source {source}."
+                )
+            seen_industries.add(industry_key)
+            session.add(
+                FundIndustryAllocation(
+                    fund_code=fund_code,
+                    report_date=report_date,
+                    source=source,
+                    industry_name=row["industry_name"],
+                    industry_code=row["industry_code"] or None,
+                    weight=float(row["weight"]),
+                    is_active=latest_keys[fund_code] == key,
+                )
+            )
+            count += 1
+
+    for fund_code, latest_key in latest_keys.items():
+        session.query(FundIndustryAllocation).filter(
+            FundIndustryAllocation.fund_code == fund_code,
+        ).update({"is_active": False}, synchronize_session=False)
+        session.query(FundIndustryAllocation).filter(
+            FundIndustryAllocation.fund_code == fund_code,
+            FundIndustryAllocation.report_date == latest_key[1],
+            FundIndustryAllocation.source == latest_key[2],
+        ).update({"is_active": True}, synchronize_session=False)
+
+    session.commit()
+    return count

@@ -1,0 +1,3 @@
+fund_code,report_date,source,stock_weight_pct,bond_weight_pct,cash_weight_pct,other_weight_pct
+000001,2026-03-31,official_q1_report,60.00,20.00,18.00,2.00
+000002,2026-03-31,official_q1_report,90.80,0.00,8.50,0.70

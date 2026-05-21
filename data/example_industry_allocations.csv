@@ -1,0 +1,7 @@
+fund_code,report_date,source,industry_name,industry_code,weight_pct
+000001,2026-03-31,official_q1_report,消费品制造,C13,32.00
+000001,2026-03-31,official_q1_report,金融服务,J66,16.00
+000001,2026-03-31,official_q1_report,信息技术服务,I65,12.00
+000002,2026-03-31,official_q1_report,半导体,C39,58.30
+000002,2026-03-31,official_q1_report,通信设备,C40,21.40
+000002,2026-03-31,official_q1_report,人工智能软件,I65,11.10

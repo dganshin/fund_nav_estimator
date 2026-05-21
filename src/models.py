@@ -27,6 +27,9 @@ class Fund(Base):
     estimates: Mapped[list["FundEstimate"]] = relationship(back_populates="fund")
     actual_returns: Mapped[list["ActualReturn"]] = relationship(back_populates="fund")
     navs: Mapped[list["FundNav"]] = relationship(back_populates="fund")
+    asset_allocations: Mapped[list["FundAssetAllocation"]] = relationship(back_populates="fund")
+    industry_allocations: Mapped[list["FundIndustryAllocation"]] = relationship(back_populates="fund")
+    calibrated_estimates: Mapped[list["CalibratedEstimate"]] = relationship(back_populates="fund")
 
 
 class HoldingVersion(Base):
@@ -136,6 +139,54 @@ class FundNav(Base):
     fund: Mapped["Fund"] = relationship(back_populates="navs")
 
 
+class FundAssetAllocation(Base):
+    __tablename__ = "fund_asset_allocations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False, index=True)
+    report_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    stock_weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    bond_weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    cash_weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    other_weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        UniqueConstraint("fund_code", "report_date", "source", name="uq_fund_asset_allocation"),
+    )
+
+    fund: Mapped["Fund"] = relationship(back_populates="asset_allocations")
+
+
+class FundIndustryAllocation(Base):
+    __tablename__ = "fund_industry_allocations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False, index=True)
+    report_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    industry_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    industry_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    weight: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "fund_code",
+            "report_date",
+            "source",
+            "industry_name",
+            "industry_code",
+            name="uq_fund_industry_allocation",
+        ),
+    )
+
+    fund: Mapped["Fund"] = relationship(back_populates="industry_allocations")
+
+
 class EstimateError(Base):
     __tablename__ = "estimate_errors"
 
@@ -150,3 +201,43 @@ class EstimateError(Base):
     __table_args__ = (
         PrimaryKeyConstraint("trade_date", "fund_code", name="pk_estimate_errors"),
     )
+
+
+class CalibratedEstimate(Base):
+    __tablename__ = "calibrated_estimates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False, index=True)
+    holding_version_id: Mapped[int] = mapped_column(ForeignKey("holding_versions.id"), nullable=False)
+    base_estimate_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    raw_estimate: Mapped[float] = mapped_column(Float, nullable=False)
+    coverage_adjusted_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calibrated_estimate: Mapped[float] = mapped_column(Float, nullable=False)
+    alpha: Mapped[float] = mapped_column(Float, nullable=False)
+    beta: Mapped[float] = mapped_column(Float, nullable=False)
+    window: Mapped[int] = mapped_column(Integer, nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    train_start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    train_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    mean_abs_error: Mapped[float | None] = mapped_column(Float, nullable=True)
+    direction_hit_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    estimate_actual_corr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    model_status: Mapped[str] = mapped_column(String(64), nullable=False)
+    warning_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    confidence_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence_level: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "trade_date",
+            "fund_code",
+            "holding_version_id",
+            "base_estimate_type",
+            "window",
+            name="uq_calibrated_estimate",
+        ),
+    )
+
+    fund: Mapped["Fund"] = relationship(back_populates="calibrated_estimates")
