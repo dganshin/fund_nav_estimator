@@ -25,6 +25,7 @@ if __package__ in {None, ""}:
         build_estimate_history,
         build_reconcile_history,
         calculate_calibration_stats,
+        calculate_compare_estimates,
         calculate_error_stats,
         format_hit_rate,
         format_missing_assets,
@@ -62,6 +63,7 @@ else:
         build_estimate_history,
         build_reconcile_history,
         calculate_calibration_stats,
+        calculate_compare_estimates,
         calculate_error_stats,
         format_hit_rate,
         format_missing_assets,
@@ -145,6 +147,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser_stats = subparsers.add_parser("stats", help="Show historical estimate error stats")
     parser_stats.add_argument("--fund-code")
     parser_stats.add_argument("--window", type=int)
+    parser_stats.add_argument("--start-date")
+    parser_stats.add_argument("--end-date")
 
     parser_calibrate = subparsers.add_parser("calibrate", help="Build calibrated estimates")
     parser_calibrate.add_argument("--trade-date", required=True)
@@ -165,6 +169,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser_calibration_stats.add_argument("--fund-code")
     parser_calibration_stats.add_argument("--window", type=int, default=20)
     parser_calibration_stats.add_argument("--base", choices=["raw", "coverage_adjusted"], default="raw")
+    parser_calibration_stats.add_argument("--start-date")
+    parser_calibration_stats.add_argument("--end-date")
+
+    parser_compare = subparsers.add_parser("compare-estimates", help="Compare raw, coverage_adjusted, and calibrated estimates")
+    parser_compare.add_argument("--fund-code")
+    parser_compare.add_argument("--window", type=int, default=20)
+    parser_compare.add_argument("--base", choices=["raw", "coverage_adjusted"], default="coverage_adjusted")
+    parser_compare.add_argument("--start-date")
+    parser_compare.add_argument("--end-date")
 
     parser_fetch_navs = subparsers.add_parser("fetch-fund-navs", help="Fetch historical fund navs from data source")
     parser_fetch_navs.add_argument("--fund-code", required=True)
@@ -294,18 +307,43 @@ def print_calibration_table(results) -> None:
 
 
 def print_calibration_stats_table(results) -> None:
-    headers = ["基金代码", "基金名称", "样本数", "raw_MAE", "calibrated_MAE", "改进比例", "raw_方向命中率", "calibrated_方向命中率", "raw_corr", "calibrated_corr"]
+    headers = ["基金代码", "基金名称", "样本数", "base类型", "base_MAE", "calibrated_MAE", "改进比例", "base方向命中率", "calibrated方向命中率", "base_corr", "calibrated_corr"]
     rows = [
         [
             result.fund_code,
             result.fund_name,
             str(result.sample_count),
-            format_percent(result.raw_mean_abs_error),
+            result.base_estimate_type,
+            format_percent(result.base_mean_abs_error),
             format_percent(result.calibrated_mean_abs_error),
             format_percent(result.improvement_pct, signed=True),
+            format_hit_rate(result.base_direction_hit_rate),
+            format_hit_rate(result.calibrated_direction_hit_rate),
+            format_ratio(result.base_corr),
+            format_ratio(result.calibrated_corr),
+        ]
+        for result in results
+    ]
+    print_table(headers, rows)
+
+
+def print_compare_estimates_table(results) -> None:
+    headers = ["基金代码", "基金名称", "日期区间", "样本数", "raw_MAE", "coverage_adjusted_MAE", "calibrated_MAE", "最优方法", "raw方向命中率", "coverage方向命中率", "calibrated方向命中率", "raw_corr", "coverage_corr", "calibrated_corr"]
+    rows = [
+        [
+            result.fund_code,
+            result.fund_name,
+            f"{result.start_date.isoformat()}~{result.end_date.isoformat()}" if result.start_date and result.end_date else "N/A",
+            str(result.sample_count),
+            format_percent(result.raw_mean_abs_error),
+            format_percent(result.coverage_adjusted_mean_abs_error),
+            format_percent(result.calibrated_mean_abs_error),
+            result.best_method or "N/A",
             format_hit_rate(result.raw_direction_hit_rate),
+            format_hit_rate(result.coverage_direction_hit_rate),
             format_hit_rate(result.calibrated_direction_hit_rate),
             format_ratio(result.raw_corr),
+            format_ratio(result.coverage_corr),
             format_ratio(result.calibrated_corr),
         ]
         for result in results
@@ -567,6 +605,8 @@ def main() -> None:
                     session,
                     fund_code=args.fund_code,
                     window=args.window,
+                    start_date=parse_date(args.start_date) if args.start_date else None,
+                    end_date=parse_date(args.end_date) if args.end_date else None,
                 )
                 print_stats_table(results)
             elif args.command == "calibrate":
@@ -598,8 +638,20 @@ def main() -> None:
                     fund_code=args.fund_code,
                     window=args.window,
                     base=args.base,
+                    start_date=parse_date(args.start_date) if args.start_date else None,
+                    end_date=parse_date(args.end_date) if args.end_date else None,
                 )
                 print_calibration_stats_table(results)
+            elif args.command == "compare-estimates":
+                results = calculate_compare_estimates(
+                    session,
+                    fund_code=args.fund_code,
+                    window=args.window,
+                    base=args.base,
+                    start_date=parse_date(args.start_date) if args.start_date else None,
+                    end_date=parse_date(args.end_date) if args.end_date else None,
+                )
+                print_compare_estimates_table(results)
             elif args.command == "fetch-fund-navs":
                 data_source = AKShareDataSource()
                 report = fetch_and_store_fund_navs(

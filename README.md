@@ -113,6 +113,7 @@ python3 src/main.py reconcile-history --fund-code 002207 --start-date 2026-04-01
 python3 src/main.py stats
 python3 src/main.py stats --fund-code 000001
 python3 src/main.py stats --window 20
+python3 src/main.py stats --fund-code 002207 --start-date 2026-04-22 --end-date 2026-05-20
 python3 src/main.py calibrate --trade-date 2026-05-21
 python3 src/main.py calibrate --trade-date 2026-05-21 --window 20
 python3 src/main.py calibrate --trade-date 2026-05-21 --base coverage_adjusted
@@ -120,6 +121,9 @@ python3 src/main.py calibrate-history --start-date 2026-05-16 --end-date 2026-05
 python3 src/main.py calibration-stats
 python3 src/main.py calibration-stats --fund-code 000001
 python3 src/main.py calibration-stats --window 20 --base raw
+python3 src/main.py calibration-stats --fund-code 002207 --window 20 --base coverage_adjusted --start-date 2026-04-22 --end-date 2026-05-20
+python3 src/main.py compare-estimates --fund-code 002207 --window 20 --base coverage_adjusted
+python3 src/main.py compare-estimates --fund-code 002207 --start-date 2026-04-22 --end-date 2026-05-20 --window 20 --base coverage_adjusted
 python3 src/main.py fetch-fund-navs --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
 python3 src/main.py fetch-stock-quotes --asset-code 600988.SH --start-date 2026-04-01 --end-date 2026-05-21
 python3 src/main.py fetch-stock-quotes --from-active-holdings --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
@@ -427,12 +431,66 @@ python3 src/main.py estimate-history --fund-code 002207 --start-date 2026-04-01 
 python3 src/main.py reconcile-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
 python3 src/main.py calibrate-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21 --window 20 --base coverage_adjusted
 python3 src/main.py calibration-stats --fund-code 002207 --window 20 --base coverage_adjusted
+python3 src/main.py compare-estimates --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-20 --window 20 --base coverage_adjusted
 ```
 
 注意:
 
 - 仓库不硬编码真实净值或真实抓取结果
 - 真实抓取结果只会写到本地数据库和 `data/raw/akshare/`
+
+## 阶段 4.1 评估口径
+
+### 实用校准口径
+
+- 对 `002207` 使用 `2026-04-01` 之后的数据
+- 因为持仓报告期末是 `2026-03-31`
+- 适合当前提高估值准确度
+
+### 严格回测口径
+
+- 对 `002207` 使用 `2026-04-22` 之后的数据
+- 因为 `2026` 年一季报披露日是 `2026-04-22`
+- 适合避免 look-ahead bias
+
+注意:
+
+- 不要用 `2026-03-31` 这版持仓去回填 `2025` 年数据
+- 如果 `holding_version.report_date` 晚于回填区间, 系统会跳过该基金并给 warning
+- `002207` 的真实回填示例日期统一使用 `2026`
+
+### calibration-stats
+
+`calibration-stats` 现在的 `base_MAE` 会跟 `--base` 绑定:
+
+- `--base raw`: 比较 `raw_estimate` 和 `calibrated_estimate`
+- `--base coverage_adjusted`: 比较 `coverage_adjusted_estimate` 和 `calibrated_estimate`
+
+输出字段:
+
+- `base类型`
+- `base_MAE`
+- `calibrated_MAE`
+- `改进比例`
+- `base方向命中率`
+- `calibrated方向命中率`
+- `base_corr`
+- `calibrated_corr`
+
+### compare-estimates
+
+`compare-estimates` 会直接比较三种估值:
+
+- `raw_estimate`
+- `coverage_adjusted_estimate`
+- `calibrated_estimate`
+
+示例:
+
+```bash
+python3 src/main.py compare-estimates --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-20 --window 20 --base coverage_adjusted
+python3 src/main.py compare-estimates --fund-code 002207 --start-date 2026-04-22 --end-date 2026-05-20 --window 20 --base coverage_adjusted
+```
 
 ## 接口失败和缺失数据处理
 

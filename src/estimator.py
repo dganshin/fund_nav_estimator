@@ -96,12 +96,44 @@ class CalibrationStatsResult:
     fund_code: str
     fund_name: str
     sample_count: int
-    raw_mean_abs_error: float
+    base_estimate_type: str
+    base_mean_abs_error: float
     calibrated_mean_abs_error: float
     improvement_pct: float | None
-    raw_direction_hit_rate: float
+    base_direction_hit_rate: float
     calibrated_direction_hit_rate: float
+    base_corr: float | None
+    calibrated_corr: float | None
+
+    @property
+    def raw_mean_abs_error(self) -> float:
+        return self.base_mean_abs_error
+
+    @property
+    def raw_direction_hit_rate(self) -> float:
+        return self.base_direction_hit_rate
+
+    @property
+    def raw_corr(self) -> float | None:
+        return self.base_corr
+
+
+@dataclass
+class CompareEstimatesResult:
+    fund_code: str
+    fund_name: str
+    start_date: date | None
+    end_date: date | None
+    sample_count: int
+    raw_mean_abs_error: float | None
+    coverage_adjusted_mean_abs_error: float | None
+    calibrated_mean_abs_error: float | None
+    best_method: str | None
+    raw_direction_hit_rate: float | None
+    coverage_direction_hit_rate: float | None
+    calibrated_direction_hit_rate: float | None
     raw_corr: float | None
+    coverage_corr: float | None
     calibrated_corr: float | None
 
 
@@ -468,10 +500,16 @@ def calculate_error_stats(
     session: Session,
     fund_code: str | None = None,
     window: int | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
 ) -> list[StatsResult]:
     stmt = select(EstimateError, Fund).join(Fund, Fund.fund_code == EstimateError.fund_code)
     if fund_code:
         stmt = stmt.where(EstimateError.fund_code == fund_code)
+    if start_date is not None:
+        stmt = stmt.where(EstimateError.trade_date >= start_date)
+    if end_date is not None:
+        stmt = stmt.where(EstimateError.trade_date <= end_date)
     stmt = stmt.order_by(EstimateError.fund_code.asc(), EstimateError.trade_date.asc())
 
     grouped_rows: dict[str, tuple[str, list[EstimateError]]] = {}
@@ -771,6 +809,8 @@ def calculate_calibration_stats(
     fund_code: str | None = None,
     window: int | None = None,
     base: str = "raw",
+    start_date: date | None = None,
+    end_date: date | None = None,
 ) -> list[CalibrationStatsResult]:
     stmt = (
         select(CalibratedEstimate, ActualReturn, Fund)
@@ -789,6 +829,10 @@ def calculate_calibration_stats(
         stmt = stmt.where(CalibratedEstimate.fund_code == fund_code)
     if window is not None:
         stmt = stmt.where(CalibratedEstimate.window == window)
+    if start_date is not None:
+        stmt = stmt.where(CalibratedEstimate.trade_date >= start_date)
+    if end_date is not None:
+        stmt = stmt.where(CalibratedEstimate.trade_date <= end_date)
 
     grouped_rows: dict[str, tuple[str, list[tuple[CalibratedEstimate, ActualReturn]]]] = {}
     for calibrated, actual, fund in session.execute(stmt).all():
@@ -798,30 +842,43 @@ def calculate_calibration_stats(
     for current_fund_code, (fund_name, rows) in grouped_rows.items():
         if not rows:
             continue
-        sample_count = len(rows)
-        raw_errors = [abs(actual.actual_return - calibrated.raw_estimate) for calibrated, actual in rows]
-        calibrated_errors = [abs(actual.actual_return - calibrated.calibrated_estimate) for calibrated, actual in rows]
-        raw_mae = sum(raw_errors) / sample_count
+        base_pairs: list[tuple[float, float]] = []
+        calibrated_pairs: list[tuple[float, float]] = []
+        for calibrated, actual in rows:
+            base_estimate = calibrated.raw_estimate
+            if base == "coverage_adjusted":
+                base_estimate = calibrated.coverage_adjusted_estimate
+            if base_estimate is None:
+                continue
+            base_pairs.append((base_estimate, actual.actual_return))
+            calibrated_pairs.append((calibrated.calibrated_estimate, actual.actual_return))
+
+        sample_count = len(base_pairs)
+        if sample_count == 0:
+            continue
+        base_errors = [abs(actual_return - estimate) for estimate, actual_return in base_pairs]
+        calibrated_errors = [abs(actual_return - estimate) for estimate, actual_return in calibrated_pairs]
+        base_mae = sum(base_errors) / sample_count
         calibrated_mae = sum(calibrated_errors) / sample_count
         improvement_pct = None
-        if raw_mae > 0:
-            improvement_pct = (raw_mae - calibrated_mae) / raw_mae
+        if base_mae > 0:
+            improvement_pct = (base_mae - calibrated_mae) / base_mae
 
-        raw_direction_hit_rate = sum(
-            1 for calibrated, actual in rows
-            if is_direction_hit(calibrated.raw_estimate, actual.actual_return)
+        base_direction_hit_rate = sum(
+            1 for estimate, actual_return in base_pairs
+            if is_direction_hit(estimate, actual_return)
         ) / sample_count
         calibrated_direction_hit_rate = sum(
-            1 for calibrated, actual in rows
-            if is_direction_hit(calibrated.calibrated_estimate, actual.actual_return)
+            1 for estimate, actual_return in calibrated_pairs
+            if is_direction_hit(estimate, actual_return)
         ) / sample_count
-        raw_corr = calculate_correlation(
-            [calibrated.raw_estimate for calibrated, _ in rows],
-            [actual.actual_return for _, actual in rows],
+        base_corr = calculate_correlation(
+            [estimate for estimate, _ in base_pairs],
+            [actual_return for _, actual_return in base_pairs],
         )
         calibrated_corr = calculate_correlation(
-            [calibrated.calibrated_estimate for calibrated, _ in rows],
-            [actual.actual_return for _, actual in rows],
+            [estimate for estimate, _ in calibrated_pairs],
+            [actual_return for _, actual_return in calibrated_pairs],
         )
 
         results.append(
@@ -829,14 +886,150 @@ def calculate_calibration_stats(
                 fund_code=current_fund_code,
                 fund_name=fund_name,
                 sample_count=sample_count,
-                raw_mean_abs_error=raw_mae,
+                base_estimate_type=base,
+                base_mean_abs_error=base_mae,
                 calibrated_mean_abs_error=calibrated_mae,
                 improvement_pct=improvement_pct,
-                raw_direction_hit_rate=raw_direction_hit_rate,
+                base_direction_hit_rate=base_direction_hit_rate,
                 calibrated_direction_hit_rate=calibrated_direction_hit_rate,
-                raw_corr=raw_corr,
+                base_corr=base_corr,
                 calibrated_corr=calibrated_corr,
             )
         )
 
     return results
+
+
+def calculate_compare_estimates(
+    session: Session,
+    fund_code: str | None = None,
+    window: int = 20,
+    base: str = "coverage_adjusted",
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> list[CompareEstimatesResult]:
+    stmt = (
+        select(FundEstimate, ActualReturn, Fund, CalibratedEstimate)
+        .join(
+            ActualReturn,
+            and_(
+                ActualReturn.trade_date == FundEstimate.trade_date,
+                ActualReturn.fund_code == FundEstimate.fund_code,
+            ),
+        )
+        .join(Fund, Fund.fund_code == FundEstimate.fund_code)
+        .join(
+            CalibratedEstimate,
+            and_(
+                CalibratedEstimate.trade_date == FundEstimate.trade_date,
+                CalibratedEstimate.fund_code == FundEstimate.fund_code,
+                CalibratedEstimate.holding_version_id == FundEstimate.holding_version_id,
+                CalibratedEstimate.window == window,
+                CalibratedEstimate.base_estimate_type == base,
+            ),
+            isouter=True,
+        )
+        .order_by(FundEstimate.fund_code.asc(), FundEstimate.trade_date.asc())
+    )
+    if fund_code:
+        stmt = stmt.where(FundEstimate.fund_code == fund_code)
+    if start_date is not None:
+        stmt = stmt.where(FundEstimate.trade_date >= start_date)
+    if end_date is not None:
+        stmt = stmt.where(FundEstimate.trade_date <= end_date)
+
+    grouped_rows: dict[str, tuple[str, list[tuple[FundEstimate, ActualReturn, CalibratedEstimate | None]]]] = {}
+    for estimate, actual, fund, calibrated in session.execute(stmt).all():
+        grouped_rows.setdefault(estimate.fund_code, (fund.fund_name, []))[1].append((estimate, actual, calibrated))
+
+    results: list[CompareEstimatesResult] = []
+    for current_fund_code, (fund_name, rows) in grouped_rows.items():
+        if not rows:
+            continue
+
+        raw_pairs: list[tuple[float, float]] = []
+        coverage_pairs: list[tuple[float, float]] = []
+        calibrated_pairs: list[tuple[float, float]] = []
+        actual_start_date = rows[0][0].trade_date
+        actual_end_date = rows[-1][0].trade_date
+
+        for estimate, actual, calibrated in rows:
+            raw_pairs.append((estimate.raw_estimate, actual.actual_return))
+
+            coverage_estimate: float | None = None
+            if calibrated is not None and calibrated.coverage_adjusted_estimate is not None:
+                coverage_estimate = calibrated.coverage_adjusted_estimate
+            else:
+                coverage_estimate, _ = compute_coverage_adjusted_estimate(
+                    session=session,
+                    fund_code=estimate.fund_code,
+                    trade_date=estimate.trade_date,
+                    raw_estimate=estimate.raw_estimate,
+                    covered_weight=estimate.covered_weight,
+                )
+            if coverage_estimate is not None:
+                coverage_pairs.append((coverage_estimate, actual.actual_return))
+
+            if calibrated is not None:
+                calibrated_pairs.append((calibrated.calibrated_estimate, actual.actual_return))
+
+        raw_mae = _calculate_mae(raw_pairs)
+        coverage_mae = _calculate_mae(coverage_pairs)
+        calibrated_mae = _calculate_mae(calibrated_pairs)
+        best_method = _pick_best_method(
+            {
+                "raw": raw_mae,
+                "coverage_adjusted": coverage_mae,
+                "calibrated": calibrated_mae,
+            }
+        )
+
+        results.append(
+            CompareEstimatesResult(
+                fund_code=current_fund_code,
+                fund_name=fund_name,
+                start_date=start_date or actual_start_date,
+                end_date=end_date or actual_end_date,
+                sample_count=len(raw_pairs),
+                raw_mean_abs_error=raw_mae,
+                coverage_adjusted_mean_abs_error=coverage_mae,
+                calibrated_mean_abs_error=calibrated_mae,
+                best_method=best_method,
+                raw_direction_hit_rate=_calculate_hit_rate(raw_pairs),
+                coverage_direction_hit_rate=_calculate_hit_rate(coverage_pairs),
+                calibrated_direction_hit_rate=_calculate_hit_rate(calibrated_pairs),
+                raw_corr=_calculate_corr_from_pairs(raw_pairs),
+                coverage_corr=_calculate_corr_from_pairs(coverage_pairs),
+                calibrated_corr=_calculate_corr_from_pairs(calibrated_pairs),
+            )
+        )
+
+    return results
+
+
+def _calculate_mae(pairs: list[tuple[float, float]]) -> float | None:
+    if not pairs:
+        return None
+    return sum(abs(actual_return - estimate) for estimate, actual_return in pairs) / len(pairs)
+
+
+def _calculate_hit_rate(pairs: list[tuple[float, float]]) -> float | None:
+    if not pairs:
+        return None
+    return sum(1 for estimate, actual_return in pairs if is_direction_hit(estimate, actual_return)) / len(pairs)
+
+
+def _calculate_corr_from_pairs(pairs: list[tuple[float, float]]) -> float | None:
+    if not pairs:
+        return None
+    return calculate_correlation(
+        [estimate for estimate, _ in pairs],
+        [actual_return for _, actual_return in pairs],
+    )
+
+
+def _pick_best_method(mae_by_method: dict[str, float | None]) -> str | None:
+    available = [(method, mae) for method, mae in mae_by_method.items() if mae is not None]
+    if not available:
+        return None
+    return min(available, key=lambda item: item[1])[0]
