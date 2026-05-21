@@ -29,6 +29,7 @@ if __package__ in {None, ""}:
         calculate_calibration_stats,
         calculate_compare_estimates,
         calculate_error_stats,
+        inspect_selected_estimates,
         calculate_selected_stats,
         format_hit_rate,
         format_missing_assets,
@@ -70,6 +71,7 @@ else:
         calculate_calibration_stats,
         calculate_compare_estimates,
         calculate_error_stats,
+        inspect_selected_estimates,
         calculate_selected_stats,
         format_hit_rate,
         format_missing_assets,
@@ -190,7 +192,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser_select.add_argument("--fund-code")
     parser_select.add_argument("--selection-window", type=int, default=20)
     parser_select.add_argument("--min-samples", type=int, default=10)
-    parser_select.add_argument("--min-improvement-bps", type=int, default=3)
+    parser_select.add_argument("--min-improvement-bps", type=int, default=5)
+    parser_select.add_argument(
+        "--selection-policy",
+        choices=["default", "coverage_first", "calibrated_if_clear"],
+        default="coverage_first",
+    )
 
     parser_select_history = subparsers.add_parser("select-history", help="Build selected estimates for a date range")
     parser_select_history.add_argument("--start-date", required=True)
@@ -198,13 +205,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser_select_history.add_argument("--fund-code")
     parser_select_history.add_argument("--selection-window", type=int, default=20)
     parser_select_history.add_argument("--min-samples", type=int, default=10)
-    parser_select_history.add_argument("--min-improvement-bps", type=int, default=3)
+    parser_select_history.add_argument("--min-improvement-bps", type=int, default=5)
+    parser_select_history.add_argument(
+        "--selection-policy",
+        choices=["default", "coverage_first", "calibrated_if_clear"],
+        default="coverage_first",
+    )
 
     parser_selected_stats = subparsers.add_parser("selected-stats", help="Show historical best estimate performance")
     parser_selected_stats.add_argument("--fund-code")
     parser_selected_stats.add_argument("--start-date")
     parser_selected_stats.add_argument("--end-date")
     parser_selected_stats.add_argument("--selection-window", type=int, default=20)
+    parser_selected_stats.add_argument(
+        "--selection-policy",
+        choices=["default", "coverage_first", "calibrated_if_clear"],
+        default="coverage_first",
+    )
+
+    parser_inspect = subparsers.add_parser("inspect-selections", help="Inspect why a method was selected")
+    parser_inspect.add_argument("--fund-code", required=True)
+    parser_inspect.add_argument("--method", choices=["raw", "coverage_adjusted", "calibrated"], required=True)
+    parser_inspect.add_argument("--start-date")
+    parser_inspect.add_argument("--end-date")
+    parser_inspect.add_argument("--selection-window", type=int, default=20)
+    parser_inspect.add_argument(
+        "--selection-policy",
+        choices=["default", "coverage_first", "calibrated_if_clear"],
+        default="coverage_first",
+    )
 
     parser_fetch_navs = subparsers.add_parser("fetch-fund-navs", help="Fetch historical fund navs from data source")
     parser_fetch_navs.add_argument("--fund-code", required=True)
@@ -227,6 +256,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser_backfill.add_argument("--window", type=int, default=20)
     parser_backfill.add_argument("--base", choices=["raw", "coverage_adjusted"], default="coverage_adjusted")
     parser_backfill.add_argument("--min-samples", type=int, default=5)
+    parser_backfill.add_argument(
+        "--selection-policy",
+        choices=["default", "coverage_first", "calibrated_if_clear"],
+        default="coverage_first",
+    )
     parser_backfill.add_argument("--sleep-seconds", type=float, default=0.2)
 
     parser_demo = subparsers.add_parser("demo-run", help="Run the full example flow")
@@ -430,11 +464,12 @@ def print_backfill_summary_table(summaries) -> None:
 
 
 def print_selected_estimates_table(results) -> None:
-    headers = ["基金代码", "基金名称", "raw", "coverage", "calibrated", "best", "方法", "样本数", "raw_MAE", "coverage_MAE", "calibrated_MAE", "置信度", "状态", "理由"]
+    headers = ["基金代码", "基金名称", "policy", "raw", "coverage", "calibrated", "best", "方法", "样本数", "raw_MAE", "coverage_MAE", "calibrated_MAE", "置信度", "状态", "理由"]
     rows = [
         [
             result.fund_code,
             result.fund_name,
+            result.selection_policy,
             format_percent(result.raw_estimate, signed=True),
             format_percent(result.coverage_adjusted_estimate, signed=True),
             format_percent(result.calibrated_estimate, signed=True),
@@ -454,11 +489,12 @@ def print_selected_estimates_table(results) -> None:
 
 
 def print_selected_stats_table(results) -> None:
-    headers = ["基金代码", "基金名称", "日期区间", "样本数", "raw_MAE", "coverage_MAE", "calibrated_MAE", "best_MAE", "最优单一方法", "best_method分布", "best方向命中率", "best_corr"]
+    headers = ["基金代码", "基金名称", "policy", "日期区间", "样本数", "raw_MAE", "coverage_MAE", "calibrated_MAE", "best_MAE", "最优单一方法", "best_method分布", "best方向命中率", "best_corr"]
     rows = [
         [
             result.fund_code,
             result.fund_name,
+            result.selection_policy,
             f"{result.start_date.isoformat()}~{result.end_date.isoformat()}" if result.start_date and result.end_date else "N/A",
             str(result.sample_count),
             format_percent(result.raw_mean_abs_error),
@@ -469,6 +505,43 @@ def print_selected_stats_table(results) -> None:
             result.best_method_distribution,
             format_hit_rate(result.best_direction_hit_rate),
             format_ratio(result.best_corr),
+        ]
+        for result in results
+    ]
+    print_table(headers, rows)
+
+
+def print_inspect_selections_table(results) -> None:
+    headers = [
+        "trade_date",
+        "fund_code",
+        "raw_estimate",
+        "coverage_adjusted_estimate",
+        "calibrated_estimate",
+        "best_method",
+        "decision_reason",
+        "sample_count",
+        "raw_mae",
+        "coverage_adjusted_mae",
+        "calibrated_mae",
+        "best_status",
+        "warning_json",
+    ]
+    rows = [
+        [
+            result.trade_date.isoformat(),
+            result.fund_code,
+            format_percent(result.raw_estimate, signed=True),
+            format_percent(result.coverage_adjusted_estimate, signed=True),
+            format_percent(result.calibrated_estimate, signed=True),
+            result.best_method,
+            result.decision_reason,
+            str(result.sample_count),
+            format_percent(result.raw_mae),
+            format_percent(result.coverage_adjusted_mae),
+            format_percent(result.calibrated_mae),
+            result.best_status,
+            ", ".join(result.warning_json) if result.warning_json else "[]",
         ]
         for result in results
     ]
@@ -735,6 +808,7 @@ def main() -> None:
                     selection_window=args.selection_window,
                     min_samples=args.min_samples,
                     min_improvement_bps=args.min_improvement_bps,
+                    selection_policy=args.selection_policy,
                 )
                 print_selected_estimates_table(results)
                 for result in results:
@@ -748,6 +822,7 @@ def main() -> None:
                     selection_window=args.selection_window,
                     min_samples=args.min_samples,
                     min_improvement_bps=args.min_improvement_bps,
+                    selection_policy=args.selection_policy,
                 )
                 print(f"Built selected estimate rows: {count}")
             elif args.command == "selected-stats":
@@ -757,8 +832,20 @@ def main() -> None:
                     start_date=parse_date(args.start_date) if args.start_date else None,
                     end_date=parse_date(args.end_date) if args.end_date else None,
                     selection_window=args.selection_window,
+                    selection_policy=args.selection_policy,
                 )
                 print_selected_stats_table(results)
+            elif args.command == "inspect-selections":
+                results = inspect_selected_estimates(
+                    session,
+                    fund_code=args.fund_code,
+                    method=args.method,
+                    start_date=parse_date(args.start_date) if args.start_date else None,
+                    end_date=parse_date(args.end_date) if args.end_date else None,
+                    selection_window=args.selection_window,
+                    selection_policy=args.selection_policy,
+                )
+                print_inspect_selections_table(results)
             elif args.command == "fetch-fund-navs":
                 data_source = AKShareDataSource()
                 report = fetch_and_store_fund_navs(
@@ -808,6 +895,7 @@ def main() -> None:
                     window=args.window,
                     base=args.base,
                     min_samples=args.min_samples,
+                    selection_policy=args.selection_policy,
                     sleep_seconds=args.sleep_seconds,
                 )
                 print(f"Imported fund nav rows: {nav_report.imported_count}")

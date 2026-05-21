@@ -256,6 +256,7 @@ class SelectedEstimate(Base):
     calibrated_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
     best_estimate: Mapped[float] = mapped_column(Float, nullable=False)
     best_method: Mapped[str] = mapped_column(String(32), nullable=False)
+    selection_policy: Mapped[str] = mapped_column(String(32), nullable=False, default="default")
     selection_window: Mapped[int] = mapped_column(Integer, nullable=False)
     min_samples: Mapped[int] = mapped_column(Integer, nullable=False)
     min_improvement_bps: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -279,6 +280,7 @@ class SelectedEstimate(Base):
             "fund_code",
             "holding_version_id",
             "selection_window",
+            "selection_policy",
             name="uq_selected_estimate",
         ),
     )

@@ -1,8 +1,8 @@
 # fund_nav_estimator
 
-个人使用的基金盘中涨跌预计修正系统, 当前为阶段 5, 并新增了本地 Web 录入台。
+个人使用的基金盘中涨跌预计修正系统, 当前已完成阶段 5.1, 并提供本地 Streamlit Web Dashboard。
 
-## 阶段 4 目标
+## 当前能力
 
 - 保留阶段 1 到阶段 3 的手动 CSV 导入和估值链路
 - 新增 `data_sources` 抽象层
@@ -11,11 +11,18 @@
 - 自动抓取 active holdings 的股票历史日涨跌并回填 `daily_quotes`
 - 支持 `estimate-history`、`reconcile-history`、`backfill-history`
 - 在真实历史数据上比较 `raw_estimate`、`coverage_adjusted_estimate`、`calibrated_estimate`
+- 提供 `selection_policy`
+  - `coverage_first`
+  - `calibrated_if_clear`
+  - `default`
+- 支持 `inspect-selections` 追踪某天为什么选中了某种方法
 - 支持本地 Streamlit Web 页面, 可以直接在表格中维护基金池、持仓、资产配置、行业配置
+- Web 内置估值对比表、Plotly 图表、一键更新和重新计算
 
 当前仍不包含:
 
 - 秒级实时行情
+- Web 登录
 - OCR
 - QDII
 - 买卖规则
@@ -51,6 +58,12 @@ fund_nav_estimator/
     init_db.py
     main.py
     models.py
+    web/
+      __init__.py
+      actions.py
+      charts.py
+      formatting.py
+      queries.py
     web_app.py
     web_services.py
   tests/
@@ -87,8 +100,13 @@ Web 页面当前支持:
 - 直接在表格里录入和修改 active `holdings`
 - 直接在表格里录入和修改 active `asset_allocations`
 - 直接在表格里录入和修改 active `industry_allocations`
-- 点击按钮抓基金净值、抓股票行情、一键执行 `backfill-history`
+- 侧边栏选择 `selection_policy`
+- 点击按钮抓基金净值、抓股票行情、一键更新历史数据、重新计算估值、重新生成 `selected_estimates`
 - 页面内查看 `stats`、`compare-estimates`、`calibration-stats`、`selected-stats`
+- 页面内查看每日估值对比表并导出 CSV
+- 页面内查看 Plotly 曲线图:
+  - `actual_return` vs `raw/coverage/calibrated/best`
+  - `raw/coverage/calibrated/best` 每日误差曲线
 
 ## 初始化数据库
 
@@ -143,13 +161,14 @@ python3 src/main.py calibration-stats --window 20 --base raw
 python3 src/main.py calibration-stats --fund-code 002207 --window 20 --base coverage_adjusted --start-date 2026-04-22 --end-date 2026-05-20
 python3 src/main.py compare-estimates --fund-code 002207 --window 20 --base coverage_adjusted
 python3 src/main.py compare-estimates --fund-code 002207 --start-date 2026-04-22 --end-date 2026-05-20 --window 20 --base coverage_adjusted
-python3 src/main.py select-estimate --trade-date 2026-05-20 --fund-code 002207
-python3 src/main.py select-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-20 --selection-window 20
-python3 src/main.py selected-stats --fund-code 002207 --start-date 2026-04-22 --end-date 2026-05-20 --selection-window 20
+python3 src/main.py select-estimate --trade-date 2026-05-20 --fund-code 002207 --selection-policy coverage_first
+python3 src/main.py select-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-20 --selection-window 20 --selection-policy coverage_first
+python3 src/main.py selected-stats --fund-code 002207 --start-date 2026-04-22 --end-date 2026-05-20 --selection-window 20 --selection-policy coverage_first
+python3 src/main.py inspect-selections --fund-code 002207 --method raw --start-date 2026-04-01 --end-date 2026-05-20 --selection-window 20 --selection-policy default
 python3 src/main.py fetch-fund-navs --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
 python3 src/main.py fetch-stock-quotes --asset-code 600988.SH --start-date 2026-04-01 --end-date 2026-05-21
 python3 src/main.py fetch-stock-quotes --from-active-holdings --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21
-python3 src/main.py backfill-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21 --window 20 --base coverage_adjusted
+python3 src/main.py backfill-history --fund-code 002207 --start-date 2026-04-01 --end-date 2026-05-21 --window 20 --base coverage_adjusted --selection-policy coverage_first
 python3 src/main.py demo-run --trade-date 2026-05-21
 streamlit run src/web_app.py
 ```

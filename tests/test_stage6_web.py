@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.backfill import fetch_and_store_fund_navs, fetch_and_store_stock_quotes
 from src.db import get_session_factory
+from src.estimator import build_calibration_history, build_estimate_history, build_reconcile_history
 from src.import_data import (
     import_asset_allocations_from_rows,
     import_funds_from_rows,
@@ -13,12 +16,15 @@ from src.import_data import (
     import_industry_allocations_from_rows,
 )
 from src.init_db import init_db
+from src.web.actions import run_selection_action
+from src.web.queries import get_fund_sidebar_context, load_estimate_comparison_rows
 from src.web_services import (
     load_asset_allocation_rows,
     load_fund_rows,
     load_holding_rows,
     load_industry_allocation_rows,
 )
+from tests.test_stage4 import make_mock_source, seed_fund_holdings_and_allocations
 
 
 def create_session_factory(tmp_path):
@@ -151,3 +157,77 @@ def test_web_row_import_round_trips_allocations(tmp_path):
     assert industry_count == 2
     assert asset_rows[0]["stock_weight_pct"] == 90.8
     assert [row["industry_code"] for row in industry_rows] == ["B", "C"]
+
+
+def test_web_queries_return_sidebar_defaults_for_002207(tmp_path):
+    session_factory = create_session_factory(tmp_path)
+    with session_factory() as session:
+        seed_fund_holdings_and_allocations(tmp_path, session)
+        context = get_fund_sidebar_context(session)
+
+    assert context["selected_fund_code"] == "002207"
+
+
+def test_web_actions_and_queries_build_comparison_rows(tmp_path):
+    session_factory = create_session_factory(tmp_path)
+    data_source = make_mock_source()
+    with session_factory() as session:
+        seed_fund_holdings_and_allocations(tmp_path, session)
+        fetch_and_store_stock_quotes(
+            session,
+            data_source,
+            date.fromisoformat("2026-05-20"),
+            date.fromisoformat("2026-05-22"),
+            ["600988.SH", "000975.SZ"],
+        )
+        fetch_and_store_fund_navs(
+            session,
+            data_source,
+            "002207",
+            date.fromisoformat("2026-05-20"),
+            date.fromisoformat("2026-05-22"),
+        )
+        build_estimate_history(
+            session,
+            start_date=date.fromisoformat("2026-05-20"),
+            end_date=date.fromisoformat("2026-05-22"),
+            fund_code="002207",
+        )
+        build_reconcile_history(
+            session,
+            start_date=date.fromisoformat("2026-05-20"),
+            end_date=date.fromisoformat("2026-05-22"),
+            fund_code="002207",
+        )
+        build_calibration_history(
+            session,
+            start_date=date.fromisoformat("2026-05-20"),
+            end_date=date.fromisoformat("2026-05-22"),
+            window=2,
+            base="coverage_adjusted",
+            fund_code="002207",
+            min_samples=1,
+        )
+        action_report = run_selection_action(
+            session,
+            fund_code="002207",
+            start_date=date.fromisoformat("2026-05-20"),
+            end_date=date.fromisoformat("2026-05-22"),
+            selection_window=2,
+            min_samples=1,
+            min_improvement_bps=5,
+            selection_policy="coverage_first",
+        )
+        rows = load_estimate_comparison_rows(
+            session,
+            fund_code="002207",
+            start_date=date.fromisoformat("2026-05-20"),
+            end_date=date.fromisoformat("2026-05-22"),
+            window=2,
+            selection_policy="coverage_first",
+        )
+
+    assert action_report.payload["selection_count"] > 0
+    assert rows
+    assert "best_method" in rows[0]
+    assert "raw_error" in rows[0]

@@ -141,6 +141,7 @@ class CompareEstimatesResult:
 class SelectedEstimateResult:
     fund_code: str
     fund_name: str
+    selection_policy: str
     raw_estimate: float
     coverage_adjusted_estimate: float | None
     calibrated_estimate: float | None
@@ -161,6 +162,7 @@ class SelectedEstimateResult:
 class SelectedStatsResult:
     fund_code: str
     fund_name: str
+    selection_policy: str
     start_date: date | None
     end_date: date | None
     sample_count: int
@@ -172,6 +174,23 @@ class SelectedStatsResult:
     best_method_distribution: str
     best_direction_hit_rate: float | None
     best_corr: float | None
+
+
+@dataclass
+class SelectionInspectResult:
+    trade_date: date
+    fund_code: str
+    raw_estimate: float
+    coverage_adjusted_estimate: float | None
+    calibrated_estimate: float | None
+    best_method: str
+    decision_reason: str
+    sample_count: int
+    raw_mae: float | None
+    coverage_adjusted_mae: float | None
+    calibrated_mae: float | None
+    best_status: str
+    warning_json: list[str]
 
 
 def format_percent(value: float | None, signed: bool = False) -> str:
@@ -1078,7 +1097,8 @@ def build_selected_estimates(
     fund_code: str | None = None,
     selection_window: int = 20,
     min_samples: int = 10,
-    min_improvement_bps: int = 3,
+    min_improvement_bps: int = 5,
+    selection_policy: str = "coverage_first",
 ) -> list[SelectedEstimateResult]:
     stmt = (
         select(FundEstimate, Fund)
@@ -1131,87 +1151,36 @@ def build_selected_estimates(
         coverage_hit_rate = _calculate_hit_rate_from_errors(method_errors["coverage_adjusted"])
         calibrated_hit_rate = _calculate_hit_rate_from_errors(method_errors["calibrated"])
 
-        best_method = "raw"
-        best_estimate = estimate.raw_estimate
-        best_status = "ok"
-        decision_reason = "raw 为默认基线方法。"
+        raw_corr = _calculate_corr_from_error_history(method_errors["raw"])
+        coverage_corr = _calculate_corr_from_error_history(method_errors["coverage_adjusted"])
+        calibrated_corr = _calculate_corr_from_error_history(method_errors["calibrated"])
 
-        if sample_count < min_samples:
-            if coverage_adjusted_estimate is not None:
-                best_method = "coverage_adjusted"
-                best_estimate = coverage_adjusted_estimate
-                decision_reason = "历史样本不足, coverage_adjusted 可用, 使用 coverage_adjusted fallback。"
-            else:
-                decision_reason = "历史样本不足, coverage_adjusted 不可用, 使用 raw fallback。"
-            best_status = "insufficient_samples_fallback"
-        else:
-            current_best_method = "raw"
-            current_best_estimate = estimate.raw_estimate
-            current_best_mae = raw_mae
-            current_reason = "raw 为默认基线方法。"
-
-            if (
-                coverage_adjusted_estimate is not None
-                and coverage_mae is not None
-                and raw_mae is not None
-                and len(method_errors["coverage_adjusted"]) >= min_samples
-            ):
-                if coverage_mae <= raw_mae - improvement_threshold:
-                    if _recent_underperform_count(
-                        candidate_errors=method_errors["coverage_adjusted"],
-                        baseline_errors=method_errors["raw"],
-                    ) >= 2:
-                        warnings.append(
-                            "Warning: coverage_adjusted recent underperform protection triggered, keep raw."
-                        )
-                    else:
-                        current_best_method = "coverage_adjusted"
-                        current_best_estimate = coverage_adjusted_estimate
-                        current_best_mae = coverage_mae
-                        current_reason = (
-                            f"coverage_adjusted 历史 MAE 比 raw 低 {format_percent(raw_mae - coverage_mae)},"
-                            f" 超过切换阈值 {min_improvement_bps} bps。"
-                        )
-                else:
-                    current_reason = (
-                        f"coverage_adjusted 相比 raw 的改进未超过切换阈值 {min_improvement_bps} bps, 保持 raw。"
-                    )
-
-            if (
-                calibrated_estimate is not None
-                and calibrated_mae is not None
-                and current_best_mae is not None
-                and len(method_errors["calibrated"]) >= min_samples
-            ):
-                if calibrated_mae <= current_best_mae - improvement_threshold:
-                    baseline_method = current_best_method
-                    if _recent_underperform_count(
-                        candidate_errors=method_errors["calibrated"],
-                        baseline_errors=method_errors[baseline_method],
-                    ) >= 2:
-                        warnings.append(
-                            "Warning: calibrated recent underperform protection triggered, keep base method."
-                        )
-                        best_status = "protected_switch_blocked"
-                    else:
-                        current_best_method = "calibrated"
-                        current_best_estimate = calibrated_estimate
-                        current_best_mae = calibrated_mae
-                        current_reason = (
-                            f"calibrated 历史 MAE 比 {baseline_method} 低 "
-                            f"{format_percent((method_errors_mae(method_errors[baseline_method]) or 0) - calibrated_mae)},"
-                            f" 超过切换阈值 {min_improvement_bps} bps。"
-                        )
-                else:
-                    baseline_label = current_best_method
-                    current_reason = (
-                        f"calibrated 仅小幅领先 {baseline_label}, 未超过切换阈值 {min_improvement_bps} bps,"
-                        f" 选择更稳的 {baseline_label}。"
-                    )
-
-            best_method = current_best_method
-            best_estimate = current_best_estimate
-            decision_reason = current_reason
+        (
+            best_method,
+            best_estimate,
+            best_status,
+            decision_reason,
+        ) = _select_best_method_for_policy(
+            selection_policy=selection_policy,
+            raw_estimate=estimate.raw_estimate,
+            coverage_adjusted_estimate=coverage_adjusted_estimate,
+            calibrated_estimate=calibrated_estimate,
+            sample_count=sample_count,
+            min_samples=min_samples,
+            improvement_threshold=improvement_threshold,
+            min_improvement_bps=min_improvement_bps,
+            raw_mae=raw_mae,
+            coverage_mae=coverage_mae,
+            calibrated_mae=calibrated_mae,
+            raw_hit_rate=raw_hit_rate,
+            coverage_hit_rate=coverage_hit_rate,
+            calibrated_hit_rate=calibrated_hit_rate,
+            raw_corr=raw_corr,
+            coverage_corr=coverage_corr,
+            calibrated_corr=calibrated_corr,
+            method_errors=method_errors,
+            warnings=warnings,
+        )
 
         best_mae = {
             "raw": raw_mae,
@@ -1239,12 +1208,14 @@ def build_selected_estimates(
             fund_code=estimate.fund_code,
             holding_version_id=estimate.holding_version_id,
             selection_window=selection_window,
+            selection_policy=selection_policy,
         )
         selected_row.raw_estimate = estimate.raw_estimate
         selected_row.coverage_adjusted_estimate = coverage_adjusted_estimate
         selected_row.calibrated_estimate = calibrated_estimate
         selected_row.best_estimate = round(best_estimate, 8)
         selected_row.best_method = best_method
+        selected_row.selection_policy = selection_policy
         selected_row.selection_window = selection_window
         selected_row.min_samples = min_samples
         selected_row.min_improvement_bps = min_improvement_bps
@@ -1266,6 +1237,7 @@ def build_selected_estimates(
             SelectedEstimateResult(
                 fund_code=estimate.fund_code,
                 fund_name=fund.fund_name,
+                selection_policy=selection_policy,
                 raw_estimate=estimate.raw_estimate,
                 coverage_adjusted_estimate=coverage_adjusted_estimate,
                 calibrated_estimate=calibrated_estimate,
@@ -1294,7 +1266,8 @@ def build_selection_history(
     fund_code: str | None = None,
     selection_window: int = 20,
     min_samples: int = 10,
-    min_improvement_bps: int = 3,
+    min_improvement_bps: int = 5,
+    selection_policy: str = "coverage_first",
 ) -> int:
     stmt = select(FundEstimate.trade_date).where(
         FundEstimate.trade_date >= start_date,
@@ -1313,6 +1286,7 @@ def build_selection_history(
             selection_window=selection_window,
             min_samples=min_samples,
             min_improvement_bps=min_improvement_bps,
+            selection_policy=selection_policy,
         )
         total_count += len(results)
     return total_count
@@ -1324,6 +1298,7 @@ def calculate_selected_stats(
     start_date: date | None = None,
     end_date: date | None = None,
     selection_window: int = 20,
+    selection_policy: str = "coverage_first",
 ) -> list[SelectedStatsResult]:
     stmt = (
         select(SelectedEstimate, ActualReturn, Fund)
@@ -1335,7 +1310,10 @@ def calculate_selected_stats(
             ),
         )
         .join(Fund, Fund.fund_code == SelectedEstimate.fund_code)
-        .where(SelectedEstimate.selection_window == selection_window)
+        .where(
+            SelectedEstimate.selection_window == selection_window,
+            SelectedEstimate.selection_policy == selection_policy,
+        )
         .order_by(SelectedEstimate.fund_code.asc(), SelectedEstimate.trade_date.asc())
     )
     if fund_code:
@@ -1381,6 +1359,7 @@ def calculate_selected_stats(
             SelectedStatsResult(
                 fund_code=current_fund_code,
                 fund_name=fund_name,
+                selection_policy=selection_policy,
                 start_date=rows[0][0].trade_date,
                 end_date=rows[-1][0].trade_date,
                 sample_count=len(rows),
@@ -1398,12 +1377,315 @@ def calculate_selected_stats(
     return results
 
 
+def inspect_selected_estimates(
+    session: Session,
+    fund_code: str,
+    method: str,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    selection_window: int = 20,
+    selection_policy: str = "coverage_first",
+) -> list[SelectionInspectResult]:
+    stmt = (
+        select(SelectedEstimate)
+        .where(
+            SelectedEstimate.fund_code == fund_code,
+            SelectedEstimate.best_method == method,
+            SelectedEstimate.selection_window == selection_window,
+            SelectedEstimate.selection_policy == selection_policy,
+        )
+        .order_by(SelectedEstimate.trade_date.asc())
+    )
+    if start_date is not None:
+        stmt = stmt.where(SelectedEstimate.trade_date >= start_date)
+    if end_date is not None:
+        stmt = stmt.where(SelectedEstimate.trade_date <= end_date)
+
+    return [
+        SelectionInspectResult(
+            trade_date=row.trade_date,
+            fund_code=row.fund_code,
+            raw_estimate=row.raw_estimate,
+            coverage_adjusted_estimate=row.coverage_adjusted_estimate,
+            calibrated_estimate=row.calibrated_estimate,
+            best_method=row.best_method,
+            decision_reason=row.decision_reason,
+            sample_count=row.sample_count,
+            raw_mae=row.raw_mae,
+            coverage_adjusted_mae=row.coverage_adjusted_mae,
+            calibrated_mae=row.calibrated_mae,
+            best_status=row.best_status,
+            warning_json=json.loads(row.warning_json or "[]"),
+        )
+        for row in session.scalars(stmt).all()
+    ]
+
+
+def _select_best_method_for_policy(
+    selection_policy: str,
+    raw_estimate: float,
+    coverage_adjusted_estimate: float | None,
+    calibrated_estimate: float | None,
+    sample_count: int,
+    min_samples: int,
+    improvement_threshold: float,
+    min_improvement_bps: int,
+    raw_mae: float | None,
+    coverage_mae: float | None,
+    calibrated_mae: float | None,
+    raw_hit_rate: float | None,
+    coverage_hit_rate: float | None,
+    calibrated_hit_rate: float | None,
+    raw_corr: float | None,
+    coverage_corr: float | None,
+    calibrated_corr: float | None,
+    method_errors: dict[str, list[dict[str, float | date]]],
+    warnings: list[str],
+) -> tuple[str, float, str, str]:
+    if selection_policy == "default":
+        return _select_best_method_default(
+            raw_estimate=raw_estimate,
+            coverage_adjusted_estimate=coverage_adjusted_estimate,
+            calibrated_estimate=calibrated_estimate,
+            sample_count=sample_count,
+            min_samples=min_samples,
+            improvement_threshold=improvement_threshold,
+            min_improvement_bps=min_improvement_bps,
+            raw_mae=raw_mae,
+            coverage_mae=coverage_mae,
+            calibrated_mae=calibrated_mae,
+            method_errors=method_errors,
+            warnings=warnings,
+        )
+
+    return _select_best_method_coverage_first(
+        policy_name=selection_policy,
+        raw_estimate=raw_estimate,
+        coverage_adjusted_estimate=coverage_adjusted_estimate,
+        calibrated_estimate=calibrated_estimate,
+        sample_count=sample_count,
+        min_samples=min_samples,
+        improvement_threshold=improvement_threshold,
+        min_improvement_bps=min_improvement_bps,
+        raw_mae=raw_mae,
+        coverage_mae=coverage_mae,
+        calibrated_mae=calibrated_mae,
+        raw_hit_rate=raw_hit_rate,
+        coverage_hit_rate=coverage_hit_rate,
+        calibrated_hit_rate=calibrated_hit_rate,
+        raw_corr=raw_corr,
+        coverage_corr=coverage_corr,
+        calibrated_corr=calibrated_corr,
+        method_errors=method_errors,
+        warnings=warnings,
+    )
+
+
+def _select_best_method_default(
+    raw_estimate: float,
+    coverage_adjusted_estimate: float | None,
+    calibrated_estimate: float | None,
+    sample_count: int,
+    min_samples: int,
+    improvement_threshold: float,
+    min_improvement_bps: int,
+    raw_mae: float | None,
+    coverage_mae: float | None,
+    calibrated_mae: float | None,
+    method_errors: dict[str, list[dict[str, float | date]]],
+    warnings: list[str],
+) -> tuple[str, float, str, str]:
+    best_method = "raw"
+    best_estimate = raw_estimate
+    best_status = "ok"
+    decision_reason = "raw 为默认基线方法。"
+
+    if sample_count < min_samples:
+        if coverage_adjusted_estimate is not None:
+            return (
+                "coverage_adjusted",
+                coverage_adjusted_estimate,
+                "insufficient_samples_fallback",
+                "历史样本不足, coverage_adjusted 可用, 使用 coverage_adjusted fallback。",
+            )
+        return ("raw", raw_estimate, "insufficient_samples_fallback", "历史样本不足, coverage_adjusted 不可用, 使用 raw fallback。")
+
+    current_best_method = "raw"
+    current_best_estimate = raw_estimate
+    current_best_mae = raw_mae
+    current_reason = "raw 为默认基线方法。"
+
+    if (
+        coverage_adjusted_estimate is not None
+        and coverage_mae is not None
+        and raw_mae is not None
+        and len(method_errors["coverage_adjusted"]) >= min_samples
+    ):
+        if coverage_mae <= raw_mae - improvement_threshold:
+            if _recent_underperform_count(
+                candidate_errors=method_errors["coverage_adjusted"],
+                baseline_errors=method_errors["raw"],
+            ) >= 2:
+                warnings.append("Warning: coverage_adjusted recent underperform protection triggered, keep raw.")
+            else:
+                current_best_method = "coverage_adjusted"
+                current_best_estimate = coverage_adjusted_estimate
+                current_best_mae = coverage_mae
+                current_reason = (
+                    f"coverage_adjusted 历史 MAE 比 raw 低 {format_percent(raw_mae - coverage_mae)},"
+                    f" 超过切换阈值 {min_improvement_bps} bps。"
+                )
+        else:
+            current_reason = f"coverage_adjusted 相比 raw 的改进未超过切换阈值 {min_improvement_bps} bps, 保持 raw。"
+
+    if (
+        calibrated_estimate is not None
+        and calibrated_mae is not None
+        and current_best_mae is not None
+        and len(method_errors["calibrated"]) >= min_samples
+    ):
+        if calibrated_mae <= current_best_mae - improvement_threshold:
+            baseline_method = current_best_method
+            if _recent_underperform_count(
+                candidate_errors=method_errors["calibrated"],
+                baseline_errors=method_errors[baseline_method],
+            ) >= 2:
+                warnings.append("Warning: calibrated recent underperform protection triggered, keep base method.")
+                best_status = "protected_switch_blocked"
+            else:
+                current_best_method = "calibrated"
+                current_best_estimate = calibrated_estimate
+                current_reason = (
+                    f"calibrated 历史 MAE 比 {baseline_method} 低 "
+                    f"{format_percent((method_errors_mae(method_errors[baseline_method]) or 0) - calibrated_mae)},"
+                    f" 超过切换阈值 {min_improvement_bps} bps。"
+                )
+        else:
+            current_reason = (
+                f"calibrated 仅小幅领先 {current_best_method}, 未超过切换阈值 {min_improvement_bps} bps,"
+                f" 选择更稳的 {current_best_method}。"
+            )
+
+    return current_best_method, current_best_estimate, best_status, current_reason
+
+
+def _select_best_method_coverage_first(
+    policy_name: str,
+    raw_estimate: float,
+    coverage_adjusted_estimate: float | None,
+    calibrated_estimate: float | None,
+    sample_count: int,
+    min_samples: int,
+    improvement_threshold: float,
+    min_improvement_bps: int,
+    raw_mae: float | None,
+    coverage_mae: float | None,
+    calibrated_mae: float | None,
+    raw_hit_rate: float | None,
+    coverage_hit_rate: float | None,
+    calibrated_hit_rate: float | None,
+    raw_corr: float | None,
+    coverage_corr: float | None,
+    calibrated_corr: float | None,
+    method_errors: dict[str, list[dict[str, float | date]]],
+    warnings: list[str],
+) -> tuple[str, float, str, str]:
+    if sample_count < min_samples:
+        if coverage_adjusted_estimate is not None:
+            return (
+                "coverage_adjusted",
+                coverage_adjusted_estimate,
+                "insufficient_samples_fallback",
+                "历史样本不足, coverage_adjusted 可用, 使用 coverage_adjusted fallback。",
+            )
+        return ("raw", raw_estimate, "insufficient_samples_fallback", "历史样本不足且 coverage_adjusted 不可用, 使用 raw fallback。")
+
+    if coverage_adjusted_estimate is None:
+        if calibrated_estimate is not None and calibrated_mae is not None and raw_mae is not None and calibrated_mae <= raw_mae - improvement_threshold:
+            if _recent_underperform_count(method_errors["calibrated"], method_errors["raw"]) >= 2:
+                warnings.append("Warning: calibrated recent underperform protection triggered, keep raw.")
+                return ("raw", raw_estimate, "coverage_unavailable_fallback", "coverage_adjusted 不可用, calibrated 最近表现不稳, 保持 raw。")
+            return ("calibrated", calibrated_estimate, "ok", "coverage_adjusted 不可用, calibrated 明显优于 raw, 选择 calibrated。")
+        return ("raw", raw_estimate, "coverage_unavailable_fallback", "coverage_adjusted 不可用, 使用 raw。")
+
+    best_method = "coverage_adjusted"
+    best_estimate = coverage_adjusted_estimate
+    best_status = "ok"
+    decision_reason = "coverage_adjusted 为默认 baseline。"
+
+    if (
+        raw_mae is not None
+        and coverage_mae is not None
+        and len(method_errors["raw"]) >= min_samples
+        and raw_mae <= coverage_mae - improvement_threshold
+    ):
+        if _recent_underperform_count(method_errors["raw"], method_errors["coverage_adjusted"]) >= 2:
+            warnings.append("Warning: raw recent underperform protection triggered, keep coverage_adjusted.")
+        else:
+            best_method = "raw"
+            best_estimate = raw_estimate
+            decision_reason = (
+                f"raw 历史 MAE 比 coverage_adjusted 低 {format_percent(coverage_mae - raw_mae)},"
+                f" 超过切换阈值 {min_improvement_bps} bps。"
+            )
+
+    baseline_method = best_method
+    baseline_estimate = best_estimate
+    baseline_mae = raw_mae if best_method == "raw" else coverage_mae
+    baseline_hit_rate = raw_hit_rate if best_method == "raw" else coverage_hit_rate
+    baseline_corr = raw_corr if best_method == "raw" else coverage_corr
+
+    if calibrated_estimate is None or calibrated_mae is None or len(method_errors["calibrated"]) < min_samples:
+        return best_method, best_estimate, best_status, decision_reason
+
+    if baseline_mae is None or calibrated_mae > baseline_mae - improvement_threshold:
+        return (
+            best_method,
+            best_estimate,
+            best_status,
+            f"calibrated 对 {baseline_method} 的改进未超过切换阈值 {min_improvement_bps} bps, 保持 {baseline_method}。",
+        )
+
+    if baseline_hit_rate is not None and calibrated_hit_rate is not None and calibrated_hit_rate < baseline_hit_rate:
+        return (
+            best_method,
+            best_estimate,
+            "protected_switch_blocked",
+            f"calibrated 的方向命中率低于 {baseline_method}, 保持 {baseline_method}。",
+        )
+
+    corr_floor = None if baseline_corr is None else baseline_corr - 0.05
+    if corr_floor is not None and calibrated_corr is not None and calibrated_corr < corr_floor:
+        return (
+            best_method,
+            best_estimate,
+            "protected_switch_blocked",
+            f"calibrated 的相关系数明显低于 {baseline_method}, 保持 {baseline_method}。",
+        )
+
+    if _recent_underperform_count(method_errors["calibrated"], method_errors[baseline_method]) >= 2:
+        warnings.append("Warning: calibrated recent underperform protection triggered, keep base method.")
+        return (
+            best_method,
+            best_estimate,
+            "protected_switch_blocked",
+            f"calibrated 最近 3 个样本中至少 2 次明显更差, 保持 {baseline_method}。",
+        )
+
+    if policy_name == "calibrated_if_clear":
+        reason_prefix = "calibrated 明显优于 coverage_adjusted, 切换为 calibrated。"
+    else:
+        reason_prefix = f"calibrated 明显优于 {baseline_method}, 切换为 calibrated。"
+    return ("calibrated", calibrated_estimate, "ok", reason_prefix)
+
+
 def upsert_selected_estimate(
     session: Session,
     trade_date: date,
     fund_code: str,
     holding_version_id: int,
     selection_window: int,
+    selection_policy: str,
 ) -> SelectedEstimate:
     selected_row = session.scalar(
         select(SelectedEstimate).where(
@@ -1411,6 +1693,7 @@ def upsert_selected_estimate(
             SelectedEstimate.fund_code == fund_code,
             SelectedEstimate.holding_version_id == holding_version_id,
             SelectedEstimate.selection_window == selection_window,
+            SelectedEstimate.selection_policy == selection_policy,
         )
     )
     if selected_row is None:
@@ -1418,6 +1701,7 @@ def upsert_selected_estimate(
             trade_date=trade_date,
             fund_code=fund_code,
             holding_version_id=holding_version_id,
+            selection_policy=selection_policy,
             selection_window=selection_window,
         )
         session.add(selected_row)

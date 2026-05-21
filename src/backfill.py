@@ -110,6 +110,7 @@ def backfill_history(
     window: int = 20,
     base: str = "coverage_adjusted",
     min_samples: int = 5,
+    selection_policy: str = "coverage_first",
     sleep_seconds: float = 0.0,
 ) -> tuple[ImportReport, ImportReport, HistoryBuildReport, HistoryBuildReport, int, int, list[BackfillSummary]]:
     nav_report = fetch_and_store_fund_navs(
@@ -156,7 +157,8 @@ def backfill_history(
         fund_code=fund_code,
         selection_window=window,
         min_samples=max(10, min_samples),
-        min_improvement_bps=3,
+        min_improvement_bps=5,
+        selection_policy=selection_policy,
     )
     selected_stats = calculate_selected_stats(
         session=session,
@@ -164,6 +166,7 @@ def backfill_history(
         start_date=start_date,
         end_date=end_date,
         selection_window=window,
+        selection_policy=selection_policy,
     )
 
     summaries: list[BackfillSummary] = []
@@ -178,6 +181,7 @@ def backfill_history(
                 SelectedEstimate.trade_date >= start_date,
                 SelectedEstimate.trade_date <= end_date,
                 SelectedEstimate.selection_window == window,
+                SelectedEstimate.selection_policy == selection_policy,
             )
             .order_by(SelectedEstimate.trade_date.desc())
         ).first()
