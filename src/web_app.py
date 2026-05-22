@@ -132,9 +132,15 @@ def inject_styles() -> None:
             background: #ffffff;
             border-right: 1px solid #e8edf7;
         }
+        section[data-testid="stSidebar"] > div {
+            background: #ffffff;
+        }
         [data-testid="stHeader"] {
             background: rgba(245,247,251,0.85);
             backdrop-filter: blur(10px);
+        }
+        [data-testid="stToolbar"] {
+            right: 1rem;
         }
         .page-shell {
             display: flex;
@@ -347,6 +353,91 @@ def inject_styles() -> None:
             color: #62718d;
             font-size: 0.9rem;
             border: 1px solid #e4ebfb;
+        }
+        .stTabs [data-baseweb="tab-border"] {
+            background: #2f6bff;
+        }
+        .stTabs [data-baseweb="tab-highlight"] {
+            background-color: #2f6bff;
+        }
+        div[data-baseweb="select"] > div,
+        div[data-baseweb="input"] > div,
+        .stDateInput > div > div,
+        .stNumberInput > div > div,
+        .stTextInput > div > div,
+        .stTextArea textarea {
+            background: #ffffff !important;
+            border: 1px solid #dce5f4 !important;
+            border-radius: 16px !important;
+            box-shadow: 0 6px 18px rgba(24,39,75,0.04) !important;
+            color: #1f2a44 !important;
+        }
+        div[data-baseweb="select"] span,
+        div[data-baseweb="input"] input,
+        .stDateInput input,
+        .stNumberInput input,
+        .stTextInput input,
+        .stTextArea textarea {
+            color: #1f2a44 !important;
+        }
+        .stDateInput label,
+        .stSelectbox label,
+        .stNumberInput label,
+        .stTextInput label,
+        .stTextArea label {
+            color: #8a97ad !important;
+            font-weight: 600 !important;
+        }
+        .stButton > button,
+        .stDownloadButton > button {
+            width: 100%;
+            min-height: 3.15rem;
+            border-radius: 16px !important;
+            border: 1px solid #2f6bff !important;
+            background: linear-gradient(135deg, #2f6bff 0%, #5b8cff 100%) !important;
+            color: #ffffff !important;
+            font-weight: 700 !important;
+            box-shadow: 0 12px 24px rgba(47,107,255,0.18) !important;
+        }
+        .stButton > button:hover,
+        .stDownloadButton > button:hover {
+            border-color: #2459dd !important;
+            background: linear-gradient(135deg, #2459dd 0%, #4c7df6 100%) !important;
+        }
+        .stButton > button[kind="secondary"] {
+            background: #ffffff !important;
+            color: #2f6bff !important;
+            border: 1px solid #dbe6ff !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stExpander"] {
+            border: 1px solid #e6ecf7 !important;
+            border-radius: 18px !important;
+            background: #ffffff !important;
+            overflow: hidden;
+        }
+        [data-testid="stExpander"] details summary {
+            color: #1f2a44 !important;
+            font-weight: 700 !important;
+        }
+        [data-testid="stDataFrameResizable"] {
+            background: #ffffff;
+        }
+        [data-testid="stDataFrame"] thead tr th {
+            background: #f7faff !important;
+            color: #6d7b94 !important;
+        }
+        [data-testid="stDataFrame"] tbody tr {
+            background: #ffffff !important;
+        }
+        [data-testid="stDataFrame"] tbody tr:nth-child(even) {
+            background: #fbfcff !important;
+        }
+        [data-testid="stMarkdownContainer"] code {
+            background: #eff4ff;
+            color: #2f6bff;
+            border-radius: 8px;
+            padding: 0.12rem 0.35rem;
         }
         .sidebar-section-title {
             color: #1f2a44;
