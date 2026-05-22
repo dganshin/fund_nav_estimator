@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..backfill import backfill_history
 from ..estimator import (
+    build_effective_weight_versions,
     build_calibration_history,
     build_estimate_history,
     build_reconcile_history,
@@ -148,4 +149,31 @@ def run_selection_action(
         logs=[f"Built selected estimate rows: {selection_count}"],
         warnings=[],
         payload={"selection_count": selection_count},
+    )
+
+
+def run_effective_weight_action(
+    session: Session,
+    fund_code: str,
+    trade_date: date,
+) -> ActionReport:
+    results = build_effective_weight_versions(
+        session=session,
+        trade_date=trade_date,
+        fund_code=fund_code,
+    )
+    logs = [
+        (
+            f"{item.fund_code} 修正权重已更新: "
+            f"覆盖权重 {item.covered_weight * 100:.2f}%, "
+            f"股票仓位 {0.0 if item.stock_weight is None else item.stock_weight * 100:.2f}%, "
+            f"修正后合计 {item.total_effective_weight * 100:.2f}%"
+        )
+        for item in results
+    ]
+    warnings = [warning for item in results for warning in item.warnings]
+    return ActionReport(
+        logs=logs or ["没有可更新的修正权重"],
+        warnings=warnings,
+        payload={"effective_weight_count": len(results)},
     )

@@ -35,6 +35,7 @@ if __package__ in {None, ""}:
         load_fund_overview_rows,
         load_estimate_comparison_rows,
         run_backfill_action,
+        run_effective_weight_action,
         run_recalculate_action,
         run_selection_action,
     )
@@ -75,6 +76,7 @@ else:
         load_fund_overview_rows,
         load_estimate_comparison_rows,
         run_backfill_action,
+        run_effective_weight_action,
         run_recalculate_action,
         run_selection_action,
     )
@@ -98,13 +100,13 @@ SELECTION_POLICY_LABELS = {
     "default": "默认策略",
 }
 BASE_LABELS = {
-    "coverage_adjusted": "coverage_adjusted",
-    "raw": "raw",
+    "coverage_adjusted": "修正估值",
+    "raw": "原始估值",
 }
 METHOD_LABELS = {
-    "raw": "raw",
-    "coverage_adjusted": "coverage",
-    "calibrated": "calibrated",
+    "raw": "原始",
+    "coverage_adjusted": "修正",
+    "calibrated": "校准",
     "N/A": "N/A",
     None: "N/A",
 }
@@ -814,11 +816,9 @@ def render_overview_page(
             "fund_code": item.fund_code,
             "fund_name": item.fund_name,
             "best_estimate": item.final_estimate,
-            "raw_estimate": item.raw_estimate,
-            "coverage_adjusted_estimate": item.coverage_adjusted_estimate,
-            "calibrated_estimate": item.calibrated_estimate,
             "best_method": item.final_method,
             "confidence_level": item.confidence_level,
+            "latest_mae": item.latest_mae,
             "latest_estimate_date": item.trade_date,
             "quote_time": item.quote_time,
             "warnings": item.warnings,
@@ -851,12 +851,10 @@ def render_overview_page(
         <div class="overview-row overview-head">
             <div class="overview-grid">
                 <div>基金</div>
-                <div>估值</div>
+                <div>实时估值</div>
                 <div>置信度</div>
                 <div>更新时间</div>
                 <div>方法</div>
-                <div>raw</div>
-                <div>coverage</div>
                 <div></div>
             </div>
         </div>
@@ -865,7 +863,7 @@ def render_overview_page(
     )
 
     for row in rows:
-        row_cols = st.columns([2.9, 1.1, 0.85, 1.0, 0.95, 0.95, 0.95, 0.7])
+        row_cols = st.columns([3.2, 1.15, 0.9, 1.05, 1.0, 0.8])
         with row_cols[0]:
             st.markdown(
                 f"""
@@ -883,10 +881,6 @@ def render_overview_page(
         with row_cols[4]:
             st.markdown(render_tag_badge(format_method_name(row["best_method"])), unsafe_allow_html=True)
         with row_cols[5]:
-            render_overview_metric("raw", format_percent(row["raw_estimate"], signed=True))
-        with row_cols[6]:
-            render_overview_metric("coverage", format_percent(row["coverage_adjusted_estimate"], signed=True))
-        with row_cols[7]:
             if st.button("详情", key=f"goto_detail_{row['fund_code']}", use_container_width=True):
                 st.session_state["selected_fund_code"] = row["fund_code"]
                 st.session_state["active_page"] = "详情"
@@ -1140,7 +1134,7 @@ def render_asset_editor(session_factory, selected_fund: str | None) -> None:
     if not selected_fund:
         st.info("先在侧边栏选择一个基金。")
         return
-    st.caption("股票仓位会直接影响 coverage_adjusted_estimate。")
+    st.caption("股票仓位会直接影响修正权重和修正估值。")
 
     with session_factory() as session:
         frame = make_table(
@@ -1274,6 +1268,7 @@ def render_dashboard_tab(
         "fund_code": live_result.fund_code,
         "latest_estimate_date": live_result.trade_date,
         "raw_estimate": live_result.raw_estimate,
+        "effective_weight_estimate": live_result.effective_weight_estimate,
         "coverage_adjusted_estimate": live_result.coverage_adjusted_estimate,
         "calibrated_estimate": live_result.calibrated_estimate,
         "best_estimate": live_result.final_estimate,
@@ -1305,7 +1300,7 @@ def render_dashboard_tab(
     with estimate_cards_top[0]:
         render_stat_card("原始估值", format_percent(snapshot["raw_estimate"], signed=True))
     with estimate_cards_top[1]:
-        render_stat_card("覆盖修正估值", format_percent(snapshot["coverage_adjusted_estimate"], signed=True))
+        render_stat_card("修正权重估值", format_percent(snapshot["effective_weight_estimate"], signed=True))
     with estimate_cards_top[2]:
         render_stat_card("校准估值", format_percent(snapshot["calibrated_estimate"], signed=True))
     with estimate_cards_top[3]:
@@ -1316,21 +1311,24 @@ def render_dashboard_tab(
             {
                 "名称": row.asset_name,
                 "代码": row.asset_code,
-                "占比": row.weight_pct,
+                "公开权重": row.published_weight_pct,
+                "修正权重": row.effective_weight_pct,
                 "涨跌幅": row.return_pct,
                 "贡献": row.contribution_pct,
+                "说明": row.contribution_explain,
             }
             for row in live_result.holdings
         ]
     )
     if not holdings_frame.empty:
-        holdings_frame["占比"] = holdings_frame["占比"].map(lambda value: format_table_percent(value, signed=False))
+        holdings_frame["公开权重"] = holdings_frame["公开权重"].map(lambda value: format_table_percent(value, signed=False))
+        holdings_frame["修正权重"] = holdings_frame["修正权重"].map(lambda value: format_table_percent(value, signed=False))
         holdings_frame["涨跌幅"] = holdings_frame["涨跌幅"].map(lambda value: format_table_percent(value, signed=True))
         holdings_frame["贡献"] = holdings_frame["贡献"].map(lambda value: format_table_percent(value, signed=True))
     st.markdown('<div class="section-title">前10持仓与当日贡献</div>', unsafe_allow_html=True)
     st.caption(f"行情更新时间: {live_result.quote_time.strftime('%H:%M:%S') if live_result.quote_time else 'N/A'}")
     st.dataframe(
-        holdings_frame[["名称", "代码", "占比", "涨跌幅", "贡献"]] if not holdings_frame.empty else holdings_frame,
+        holdings_frame[["名称", "代码", "公开权重", "修正权重", "涨跌幅", "贡献", "说明"]] if not holdings_frame.empty else holdings_frame,
         use_container_width=True,
         hide_index=True,
         height=460,
@@ -1414,6 +1412,12 @@ def run_action(
                         base=base,
                         min_samples=min_samples,
                         selection_policy=selection_policy,
+                    )
+                elif action_name == "生成/更新修正权重":
+                    report = run_effective_weight_action(
+                        session=session,
+                        fund_code=selected_fund,
+                        trade_date=end_date,
                     )
                 else:
                     report = run_selection_action(
@@ -1510,8 +1514,22 @@ def main() -> None:
     with toolbar_right:
         st.markdown('<div class="toolbar-card">', unsafe_allow_html=True)
         st.markdown('<div class="sidebar-block-title" style="margin-top:0;">快捷操作</div>', unsafe_allow_html=True)
-        if st.button("刷新页面", use_container_width=True):
+        if st.button("刷新实时估值", use_container_width=True):
             st.rerun()
+        if st.button("生成/更新修正权重", use_container_width=True):
+            run_action(
+                "生成/更新修正权重",
+                session_factory,
+                data_source,
+                selected_fund,
+                start_date,
+                end_date,
+                selection_policy,
+                window,
+                base,
+                min_samples,
+                sleep_seconds,
+            )
         if st.button("更新该基金历史数据", use_container_width=True):
             run_action(
                 "更新该基金历史数据",
@@ -1540,9 +1558,9 @@ def main() -> None:
                 min_samples,
                 sleep_seconds,
             )
-        if st.button("重新生成 selected_estimates", use_container_width=True):
+        if st.button("重算最终估值选择", use_container_width=True):
             run_action(
-                "重新生成 selected_estimates",
+                "重算最终估值选择",
                 session_factory,
                 data_source,
                 selected_fund,

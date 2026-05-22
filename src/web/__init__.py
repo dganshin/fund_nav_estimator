@@ -1,4 +1,4 @@
-from .actions import ActionReport, run_backfill_action, run_recalculate_action, run_selection_action
+from .actions import ActionReport, run_backfill_action, run_effective_weight_action, run_recalculate_action, run_selection_action
 from .charts import build_error_figure, build_return_comparison_figure
 from .formatting import dataframe_to_csv_bytes, format_method_distribution, format_nullable_percent
 from .queries import (
@@ -15,6 +15,7 @@ from .queries import (
 __all__ = [
     "ActionReport",
     "run_backfill_action",
+    "run_effective_weight_action",
     "run_recalculate_action",
     "run_selection_action",
     "build_error_figure",

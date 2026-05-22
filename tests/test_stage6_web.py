@@ -8,7 +8,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.backfill import fetch_and_store_fund_navs, fetch_and_store_stock_quotes
 from src.db import get_session_factory
-from src.estimator import build_calibration_history, build_estimate_history, build_reconcile_history, compute_live_fund_estimates
+from src.estimator import (
+    build_calibration_history,
+    build_effective_weight_versions,
+    build_estimate_history,
+    build_reconcile_history,
+    compute_live_fund_estimates,
+)
 from src.import_data import (
     import_asset_allocations_from_rows,
     import_funds_from_rows,
@@ -317,4 +323,49 @@ def test_compute_live_fund_estimates_uses_live_quotes(tmp_path):
     assert len(results) == 1
     assert results[0].fund_code == "002207"
     assert results[0].holdings
+    assert results[0].holdings[0].published_weight_pct > 0
+    assert results[0].holdings[0].effective_weight_pct > results[0].holdings[0].published_weight_pct
     assert results[0].final_method in {"raw", "coverage_adjusted", "calibrated"}
+
+
+def test_effective_weight_versions_scale_to_stock_weight(tmp_path):
+    session_factory = create_session_factory(tmp_path)
+    with session_factory() as session:
+        seed_fund_holdings_and_allocations(tmp_path, session)
+        results = build_effective_weight_versions(
+            session=session,
+            trade_date=date.fromisoformat("2026-05-22"),
+            fund_code="002207",
+        )
+
+    assert len(results) == 1
+    assert round(results[0].covered_weight, 8) == 0.35
+    assert round(results[0].stock_weight or 0.0, 8) == 0.9
+    assert round(results[0].total_effective_weight, 8) == 0.9
+
+
+def test_live_effective_weight_estimate_matches_scaled_contribution(tmp_path):
+    session_factory = create_session_factory(tmp_path)
+    with session_factory() as session:
+        seed_fund_holdings_and_allocations(tmp_path, session)
+        results = compute_live_fund_estimates(
+            session=session,
+            live_quotes={
+                "600988.SH": {"return_pct": 0.03},
+                "000975.SZ": {"return_pct": 0.01},
+            },
+            trade_date=date.fromisoformat("2026-05-22"),
+            fund_code="002207",
+            selection_window=20,
+            min_samples=10,
+            min_improvement_bps=5,
+            selection_policy="coverage_first",
+        )
+
+    assert len(results) == 1
+    result = results[0]
+    expected_scale = 0.9 / 0.35
+    expected_effective = (0.2 * expected_scale * 0.03) + (0.15 * expected_scale * 0.01)
+    assert result.effective_weight_estimate is not None
+    assert round(result.effective_weight_estimate, 8) == round(expected_effective, 8)
+    assert round(result.coverage_adjusted_estimate or 0.0, 8) == round(expected_effective, 8)

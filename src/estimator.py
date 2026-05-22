@@ -8,7 +8,19 @@ from datetime import UTC, date, datetime
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
-from .models import ActualReturn, CalibratedEstimate, DailyQuote, EstimateError, Fund, FundAssetAllocation, FundEstimate, HoldingVersion, SelectedEstimate
+from .models import (
+    ActualReturn,
+    CalibratedEstimate,
+    DailyQuote,
+    EffectiveWeightItem,
+    EffectiveWeightVersion,
+    EstimateError,
+    Fund,
+    FundAssetAllocation,
+    FundEstimate,
+    HoldingVersion,
+    SelectedEstimate,
+)
 
 
 @dataclass
@@ -123,9 +135,12 @@ class LiveHoldingContribution:
     asset_code: str
     asset_name: str
     asset_type: str
-    weight_pct: float
+    published_weight_pct: float
+    effective_weight_pct: float
+    adjustment_factor: float
     return_pct: float | None
     contribution_pct: float | None
+    contribution_explain: str
 
 
 @dataclass
@@ -135,6 +150,7 @@ class LiveFundEstimateResult:
     trade_date: date
     quote_time: datetime | None
     raw_estimate: float
+    effective_weight_estimate: float | None
     coverage_adjusted_estimate: float | None
     calibrated_estimate: float | None
     final_estimate: float
@@ -149,6 +165,19 @@ class LiveFundEstimateResult:
     decision_reason: str
     warnings: list[str]
     holdings: list[LiveHoldingContribution]
+
+
+@dataclass
+class EffectiveWeightResult:
+    fund_code: str
+    fund_name: str
+    holding_version_id: int
+    report_date: date
+    covered_weight: float
+    stock_weight: float | None
+    scale_factor: float
+    total_effective_weight: float
+    warnings: list[str]
 
 
 @dataclass
@@ -385,6 +414,168 @@ def compute_coverage_adjusted_estimate(
     ), warnings
 
 
+def calculate_weight_scale_factor(
+    covered_weight: float,
+    stock_weight: float | None,
+) -> float:
+    if stock_weight is None or covered_weight <= 0:
+        return 1.0
+    return stock_weight / covered_weight
+
+
+def build_effective_weight_version(
+    session: Session,
+    fund_code: str,
+    trade_date: date,
+    source: str = "覆盖率缩放",
+) -> EffectiveWeightVersion | None:
+    fund = session.get(Fund, fund_code)
+    holding_version = select_holding_version(session, fund_code, trade_date)
+    if fund is None or holding_version is None:
+        return None
+
+    allocation = select_asset_allocation(session, fund_code, trade_date)
+    covered_weight = sum(item.weight for item in holding_version.items)
+    stock_weight = None if allocation is None else allocation.stock_weight
+    scale_factor = calculate_weight_scale_factor(covered_weight, stock_weight)
+    report_date = holding_version.report_date
+    if allocation is not None and allocation.report_date > report_date:
+        report_date = allocation.report_date
+
+    version = session.scalar(
+        select(EffectiveWeightVersion).where(
+            EffectiveWeightVersion.fund_code == fund_code,
+            EffectiveWeightVersion.holding_version_id == holding_version.id,
+            EffectiveWeightVersion.source == source,
+        )
+    )
+    if version is None:
+        version = EffectiveWeightVersion(
+            fund_code=fund_code,
+            holding_version_id=holding_version.id,
+            asset_allocation_id=None if allocation is None else allocation.id,
+            report_date=report_date,
+            source=source,
+            covered_weight=covered_weight,
+            stock_weight=stock_weight,
+            scale_factor=scale_factor,
+            total_effective_weight=0.0,
+            is_active=True,
+        )
+        session.add(version)
+        session.flush()
+
+    session.query(EffectiveWeightVersion).where(
+        EffectiveWeightVersion.fund_code == fund_code,
+        EffectiveWeightVersion.id != version.id,
+    ).update({"is_active": False}, synchronize_session=False)
+
+    version.asset_allocation_id = None if allocation is None else allocation.id
+    version.report_date = report_date
+    version.covered_weight = covered_weight
+    version.stock_weight = stock_weight
+    version.scale_factor = scale_factor
+    version.is_active = True
+    session.query(EffectiveWeightItem).where(
+        EffectiveWeightItem.effective_weight_version_id == version.id,
+    ).delete(synchronize_session=False)
+    session.flush()
+
+    total_effective_weight = 0.0
+    contribution_explain = "按股票仓位和前十覆盖率统一缩放"
+    if allocation is None or covered_weight <= 0:
+        contribution_explain = "缺少股票仓位或覆盖权重, 使用公开权重"
+    for item in sorted(holding_version.items, key=lambda row: row.weight, reverse=True):
+        effective_weight = item.weight * scale_factor
+        total_effective_weight += effective_weight
+        version.items.append(
+            EffectiveWeightItem(
+                asset_code=item.asset_code,
+                asset_name=item.asset_name,
+                asset_type=item.asset_type,
+                published_weight=item.weight,
+                effective_weight=effective_weight,
+                adjustment_factor=scale_factor,
+                contribution_explain=contribution_explain,
+            )
+        )
+
+    version.total_effective_weight = total_effective_weight
+    session.flush()
+    return version
+
+
+def build_effective_weight_versions(
+    session: Session,
+    trade_date: date,
+    fund_code: str | None = None,
+) -> list[EffectiveWeightResult]:
+    stmt = select(Fund).where(Fund.is_active.is_(True))
+    if fund_code is not None:
+        stmt = stmt.where(Fund.fund_code == fund_code)
+    funds = session.scalars(stmt.order_by(Fund.fund_code.asc())).all()
+
+    results: list[EffectiveWeightResult] = []
+    for fund in funds:
+        version = build_effective_weight_version(session, fund.fund_code, trade_date)
+        if version is None:
+            continue
+        warnings: list[str] = []
+        if version.stock_weight is None:
+            warnings.append("缺少股票仓位, 修正权重回退为公开权重")
+        elif version.covered_weight <= 0:
+            warnings.append("覆盖权重小于等于0, 修正权重回退为公开权重")
+        results.append(
+            EffectiveWeightResult(
+                fund_code=fund.fund_code,
+                fund_name=fund.fund_name,
+                holding_version_id=version.holding_version_id,
+                report_date=version.report_date,
+                covered_weight=version.covered_weight,
+                stock_weight=version.stock_weight,
+                scale_factor=version.scale_factor,
+                total_effective_weight=version.total_effective_weight,
+                warnings=warnings,
+            )
+        )
+    session.commit()
+    return results
+
+
+def get_effective_weight_version(
+    session: Session,
+    fund_code: str,
+    trade_date: date,
+) -> EffectiveWeightVersion | None:
+    holding_version = select_holding_version(session, fund_code, trade_date)
+    if holding_version is None:
+        return None
+
+    allocation = select_asset_allocation(session, fund_code, trade_date)
+    version = session.scalar(
+        select(EffectiveWeightVersion).where(
+            EffectiveWeightVersion.fund_code == fund_code,
+            EffectiveWeightVersion.holding_version_id == holding_version.id,
+            EffectiveWeightVersion.source == "覆盖率缩放",
+        )
+    )
+    if version is None:
+        return build_effective_weight_version(session, fund_code, trade_date)
+
+    target_stock_weight = None if allocation is None else allocation.stock_weight
+    target_scale = calculate_weight_scale_factor(
+        covered_weight=sum(item.weight for item in holding_version.items),
+        stock_weight=target_stock_weight,
+    )
+    if (
+        version.asset_allocation_id != (None if allocation is None else allocation.id)
+        or abs(version.scale_factor - target_scale) > 1e-9
+        or len(version.items) != len(holding_version.items)
+    ):
+        return build_effective_weight_version(session, fund_code, trade_date)
+    return version
+
+
 def compute_live_fund_estimate(
     session: Session,
     fund_code: str,
@@ -407,17 +598,32 @@ def compute_live_fund_estimate(
 
     warnings: list[str] = []
     raw_estimate = 0.0
+    effective_weight_estimate = 0.0
     covered_weight = 0.0
     holdings: list[LiveHoldingContribution] = []
+    effective_version = get_effective_weight_version(session, fund_code, trade_date)
+    effective_weight_map = {}
+    if effective_version is not None:
+        effective_weight_map = {
+            item.asset_code: item
+            for item in effective_version.items
+        }
 
     for item in sorted(version.items, key=lambda row: row.weight, reverse=True):
         quote = live_quotes.get(item.asset_code)
+        effective_item = effective_weight_map.get(item.asset_code)
+        effective_weight = item.weight if effective_item is None else effective_item.effective_weight
+        adjustment_factor = 1.0 if effective_item is None else effective_item.adjustment_factor
+        contribution_explain = "使用公开权重"
+        if effective_item is not None:
+            contribution_explain = effective_item.contribution_explain
         return_pct = None if quote is None else float(quote["return_pct"])
         contribution_pct = None
         if return_pct is not None:
             covered_weight += item.weight
             raw_estimate += item.weight * return_pct
-            contribution_pct = item.weight * return_pct * 100.0
+            effective_weight_estimate += effective_weight * return_pct
+            contribution_pct = effective_weight * return_pct * 100.0
             if quote_time is None:
                 current_quote_time = quote.get("quote_time")
                 if isinstance(current_quote_time, datetime):
@@ -429,21 +635,29 @@ def compute_live_fund_estimate(
                 asset_code=item.asset_code,
                 asset_name=item.asset_name,
                 asset_type=item.asset_type,
-                weight_pct=round(item.weight * 100, 4),
+                published_weight_pct=round(item.weight * 100, 4),
+                effective_weight_pct=round(effective_weight * 100, 4),
+                adjustment_factor=round(adjustment_factor, 6),
                 return_pct=None if return_pct is None else round(return_pct * 100, 4),
                 contribution_pct=None if contribution_pct is None else round(contribution_pct, 4),
+                contribution_explain=contribution_explain,
             )
         )
 
     missing_weight = max(version.total_weight - covered_weight, 0.0)
-    coverage_adjusted_estimate, coverage_warnings = compute_coverage_adjusted_estimate(
-        session=session,
-        fund_code=fund_code,
-        trade_date=trade_date,
-        raw_estimate=raw_estimate,
-        covered_weight=covered_weight,
-    )
-    warnings.extend(coverage_warnings)
+    coverage_adjusted_estimate: float | None = None
+    coverage_warnings: list[str] = []
+    if effective_version is not None:
+        coverage_adjusted_estimate = effective_weight_estimate
+    else:
+        coverage_adjusted_estimate, coverage_warnings = compute_coverage_adjusted_estimate(
+            session=session,
+            fund_code=fund_code,
+            trade_date=trade_date,
+            raw_estimate=raw_estimate,
+            covered_weight=covered_weight,
+        )
+        warnings.extend(coverage_warnings)
 
     current_base_estimate = raw_estimate
     if calibration_base == "coverage_adjusted" and coverage_adjusted_estimate is not None:
@@ -543,6 +757,7 @@ def compute_live_fund_estimate(
         trade_date=trade_date,
         quote_time=quote_time,
         raw_estimate=round(raw_estimate, 8),
+        effective_weight_estimate=None if coverage_adjusted_estimate is None else round(effective_weight_estimate, 8),
         coverage_adjusted_estimate=None if coverage_adjusted_estimate is None else round(coverage_adjusted_estimate, 8),
         calibrated_estimate=None if calibrated_estimate is None else round(calibrated_estimate, 8),
         final_estimate=round(best_estimate, 8),

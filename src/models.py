@@ -29,6 +29,7 @@ class Fund(Base):
     navs: Mapped[list["FundNav"]] = relationship(back_populates="fund")
     asset_allocations: Mapped[list["FundAssetAllocation"]] = relationship(back_populates="fund")
     industry_allocations: Mapped[list["FundIndustryAllocation"]] = relationship(back_populates="fund")
+    effective_weight_versions: Mapped[list["EffectiveWeightVersion"]] = relationship(back_populates="fund")
     calibrated_estimates: Mapped[list["CalibratedEstimate"]] = relationship(back_populates="fund")
     selected_estimates: Mapped[list["SelectedEstimate"]] = relationship(back_populates="fund")
 
@@ -186,6 +187,53 @@ class FundIndustryAllocation(Base):
     )
 
     fund: Mapped["Fund"] = relationship(back_populates="industry_allocations")
+
+
+class EffectiveWeightVersion(Base):
+    __tablename__ = "effective_weight_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False, index=True)
+    holding_version_id: Mapped[int] = mapped_column(ForeignKey("holding_versions.id"), nullable=False, index=True)
+    asset_allocation_id: Mapped[int | None] = mapped_column(ForeignKey("fund_asset_allocations.id"), nullable=True, index=True)
+    report_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    covered_weight: Mapped[float] = mapped_column(Float, nullable=False)
+    stock_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    scale_factor: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    total_effective_weight: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        UniqueConstraint("fund_code", "holding_version_id", "source", name="uq_effective_weight_version"),
+    )
+
+    fund: Mapped["Fund"] = relationship(back_populates="effective_weight_versions")
+    items: Mapped[list["EffectiveWeightItem"]] = relationship(
+        back_populates="version",
+        cascade="all, delete-orphan",
+    )
+
+
+class EffectiveWeightItem(Base):
+    __tablename__ = "effective_weight_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    effective_weight_version_id: Mapped[int] = mapped_column(ForeignKey("effective_weight_versions.id"), nullable=False, index=True)
+    asset_code: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    asset_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    asset_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    published_weight: Mapped[float] = mapped_column(Float, nullable=False)
+    effective_weight: Mapped[float] = mapped_column(Float, nullable=False)
+    adjustment_factor: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    contribution_explain: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("effective_weight_version_id", "asset_code", name="uq_effective_weight_item"),
+    )
+
+    version: Mapped["EffectiveWeightVersion"] = relationship(back_populates="items")
 
 
 class EstimateError(Base):
