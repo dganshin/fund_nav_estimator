@@ -7,6 +7,7 @@ from .queries import (
     get_fund_date_range,
     get_fund_sidebar_context,
     get_latest_dashboard_snapshot,
+    load_fund_detail_holdings,
     load_fund_overview_rows,
     load_estimate_comparison_rows,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "get_fund_date_range",
     "get_fund_sidebar_context",
     "get_latest_dashboard_snapshot",
+    "load_fund_detail_holdings",
     "load_fund_overview_rows",
     "load_estimate_comparison_rows",
 ]

@@ -17,7 +17,12 @@ from src.import_data import (
 )
 from src.init_db import init_db
 from src.web.actions import run_selection_action
-from src.web.queries import get_fund_sidebar_context, load_estimate_comparison_rows, load_fund_overview_rows
+from src.web.queries import (
+    get_fund_sidebar_context,
+    load_estimate_comparison_rows,
+    load_fund_detail_holdings,
+    load_fund_overview_rows,
+)
 from src.web_services import (
     load_asset_allocation_rows,
     load_fund_rows,
@@ -260,3 +265,32 @@ def test_web_overview_rows_support_multi_fund_sorting(tmp_path):
     assert len(rows) >= 2
     assert {row["fund_code"] for row in rows} >= {"000001", "002207"}
     assert "best_estimate" in rows[0]
+
+
+def test_web_detail_holdings_include_quote_and_contribution(tmp_path):
+    session_factory = create_session_factory(tmp_path)
+    data_source = make_mock_source()
+    with session_factory() as session:
+        seed_fund_holdings_and_allocations(tmp_path, session)
+        fetch_and_store_stock_quotes(
+            session,
+            data_source,
+            date.fromisoformat("2026-05-20"),
+            date.fromisoformat("2026-05-20"),
+            ["600988.SH", "000975.SZ"],
+        )
+        build_estimate_history(
+            session,
+            start_date=date.fromisoformat("2026-05-20"),
+            end_date=date.fromisoformat("2026-05-20"),
+            fund_code="002207",
+        )
+        detail = load_fund_detail_holdings(
+            session,
+            fund_code="002207",
+            trade_date=date.fromisoformat("2026-05-20"),
+        )
+
+    assert detail["trade_date"] == date.fromisoformat("2026-05-20")
+    assert detail["rows"]
+    assert "contribution_pct" in detail["rows"][0]

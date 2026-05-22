@@ -30,6 +30,7 @@ if __package__ in {None, ""}:
         get_active_holding_summary,
         get_fund_sidebar_context,
         get_latest_dashboard_snapshot,
+        load_fund_detail_holdings,
         load_fund_overview_rows,
         load_estimate_comparison_rows,
         run_backfill_action,
@@ -68,6 +69,7 @@ else:
         get_active_holding_summary,
         get_fund_sidebar_context,
         get_latest_dashboard_snapshot,
+        load_fund_detail_holdings,
         load_fund_overview_rows,
         load_estimate_comparison_rows,
         run_backfill_action,
@@ -702,6 +704,14 @@ def render_overview_metric(title: str, value: str, note: str | None = None) -> N
     )
 
 
+def format_table_percent(value: float | None, signed: bool = False) -> str:
+    if value is None or pd.isna(value):
+        return "N/A"
+    if signed:
+        return f"{value:+.2f}%"
+    return f"{value:.2f}%"
+
+
 def render_holdings_preview(rows: list[dict[str, object]]) -> None:
     if not rows:
         st.info("当前没有 active holdings。")
@@ -751,37 +761,21 @@ def render_overview_page(
         unsafe_allow_html=True,
     )
 
-    summary_cols = st.columns(4)
-    summary_cols[0].markdown(
-        f'<div class="summary-slab"><div class="summary-slab-title">候选基金数</div><div class="summary-slab-value">{len(rows)}</div></div>',
-        unsafe_allow_html=True,
-    )
-    summary_cols[1].markdown(
-        f'<div class="summary-slab"><div class="summary-slab-title">当前策略</div><div class="summary-slab-value">{format_policy_name(selection_policy)}</div></div>',
-        unsafe_allow_html=True,
-    )
     latest_dates = [row["latest_estimate_date"] for row in rows if row["latest_estimate_date"] is not None]
     latest_date_text = format_display_date(max(latest_dates)) if latest_dates else "N/A"
-    summary_cols[2].markdown(
-        f'<div class="summary-slab"><div class="summary-slab-title">最新估值日期</div><div class="summary-slab-value">{latest_date_text}</div></div>',
-        unsafe_allow_html=True,
-    )
-    summary_cols[3].markdown(
-        f'<div class="summary-slab"><div class="summary-slab-title">当前排序</div><div class="summary-slab-value">{sort_label}</div></div>',
-        unsafe_allow_html=True,
-    )
+    st.caption(f"更新时间: {latest_date_text} | 当前策略: {format_policy_name(selection_policy)} | 候选基金数: {len(rows)}")
 
     st.markdown(
         """
         <div class="overview-row overview-head">
             <div class="overview-grid">
                 <div>基金</div>
-                <div>今日估值</div>
+                <div>估值</div>
+                <div>方法</div>
+                <div>更新时间</div>
                 <div>raw</div>
                 <div>coverage</div>
                 <div>calibrated</div>
-                <div>近20日MAE</div>
-                <div>置信度</div>
                 <div></div>
             </div>
         </div>
@@ -790,37 +784,27 @@ def render_overview_page(
     )
 
     for row in rows:
-        row_cols = st.columns([2.4, 1, 1, 1, 1, 0.95, 0.8, 0.75])
+        row_cols = st.columns([2.9, 1.1, 0.9, 1, 0.95, 0.95, 0.95, 0.7])
         with row_cols[0]:
             st.markdown(
                 f"""
-                <div class="overview-row">
-                    <div class="fund-name">{row['fund_name'] or '未命名基金'}</div>
-                    <div class="fund-code">{row['fund_code']} | 估值 {format_display_date(row['latest_estimate_date'])} | 净值 {format_display_date(row['latest_actual_date'])}</div>
-                </div>
+                <div class="fund-name">{row['fund_name'] or '未命名基金'}</div>
+                <div class="fund-code">{row['fund_code']} | 净值 {format_display_date(row['latest_actual_date'])}</div>
                 """,
                 unsafe_allow_html=True,
             )
         with row_cols[1]:
-            render_overview_metric("今日估值", format_percent(row["best_estimate"], signed=True), format_method_name(row["best_method"]))
+            render_overview_metric("估值", format_percent(row["best_estimate"], signed=True))
         with row_cols[2]:
-            render_overview_metric("raw", format_percent(row["raw_estimate"], signed=True))
+            st.markdown(render_tag_badge(format_method_name(row["best_method"])), unsafe_allow_html=True)
         with row_cols[3]:
-            render_overview_metric("coverage", format_percent(row["coverage_adjusted_estimate"], signed=True))
+            render_overview_metric("更新", format_display_date(row["latest_estimate_date"]))
         with row_cols[4]:
-            render_overview_metric("calibrated", format_percent(row["calibrated_estimate"], signed=True))
+            render_overview_metric("raw", format_percent(row["raw_estimate"], signed=True))
         with row_cols[5]:
-            render_overview_metric("近20日MAE", format_percent(row["latest_mae"]), format_hit_rate(row["direction_hit_rate"]))
+            render_overview_metric("coverage", format_percent(row["coverage_adjusted_estimate"], signed=True))
         with row_cols[6]:
-            st.markdown(
-                f"""
-                <div style="display:flex;flex-direction:column;gap:0.35rem;align-items:flex-start;justify-content:center;min-height:66px;">
-                    {render_tag_badge(row["confidence_level"] or "N/A", badge_type="confidence", level=row["confidence_level"])}
-                    {render_tag_badge(format_method_name(row["best_method"]))}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            render_overview_metric("calibrated", format_percent(row["calibrated_estimate"], signed=True))
         with row_cols[7]:
             if st.button("详情", key=f"goto_detail_{row['fund_code']}", use_container_width=True):
                 st.session_state["selected_fund_code"] = row["fund_code"]
@@ -1194,112 +1178,99 @@ def render_dashboard_tab(
         )
         holding_summary = get_active_holding_summary(session, selected_fund)
         allocation_summary = get_active_asset_allocation_summary(session, selected_fund)
+        detail_holdings = load_fund_detail_holdings(
+            session,
+            fund_code=selected_fund,
+            trade_date=snapshot["latest_estimate_date"],
+        )
 
     render_detail_header(snapshot, selection_policy, window)
 
     st.markdown('<div class="section-title">基金详情</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="section-caption">这里再看单基金的 raw, coverage, calibrated, best, 历史误差和前10持仓。</div>',
+        '<div class="section-caption">主视图只看估值和持仓股票涨跌贡献, 历史误差和校准统计全部后置到分析区。</div>',
         unsafe_allow_html=True,
     )
 
+    stock_weight_text = "N/A" if allocation_summary["stock_weight_pct"] is None else f"{allocation_summary['stock_weight_pct']:.2f}%"
     badge_line = [
         f'<span class="info-badge">最新估值 {snapshot["latest_estimate_date"].isoformat() if snapshot["latest_estimate_date"] else "N/A"}</span>',
-        f'<span class="info-badge">最新真实净值 {snapshot["latest_actual_date"].isoformat() if snapshot["latest_actual_date"] else "N/A"}</span>',
-        f'<span class="info-badge">置信等级 {snapshot["confidence_level"] or "N/A"}</span>',
         f'<span class="info-badge">最终方法 {format_method_name(snapshot["best_method"])}</span>',
+        f'<span class="info-badge">持仓报告日 {holding_summary["report_date"] or "N/A"}</span>',
+        f'<span class="info-badge">股票仓位 {stock_weight_text}</span>',
     ]
     st.markdown(f'<div class="badge-line">{"".join(badge_line)}</div>', unsafe_allow_html=True)
 
-    summary_col1, summary_col2, summary_col3 = st.columns([1.2, 1.1, 1.1])
-    with summary_col1:
-        render_summary_slab(
-            "当前结论",
-            format_percent(snapshot["best_estimate"], signed=True),
-            f"综合选择结果, 当前方法为 {format_method_name(snapshot['best_method'])}",
-        )
-    with summary_col2:
-        render_summary_slab(
-            "最近 MAE",
-            format_percent(snapshot["latest_mae"]),
-            f"方向命中率 {format_hit_rate(snapshot['direction_hit_rate'])}",
-        )
-    with summary_col3:
-        render_summary_slab(
-            "股票仓位",
-            "N/A" if allocation_summary["stock_weight_pct"] is None else f"{allocation_summary['stock_weight_pct']:.2f}%",
-            "用于 coverage_adjusted 放大",
-        )
-
     estimate_cards_top = st.columns(4)
     with estimate_cards_top[0]:
-        render_stat_card("原始估值", format_percent(snapshot["raw_estimate"], signed=True), "不做任何修正")
+        render_stat_card("原始估值", format_percent(snapshot["raw_estimate"], signed=True))
     with estimate_cards_top[1]:
-        render_stat_card(
-            "覆盖修正估值",
-            format_percent(snapshot["coverage_adjusted_estimate"], signed=True),
-            "按股票仓位修正覆盖率",
-        )
+        render_stat_card("覆盖修正估值", format_percent(snapshot["coverage_adjusted_estimate"], signed=True))
     with estimate_cards_top[2]:
-        render_stat_card("校准估值", format_percent(snapshot["calibrated_estimate"], signed=True), "滚动线性校准")
+        render_stat_card("校准估值", format_percent(snapshot["calibrated_estimate"], signed=True))
     with estimate_cards_top[3]:
-        render_stat_card("最终估值", format_percent(snapshot["best_estimate"], signed=True), "保护规则后的最终输出")
+        render_stat_card("最终估值", format_percent(snapshot["best_estimate"], signed=True))
 
-    comparison_frame = comparison_rows_to_frame(compare_rows)
-    dashboard_tab1, dashboard_tab2, dashboard_tab3, dashboard_tab4 = st.tabs(
-        ["估值明细", "历史图表", "统计对比", "前10持仓"]
+    holdings_frame = pd.DataFrame(detail_holdings["rows"]).rename(
+        columns={
+            "asset_name": "名称",
+            "asset_code": "代码",
+            "weight_pct": "占比",
+            "return_pct": "涨跌幅",
+            "contribution_pct": "贡献",
+            "asset_type": "类型",
+        }
+    )
+    if not holdings_frame.empty:
+        holdings_frame["占比"] = holdings_frame["占比"].map(lambda value: format_table_percent(value, signed=False))
+        holdings_frame["涨跌幅"] = holdings_frame["涨跌幅"].map(lambda value: format_table_percent(value, signed=True))
+        holdings_frame["贡献"] = holdings_frame["贡献"].map(lambda value: format_table_percent(value, signed=True))
+    st.markdown('<div class="section-title">前10持仓与当日贡献</div>', unsafe_allow_html=True)
+    st.caption(f"估值交易日: {format_display_date(detail_holdings['trade_date'])}")
+    st.dataframe(
+        holdings_frame[["名称", "代码", "占比", "涨跌幅", "贡献"]] if not holdings_frame.empty else holdings_frame,
+        use_container_width=True,
+        hide_index=True,
+        height=460,
     )
 
-    with dashboard_tab1:
-        title_col, export_col = st.columns([5, 1.3])
-        title_col.markdown('<div class="section-title">估值对比表</div>', unsafe_allow_html=True)
-        title_col.markdown(
-            '<div class="section-caption">逐日查看真实涨跌, raw, coverage, calibrated, best 以及各自误差。</div>',
-            unsafe_allow_html=True,
+    comparison_frame = comparison_rows_to_frame(compare_rows)
+    with st.expander("分析与历史数据", expanded=False):
+        analysis_tab1, analysis_tab2, analysis_tab3, analysis_tab4 = st.tabs(
+            ["估值明细", "历史图表", "统计对比", "原始持仓列表"]
         )
-        export_col.write("")
-        export_col.write("")
-        export_col.download_button(
-            "导出 CSV",
-            data=dataframe_to_csv_bytes(comparison_frame),
-            file_name=f"{selected_fund}_estimate_comparison.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-        st.dataframe(comparison_frame, use_container_width=True, hide_index=True, height=540)
-
-    with dashboard_tab2:
-        st.markdown('<div class="section-title">走势与误差</div>', unsafe_allow_html=True)
-        chart_frame = pd.DataFrame(compare_rows)
-        left_chart, right_chart = st.columns(2)
-        left_chart.plotly_chart(build_return_comparison_figure(chart_frame), use_container_width=True)
-        right_chart.plotly_chart(build_error_figure(chart_frame), use_container_width=True)
-
-    with dashboard_tab3:
-        st.markdown('<div class="section-title">历史准确率统计</div>', unsafe_allow_html=True)
-        metric_tab1, metric_tab2, metric_tab3, metric_tab4 = st.tabs(
-            ["基础误差", "三种估值比较", "校准效果", "最终选择结果"]
-        )
-        with metric_tab1:
-            st.dataframe(stats_to_frame(stats_rows), use_container_width=True, hide_index=True)
-        with metric_tab2:
-            st.dataframe(compare_to_frame(compare_stats_rows), use_container_width=True, hide_index=True)
-        with metric_tab3:
-            st.dataframe(calibration_to_frame(calibration_rows), use_container_width=True, hide_index=True)
-        with metric_tab4:
-            st.dataframe(selected_to_frame(selected_rows), use_container_width=True, hide_index=True)
-
-    with dashboard_tab4:
-        st.markdown('<div class="section-title">当前 active holdings</div>', unsafe_allow_html=True)
-        st.markdown(
-            '<div class="section-caption">参考基金 App 的持仓页, 优先把前10大重仓股做成易扫读的列表。</div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f'<div class="small-note">前10大持仓合计 {holding_summary["total_weight_pct"] or 0:.2f}% | 报告日 {holding_summary["report_date"] or "N/A"}</div>',
-            unsafe_allow_html=True,
-        )
-        render_holdings_preview(holding_summary["rows"])
+        with analysis_tab1:
+            title_col, export_col = st.columns([5, 1.3])
+            title_col.markdown('<div class="section-title">估值明细</div>', unsafe_allow_html=True)
+            export_col.write("")
+            export_col.write("")
+            export_col.download_button(
+                "导出 CSV",
+                data=dataframe_to_csv_bytes(comparison_frame),
+                file_name=f"{selected_fund}_estimate_comparison.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+            st.dataframe(comparison_frame, use_container_width=True, hide_index=True, height=460)
+        with analysis_tab2:
+            chart_frame = pd.DataFrame(compare_rows)
+            left_chart, right_chart = st.columns(2)
+            left_chart.plotly_chart(build_return_comparison_figure(chart_frame), use_container_width=True)
+            right_chart.plotly_chart(build_error_figure(chart_frame), use_container_width=True)
+        with analysis_tab3:
+            metric_tab1, metric_tab2, metric_tab3, metric_tab4 = st.tabs(
+                ["基础误差", "三种估值比较", "校准效果", "最终选择结果"]
+            )
+            with metric_tab1:
+                st.dataframe(stats_to_frame(stats_rows), use_container_width=True, hide_index=True)
+            with metric_tab2:
+                st.dataframe(compare_to_frame(compare_stats_rows), use_container_width=True, hide_index=True)
+            with metric_tab3:
+                st.dataframe(calibration_to_frame(calibration_rows), use_container_width=True, hide_index=True)
+            with metric_tab4:
+                st.dataframe(selected_to_frame(selected_rows), use_container_width=True, hide_index=True)
+        with analysis_tab4:
+            render_holdings_preview(holding_summary["rows"])
 
 
 def run_action(

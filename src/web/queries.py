@@ -10,6 +10,7 @@ from ..estimator import compute_coverage_adjusted_estimate
 from ..models import (
     ActualReturn,
     CalibratedEstimate,
+    DailyQuote,
     Fund,
     FundAssetAllocation,
     FundEstimate,
@@ -178,6 +179,55 @@ def load_fund_overview_rows(
 
     rows.sort(key=sort_value, reverse=descending)
     return rows
+
+
+def load_fund_detail_holdings(
+    session: Session,
+    fund_code: str,
+    trade_date: date | None = None,
+) -> dict[str, object]:
+    if trade_date is None:
+        trade_date = session.scalar(
+            select(func.max(FundEstimate.trade_date)).where(FundEstimate.fund_code == fund_code)
+        )
+    if trade_date is None:
+        return {"trade_date": None, "rows": []}
+
+    version = session.scalars(
+        select(HoldingVersion)
+        .where(
+            HoldingVersion.fund_code == fund_code,
+            HoldingVersion.report_date <= trade_date,
+            HoldingVersion.is_active.is_(True),
+        )
+        .order_by(HoldingVersion.report_date.desc(), HoldingVersion.created_at.desc())
+    ).first()
+    if version is None:
+        return {"trade_date": trade_date, "rows": []}
+
+    quote_map = {
+        quote.asset_code: quote
+        for quote in session.scalars(
+            select(DailyQuote).where(DailyQuote.trade_date == trade_date)
+        ).all()
+    }
+
+    rows: list[dict[str, object]] = []
+    for item in sorted(version.items, key=lambda row: row.weight, reverse=True):
+        quote = quote_map.get(item.asset_code)
+        return_pct = None if quote is None else quote.return_pct
+        contribution = None if return_pct is None else item.weight * return_pct
+        rows.append(
+            {
+                "asset_code": item.asset_code,
+                "asset_name": item.asset_name,
+                "asset_type": item.asset_type,
+                "weight_pct": round(item.weight * 100, 4),
+                "return_pct": None if return_pct is None else round(return_pct * 100, 4),
+                "contribution_pct": None if contribution is None else round(contribution * 100, 4),
+            }
+        )
+    return {"trade_date": trade_date, "rows": rows}
 
 
 def load_estimate_comparison_rows(
