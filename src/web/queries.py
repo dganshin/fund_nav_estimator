@@ -19,6 +19,15 @@ from ..models import (
 )
 
 
+CONFIDENCE_SORT_ORDER = {
+    "A": 4,
+    "B": 3,
+    "C": 2,
+    "D": 1,
+    None: 0,
+}
+
+
 def get_fund_date_range(session: Session, fund_code: str) -> tuple[date | None, date | None]:
     range_row = session.execute(
         select(
@@ -114,6 +123,61 @@ def get_latest_dashboard_snapshot(
         "latest_mae": latest_mae,
         "direction_hit_rate": latest_hit_rate,
     }
+
+
+def load_fund_overview_rows(
+    session: Session,
+    selection_window: int = 20,
+    selection_policy: str = "coverage_first",
+    sort_by: str = "best_estimate",
+    descending: bool = True,
+) -> list[dict[str, object]]:
+    funds = session.scalars(
+        select(Fund).where(Fund.is_active.is_(True)).order_by(Fund.fund_code.asc())
+    ).all()
+
+    rows: list[dict[str, object]] = []
+    for fund in funds:
+        snapshot = get_latest_dashboard_snapshot(
+            session=session,
+            fund_code=fund.fund_code,
+            selection_window=selection_window,
+            selection_policy=selection_policy,
+        )
+        latest_estimate_date = snapshot["latest_estimate_date"]
+        latest_actual_date = snapshot["latest_actual_date"]
+        latest_nav_date = snapshot["latest_nav_date"]
+        rows.append(
+            {
+                "fund_code": fund.fund_code,
+                "fund_name": fund.fund_name,
+                "best_estimate": snapshot["best_estimate"],
+                "raw_estimate": snapshot["raw_estimate"],
+                "coverage_adjusted_estimate": snapshot["coverage_adjusted_estimate"],
+                "calibrated_estimate": snapshot["calibrated_estimate"],
+                "best_method": snapshot["best_method"],
+                "confidence_level": snapshot["confidence_level"],
+                "latest_mae": snapshot["latest_mae"],
+                "direction_hit_rate": snapshot["direction_hit_rate"],
+                "latest_estimate_date": latest_estimate_date,
+                "latest_actual_date": latest_actual_date,
+                "latest_nav_date": latest_nav_date,
+                "sort_confidence": CONFIDENCE_SORT_ORDER.get(snapshot["confidence_level"], 0),
+            }
+        )
+
+    def sort_value(row: dict[str, object]):
+        if sort_by == "fund_name":
+            return (row["fund_name"] or "", row["fund_code"])
+        if sort_by == "confidence":
+            return row["sort_confidence"]
+        if sort_by == "latest_estimate_date":
+            return row["latest_estimate_date"] or date.min
+        value = row.get(sort_by)
+        return -999999 if value is None else value
+
+    rows.sort(key=sort_value, reverse=descending)
+    return rows
 
 
 def load_estimate_comparison_rows(

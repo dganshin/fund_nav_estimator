@@ -30,6 +30,7 @@ if __package__ in {None, ""}:
         get_active_holding_summary,
         get_fund_sidebar_context,
         get_latest_dashboard_snapshot,
+        load_fund_overview_rows,
         load_estimate_comparison_rows,
         run_backfill_action,
         run_recalculate_action,
@@ -67,6 +68,7 @@ else:
         get_active_holding_summary,
         get_fund_sidebar_context,
         get_latest_dashboard_snapshot,
+        load_fund_overview_rows,
         load_estimate_comparison_rows,
         run_backfill_action,
         run_recalculate_action,
@@ -97,10 +99,17 @@ BASE_LABELS = {
 }
 METHOD_LABELS = {
     "raw": "raw",
-    "coverage_adjusted": "coverage_adjusted",
+    "coverage_adjusted": "coverage",
     "calibrated": "calibrated",
     "N/A": "N/A",
     None: "N/A",
+}
+SORT_OPTIONS = {
+    "按今日估值": ("best_estimate", True),
+    "按MAE": ("latest_mae", False),
+    "按置信度": ("confidence", True),
+    "按更新时间": ("latest_estimate_date", True),
+    "按基金名称": ("fund_name", False),
 }
 
 
@@ -160,6 +169,124 @@ def inject_styles() -> None:
         .page-subtitle {
             color: #6f7c96;
             font-size: 0.98rem;
+        }
+        .nav-strip {
+            display: flex;
+            gap: 0.55rem;
+            flex-wrap: wrap;
+            margin-bottom: 0.4rem;
+        }
+        .toolbar-card {
+            background: #ffffff;
+            border: 1px solid #e6ecf7;
+            border-radius: 22px;
+            padding: 1rem 1.1rem;
+            box-shadow: 0 8px 24px rgba(24,39,75,0.04);
+        }
+        .overview-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+        .overview-row {
+            background: #ffffff;
+            border: 1px solid #e8eef8;
+            border-radius: 20px;
+            padding: 1rem 1.05rem;
+            box-shadow: 0 8px 22px rgba(24,39,75,0.04);
+        }
+        .overview-grid {
+            display: grid;
+            grid-template-columns: minmax(220px, 1.5fr) repeat(6, minmax(88px, 1fr)) 96px;
+            gap: 0.85rem;
+            align-items: center;
+        }
+        .overview-head {
+            background: transparent;
+            box-shadow: none;
+            border: none;
+            padding: 0 0.4rem;
+        }
+        .overview-head .overview-grid {
+            color: #8693a9;
+            font-size: 0.84rem;
+            font-weight: 700;
+        }
+        .fund-name {
+            color: #1f2a44;
+            font-size: 1.02rem;
+            font-weight: 800;
+            line-height: 1.28;
+        }
+        .fund-code {
+            color: #91a0b6;
+            font-size: 0.82rem;
+            margin-top: 0.22rem;
+        }
+        .mini-metric {
+            color: #6f7c96;
+            font-size: 0.78rem;
+            margin-bottom: 0.18rem;
+        }
+        .mini-value {
+            color: #1f2a44;
+            font-size: 1rem;
+            font-weight: 800;
+            line-height: 1.18;
+        }
+        .mini-value.positive {
+            color: #ef5350;
+        }
+        .mini-value.negative {
+            color: #10a36d;
+        }
+        .tag-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 52px;
+            border-radius: 999px;
+            padding: 0.32rem 0.7rem;
+            font-size: 0.78rem;
+            font-weight: 800;
+        }
+        .tag-badge.method {
+            color: #2f6bff;
+            background: #eef4ff;
+        }
+        .tag-badge.conf-a {
+            color: #ffffff;
+            background: #2f6bff;
+        }
+        .tag-badge.conf-b {
+            color: #2f6bff;
+            background: #eaf2ff;
+        }
+        .tag-badge.conf-c {
+            color: #9b6b00;
+            background: #fff4d9;
+        }
+        .tag-badge.conf-d {
+            color: #8a97ad;
+            background: #f2f4f8;
+        }
+        .detail-header {
+            background: #ffffff;
+            border: 1px solid #e8eef8;
+            border-radius: 22px;
+            padding: 1.15rem 1.2rem;
+            box-shadow: 0 8px 22px rgba(24,39,75,0.04);
+        }
+        .detail-title {
+            color: #1f2a44;
+            font-size: 1.9rem;
+            font-weight: 800;
+            line-height: 1.15;
+        }
+        .detail-subtitle {
+            color: #73829b;
+            font-size: 0.96rem;
+            margin-top: 0.25rem;
         }
         .app-shell {
             padding: 1.4rem 1.5rem 1.2rem;
@@ -461,6 +588,11 @@ def inject_styles() -> None:
             color: #91a0b6;
             font-size: 0.82rem;
         }
+        @media (max-width: 1100px) {
+            .overview-grid {
+                grid-template-columns: 1.4fr repeat(4, 1fr);
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -499,6 +631,17 @@ def format_distribution(distribution: str | None) -> str:
         if key:
             text = text.replace(f"{key}:", f"{value}:")
     return text
+
+
+def format_display_date(value) -> str:
+    if value is None:
+        return "N/A"
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def confidence_badge_class(level: str | None) -> str:
+    normalized = (level or "D").lower()
+    return f"conf-{normalized}"
 
 
 def get_value_tone(value: str | None) -> str:
@@ -540,6 +683,25 @@ def render_summary_slab(title: str, value: str, note: str | None = None) -> None
     )
 
 
+def render_tag_badge(label: str, badge_type: str = "method", level: str | None = None) -> str:
+    if badge_type == "confidence":
+        return f'<span class="tag-badge {confidence_badge_class(level)}">{label}</span>'
+    return f'<span class="tag-badge method">{label}</span>'
+
+
+def render_overview_metric(title: str, value: str, note: str | None = None) -> None:
+    tone = get_value_tone(value)
+    note_html = f'<div class="fund-code">{note}</div>' if note else ""
+    st.markdown(
+        f"""
+        <div class="mini-metric">{title}</div>
+        <div class="mini-value {tone}">{value}</div>
+        {note_html}
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_holdings_preview(rows: list[dict[str, object]]) -> None:
     if not rows:
         st.info("当前没有 active holdings。")
@@ -565,6 +727,118 @@ def render_holdings_preview(rows: list[dict[str, object]]) -> None:
             """
         )
     st.markdown(f'<div class="holdings-list">{"".join(items)}</div>', unsafe_allow_html=True)
+
+
+def render_overview_page(
+    session_factory,
+    selection_policy: str,
+    window: int,
+    sort_label: str,
+) -> None:
+    sort_by, descending = SORT_OPTIONS[sort_label]
+    with session_factory() as session:
+        rows = load_fund_overview_rows(
+            session=session,
+            selection_window=window,
+            selection_policy=selection_policy,
+            sort_by=sort_by,
+            descending=descending,
+        )
+
+    st.markdown('<div class="section-title">今日估值排序</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-caption">首页只做一件事: 让你先扫全基金池, 看谁涨跌大, 谁更准, 谁需要点进去看。</div>',
+        unsafe_allow_html=True,
+    )
+
+    summary_cols = st.columns(4)
+    summary_cols[0].markdown(
+        f'<div class="summary-slab"><div class="summary-slab-title">候选基金数</div><div class="summary-slab-value">{len(rows)}</div></div>',
+        unsafe_allow_html=True,
+    )
+    summary_cols[1].markdown(
+        f'<div class="summary-slab"><div class="summary-slab-title">当前策略</div><div class="summary-slab-value">{format_policy_name(selection_policy)}</div></div>',
+        unsafe_allow_html=True,
+    )
+    latest_dates = [row["latest_estimate_date"] for row in rows if row["latest_estimate_date"] is not None]
+    latest_date_text = format_display_date(max(latest_dates)) if latest_dates else "N/A"
+    summary_cols[2].markdown(
+        f'<div class="summary-slab"><div class="summary-slab-title">最新估值日期</div><div class="summary-slab-value">{latest_date_text}</div></div>',
+        unsafe_allow_html=True,
+    )
+    summary_cols[3].markdown(
+        f'<div class="summary-slab"><div class="summary-slab-title">当前排序</div><div class="summary-slab-value">{sort_label}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+        <div class="overview-row overview-head">
+            <div class="overview-grid">
+                <div>基金</div>
+                <div>今日估值</div>
+                <div>raw</div>
+                <div>coverage</div>
+                <div>calibrated</div>
+                <div>近20日MAE</div>
+                <div>置信度</div>
+                <div></div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    for row in rows:
+        row_cols = st.columns([2.4, 1, 1, 1, 1, 0.95, 0.8, 0.75])
+        with row_cols[0]:
+            st.markdown(
+                f"""
+                <div class="overview-row">
+                    <div class="fund-name">{row['fund_name'] or '未命名基金'}</div>
+                    <div class="fund-code">{row['fund_code']} | 估值 {format_display_date(row['latest_estimate_date'])} | 净值 {format_display_date(row['latest_actual_date'])}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with row_cols[1]:
+            render_overview_metric("今日估值", format_percent(row["best_estimate"], signed=True), format_method_name(row["best_method"]))
+        with row_cols[2]:
+            render_overview_metric("raw", format_percent(row["raw_estimate"], signed=True))
+        with row_cols[3]:
+            render_overview_metric("coverage", format_percent(row["coverage_adjusted_estimate"], signed=True))
+        with row_cols[4]:
+            render_overview_metric("calibrated", format_percent(row["calibrated_estimate"], signed=True))
+        with row_cols[5]:
+            render_overview_metric("近20日MAE", format_percent(row["latest_mae"]), format_hit_rate(row["direction_hit_rate"]))
+        with row_cols[6]:
+            st.markdown(
+                f"""
+                <div style="display:flex;flex-direction:column;gap:0.35rem;align-items:flex-start;justify-content:center;min-height:66px;">
+                    {render_tag_badge(row["confidence_level"] or "N/A", badge_type="confidence", level=row["confidence_level"])}
+                    {render_tag_badge(format_method_name(row["best_method"]))}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with row_cols[7]:
+            if st.button("详情", key=f"goto_detail_{row['fund_code']}", use_container_width=True):
+                st.session_state["selected_fund_code"] = row["fund_code"]
+                st.session_state["active_page"] = "详情"
+                st.rerun()
+        st.divider()
+
+
+def render_detail_header(snapshot: dict[str, object], selection_policy: str, window: int) -> None:
+    st.markdown(
+        f"""
+        <div class="detail-header">
+            <div class="detail-title">{snapshot['fund_name'] or '未命名基金'}</div>
+            <div class="detail-subtitle">{snapshot['fund_code']} | 当前策略 {format_policy_name(selection_policy)} | 统计窗口 {window} 日</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def stats_to_frame(results) -> pd.DataFrame:
@@ -875,7 +1149,7 @@ def render_dashboard_tab(
     base: str,
 ) -> None:
     if not selected_fund:
-        st.info("先在侧边栏选择一个基金。")
+        st.info("先在首页选择一只基金, 再进入详情。")
         return
 
     with session_factory() as session:
@@ -921,27 +1195,11 @@ def render_dashboard_tab(
         holding_summary = get_active_holding_summary(session, selected_fund)
         allocation_summary = get_active_asset_allocation_summary(session, selected_fund)
 
-    st.markdown(
-        f"""
-        <div class="app-shell">
-            <div class="hero-eyebrow">Fund Intraday Estimation</div>
-            <div class="hero-title">{snapshot['fund_name'] or '未命名基金'}</div>
-            <div class="hero-subtitle">
-                {snapshot['fund_code']} | 当前策略: {format_policy_name(selection_policy)} | 统计窗口: {window} 日
-            </div>
-            <div class="meta-strip">
-                持仓报告日: {holding_summary['report_date'] or 'N/A'} |
-                资产配置报告日: {allocation_summary['report_date'] or 'N/A'} |
-                股票仓位: {'N/A' if allocation_summary['stock_weight_pct'] is None else f"{allocation_summary['stock_weight_pct']:.2f}%"}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    render_detail_header(snapshot, selection_policy, window)
 
-    st.markdown('<div class="section-title">结果看板</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">基金详情</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="section-caption">先看最终估值和可信度, 再往下比 raw, coverage, calibrated 的误差表现。</div>',
+        '<div class="section-caption">这里再看单基金的 raw, coverage, calibrated, best, 历史误差和前10持仓。</div>',
         unsafe_allow_html=True,
     )
 
@@ -1044,7 +1302,7 @@ def render_dashboard_tab(
         render_holdings_preview(holding_summary["rows"])
 
 
-def run_sidebar_action(
+def run_action(
     action_name: str,
     session_factory,
     data_source,
@@ -1058,10 +1316,10 @@ def run_sidebar_action(
     sleep_seconds: float,
 ) -> None:
     if not selected_fund:
-        st.sidebar.error("请先选择基金。")
+        st.error("请先选择一只基金。")
         return
 
-    with st.sidebar.status(f"{action_name} 运行中", expanded=True) as status:
+    with st.status(f"{action_name} 运行中", expanded=True) as status:
         try:
             with session_factory() as session:
                 if action_name == "更新该基金历史数据":
@@ -1108,18 +1366,18 @@ def run_sidebar_action(
         except (DataImportError, DataSourceError, ValueError) as exc:
             status.update(label=f"{action_name} 失败", state="error")
             st.session_state["last_action_report"] = None
-            st.sidebar.error(str(exc))
+            st.error(str(exc))
 
 
 def main() -> None:
-    st.set_page_config(page_title="Fund NAV Estimator", layout="wide")
+    st.set_page_config(page_title="Fund NAV Estimator", layout="wide", initial_sidebar_state="collapsed")
     inject_styles()
     st.markdown(
         """
         <div class="page-shell">
             <div class="page-head">
                 <div class="page-title">基金盘中估值助手</div>
-                <div class="page-subtitle">本地录入, 一键更新, 估值对比, 历史校准全部放在一个轻量工作台里。</div>
+                <div class="page-subtitle">先看基金池汇总, 再点进单基金详情, 管理功能单独后置。</div>
             </div>
         </div>
         """,
@@ -1134,107 +1392,111 @@ def main() -> None:
 
     fund_options = sidebar_context["fund_options"]
     fund_map = {code: name for code, name in fund_options}
-    default_fund_code = sidebar_context["selected_fund_code"]
-    default_index = 0
+    default_fund_code = st.session_state.get("selected_fund_code") or sidebar_context["selected_fund_code"]
     if default_fund_code and default_fund_code in fund_map:
-        default_index = list(fund_map.keys()).index(default_fund_code)
-
-    st.sidebar.markdown('<div class="sidebar-section-title">基金工作台</div>', unsafe_allow_html=True)
-    st.sidebar.markdown('<div class="sidebar-block-title">基金选择</div>', unsafe_allow_html=True)
-    selected_fund = st.sidebar.selectbox(
-        "基金",
-        options=list(fund_map.keys()),
-        index=default_index if fund_map else None,
-        format_func=lambda item: f"{item} | {fund_map[item]}",
-    ) if fund_map else None
-
+        st.session_state["selected_fund_code"] = default_fund_code
     default_start = sidebar_context["start_date"] or date.today().replace(day=1)
     default_end = sidebar_context["end_date"] or date.today()
-
-    st.sidebar.markdown('<div class="sidebar-block-title">日期范围</div>', unsafe_allow_html=True)
-    start_date = st.sidebar.date_input("开始日期", value=default_start)
-    end_date = st.sidebar.date_input("结束日期", value=default_end)
-
-    st.sidebar.markdown('<div class="sidebar-block-title">估值策略</div>', unsafe_allow_html=True)
-    selection_policy = st.sidebar.selectbox(
-        "最终估值选择策略",
-        options=["coverage_first", "calibrated_if_clear", "default"],
-        index=0,
-        format_func=format_policy_name,
+    nav_options = ["首页", "详情", "管理", "更新日志"]
+    if st.session_state.get("active_page") not in nav_options:
+        st.session_state["active_page"] = "首页"
+    page = st.radio(
+        "页面",
+        nav_options,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="active_page",
     )
 
-    with st.sidebar.expander("高级参数", expanded=False):
-        window = int(st.number_input("统计窗口", min_value=5, max_value=120, value=20, step=1))
-        base = st.selectbox("校准基准", options=["coverage_adjusted", "raw"], index=0, format_func=lambda item: BASE_LABELS[item])
-        min_samples = int(st.number_input("最小样本数", min_value=3, max_value=60, value=5, step=1))
-        sleep_seconds = float(st.number_input("抓取间隔(秒)", min_value=0.0, max_value=2.0, value=0.2, step=0.1))
-
-    st.sidebar.markdown('<div class="sidebar-block-title">操作按钮</div>', unsafe_allow_html=True)
-    if st.sidebar.button("刷新页面", use_container_width=True):
-        st.rerun()
-    if st.sidebar.button("更新该基金历史数据", use_container_width=True):
-        run_sidebar_action(
-            "更新该基金历史数据",
-            session_factory,
-            data_source,
-            selected_fund,
-            start_date,
-            end_date,
-            selection_policy,
-            window,
-            base,
-            min_samples,
-            sleep_seconds,
+    toolbar_left, toolbar_right = st.columns([4.6, 2.4])
+    with toolbar_left:
+        st.markdown('<div class="toolbar-card">', unsafe_allow_html=True)
+        filter_cols = st.columns([1.25, 1, 1, 1.05, 1.1])
+        selected_fund = filter_cols[0].selectbox(
+            "基金",
+            options=list(fund_map.keys()),
+            index=list(fund_map.keys()).index(st.session_state["selected_fund_code"]) if fund_map and st.session_state.get("selected_fund_code") in fund_map else 0 if fund_map else None,
+            format_func=lambda item: f"{item} | {fund_map[item]}",
+        ) if fund_map else None
+        if selected_fund:
+            st.session_state["selected_fund_code"] = selected_fund
+        start_date = filter_cols[1].date_input("开始日期", value=default_start, key="main_start_date")
+        end_date = filter_cols[2].date_input("结束日期", value=default_end, key="main_end_date")
+        selection_policy = filter_cols[3].selectbox(
+            "估值策略",
+            options=["coverage_first", "calibrated_if_clear", "default"],
+            index=0,
+            format_func=format_policy_name,
+            key="main_selection_policy",
         )
-    if st.sidebar.button("重新计算估值", use_container_width=True):
-        run_sidebar_action(
-            "重新计算估值",
-            session_factory,
-            data_source,
-            selected_fund,
-            start_date,
-            end_date,
-            selection_policy,
-            window,
-            base,
-            min_samples,
-            sleep_seconds,
-        )
-    if st.sidebar.button("重新生成 selected_estimates", use_container_width=True):
-        run_sidebar_action(
-            "重新生成 selected_estimates",
-            session_factory,
-            data_source,
-            selected_fund,
-            start_date,
-            end_date,
-            selection_policy,
-            window,
-            base,
-            min_samples,
-            sleep_seconds,
-        )
+        sort_label = filter_cols[4].selectbox("首页排序", options=list(SORT_OPTIONS.keys()), index=0)
+        with st.expander("高级参数", expanded=False):
+            advanced_cols = st.columns(3)
+            window = int(advanced_cols[0].number_input("统计窗口", min_value=5, max_value=120, value=20, step=1))
+            base = advanced_cols[1].selectbox("校准基准", options=["coverage_adjusted", "raw"], index=0, format_func=lambda item: BASE_LABELS[item])
+            min_samples = int(advanced_cols[2].number_input("最小样本数", min_value=3, max_value=60, value=5, step=1))
+            sleep_seconds = float(st.number_input("抓取间隔(秒)", min_value=0.0, max_value=2.0, value=0.2, step=0.1))
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    st.sidebar.markdown(
-        """
-        <div class="sidebar-help">
-            日常使用建议:
-            <br/>1. 先选基金和日期区间
-            <br/>2. 点"更新该基金历史数据"
-            <br/>3. 回到结果看板看 raw, coverage, calibrated, best 的差异
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.sidebar.caption("启动命令")
-    st.sidebar.code("streamlit run src/web_app.py", language="bash")
-
-    tab_dashboard, tab_actions, tab_funds, tab_holdings, tab_asset, tab_industry = st.tabs(
-        ["结果看板", "更新日志", "基金管理", "持仓管理", "资产配置", "行业配置"]
-    )
+    with toolbar_right:
+        st.markdown('<div class="toolbar-card">', unsafe_allow_html=True)
+        st.markdown('<div class="sidebar-block-title" style="margin-top:0;">快捷操作</div>', unsafe_allow_html=True)
+        if st.button("刷新页面", use_container_width=True):
+            st.rerun()
+        if st.button("更新该基金历史数据", use_container_width=True):
+            run_action(
+                "更新该基金历史数据",
+                session_factory,
+                data_source,
+                selected_fund,
+                start_date,
+                end_date,
+                selection_policy,
+                window,
+                base,
+                min_samples,
+                sleep_seconds,
+            )
+        if st.button("重新计算估值", use_container_width=True):
+            run_action(
+                "重新计算估值",
+                session_factory,
+                data_source,
+                selected_fund,
+                start_date,
+                end_date,
+                selection_policy,
+                window,
+                base,
+                min_samples,
+                sleep_seconds,
+            )
+        if st.button("重新生成 selected_estimates", use_container_width=True):
+            run_action(
+                "重新生成 selected_estimates",
+                session_factory,
+                data_source,
+                selected_fund,
+                start_date,
+                end_date,
+                selection_policy,
+                window,
+                base,
+                min_samples,
+                sleep_seconds,
+            )
+        st.caption("日常先看首页排序, 需要时再点详情。")
+        st.markdown("</div>", unsafe_allow_html=True)
 
     try:
-        with tab_dashboard:
+        if page == "首页":
+            render_overview_page(
+                session_factory=session_factory,
+                selection_policy=selection_policy,
+                window=window,
+                sort_label=sort_label,
+            )
+        elif page == "详情":
             render_dashboard_tab(
                 session_factory=session_factory,
                 selected_fund=selected_fund,
@@ -1244,16 +1506,20 @@ def main() -> None:
                 window=window,
                 base=base,
             )
-        with tab_actions:
+        elif page == "管理":
+            manage_tab1, manage_tab2, manage_tab3, manage_tab4 = st.tabs(
+                ["基金管理", "持仓管理", "资产配置", "行业配置"]
+            )
+            with manage_tab1:
+                render_fund_editor(session_factory)
+            with manage_tab2:
+                render_holdings_editor(session_factory, selected_fund)
+            with manage_tab3:
+                render_asset_editor(session_factory, selected_fund)
+            with manage_tab4:
+                render_industry_editor(session_factory, selected_fund)
+        else:
             render_action_report()
-        with tab_funds:
-            render_fund_editor(session_factory)
-        with tab_holdings:
-            render_holdings_editor(session_factory, selected_fund)
-        with tab_asset:
-            render_asset_editor(session_factory, selected_fund)
-        with tab_industry:
-            render_industry_editor(session_factory, selected_fund)
     except (DataImportError, DataSourceError, ValueError) as exc:
         st.error(str(exc))
 

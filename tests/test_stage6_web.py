@@ -17,7 +17,7 @@ from src.import_data import (
 )
 from src.init_db import init_db
 from src.web.actions import run_selection_action
-from src.web.queries import get_fund_sidebar_context, load_estimate_comparison_rows
+from src.web.queries import get_fund_sidebar_context, load_estimate_comparison_rows, load_fund_overview_rows
 from src.web_services import (
     load_asset_allocation_rows,
     load_fund_rows,
@@ -231,3 +231,32 @@ def test_web_actions_and_queries_build_comparison_rows(tmp_path):
     assert rows
     assert "best_method" in rows[0]
     assert "raw_error" in rows[0]
+
+
+def test_web_overview_rows_support_multi_fund_sorting(tmp_path):
+    session_factory = create_session_factory(tmp_path)
+    with session_factory() as session:
+        seed_fund_holdings_and_allocations(tmp_path, session)
+        import_funds_from_rows(
+            session,
+            [
+                {
+                    "fund_code": "000001",
+                    "fund_name": "示例成长混合",
+                    "fund_type": "equity",
+                    "market": "A股",
+                    "is_active": True,
+                }
+            ],
+        )
+        rows = load_fund_overview_rows(
+            session,
+            selection_window=20,
+            selection_policy="coverage_first",
+            sort_by="fund_name",
+            descending=False,
+        )
+
+    assert len(rows) >= 2
+    assert {row["fund_code"] for row in rows} >= {"000001", "002207"}
+    assert "best_estimate" in rows[0]
