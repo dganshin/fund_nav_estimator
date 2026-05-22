@@ -96,7 +96,7 @@ def get_cached_session_factory():
 
 @st.cache_resource
 def get_cached_data_source():
-    return AKShareDataSource(cache_dir=RAW_CACHE_DIR)
+    return AKShareDataSource(raw_dir=RAW_CACHE_DIR)
 
 
 def clean_records(frame: pd.DataFrame) -> list[dict[str, object]]:
