@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.backfill import fetch_and_store_fund_navs, fetch_and_store_stock_quotes
 from src.db import get_session_factory
-from src.estimator import build_calibration_history, build_estimate_history, build_reconcile_history
+from src.estimator import build_calibration_history, build_estimate_history, build_reconcile_history, compute_live_fund_estimates
 from src.import_data import (
     import_asset_allocations_from_rows,
     import_funds_from_rows,
@@ -294,3 +294,27 @@ def test_web_detail_holdings_include_quote_and_contribution(tmp_path):
     assert detail["trade_date"] == date.fromisoformat("2026-05-20")
     assert detail["rows"]
     assert "contribution_pct" in detail["rows"][0]
+
+
+def test_compute_live_fund_estimates_uses_live_quotes(tmp_path):
+    session_factory = create_session_factory(tmp_path)
+    with session_factory() as session:
+        seed_fund_holdings_and_allocations(tmp_path, session)
+        results = compute_live_fund_estimates(
+            session=session,
+            live_quotes={
+                "600988.SH": {"return_pct": -0.03},
+                "000975.SZ": {"return_pct": 0.01},
+            },
+            trade_date=date.fromisoformat("2026-05-22"),
+            fund_code="002207",
+            selection_window=20,
+            min_samples=10,
+            min_improvement_bps=5,
+            selection_policy="coverage_first",
+        )
+
+    assert len(results) == 1
+    assert results[0].fund_code == "002207"
+    assert results[0].holdings
+    assert results[0].final_method in {"raw", "coverage_adjusted", "calibrated"}

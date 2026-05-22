@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 
-from .base import DataSourceError, FundNavRecord, StockQuoteRecord
+from .base import DataSourceError, FundNavRecord, LiveStockQuoteRecord, StockQuoteRecord
 from .code_utils import normalize_asset_code, to_plain_symbol, to_prefixed_symbol
 
 
@@ -116,6 +116,28 @@ class AKShareDataSource:
                 time.sleep(sleep_seconds)
 
         records.sort(key=lambda item: (item.trade_date, item.asset_code))
+        return records
+
+    def fetch_stock_live_quotes(
+        self,
+        asset_codes: list[str],
+        sleep_seconds: float = 0.0,
+    ) -> list[LiveStockQuoteRecord]:
+        self.last_warnings = []
+        records: list[LiveStockQuoteRecord] = []
+        dedup_codes = list(dict.fromkeys(asset_codes))
+        for index, asset_code in enumerate(dedup_codes):
+            try:
+                record = self._fetch_stock_live_quote(asset_code)
+                if record is not None:
+                    records.append(record)
+            except Exception as exc:
+                self.last_warnings.append(
+                    f"Warning: live stock quote fetch failed for {asset_code}: {exc}"
+                )
+            if sleep_seconds > 0 and index < len(dedup_codes) - 1:
+                time.sleep(sleep_seconds)
+        records.sort(key=lambda item: item.asset_code)
         return records
 
     def fetch_fund_holdings(
@@ -310,3 +332,58 @@ class AKShareDataSource:
                 )
             )
         return records
+
+    def _fetch_stock_live_quote(self, asset_code: str) -> LiveStockQuoteRecord | None:
+        symbol = to_prefixed_symbol(asset_code)
+        quote_df = self.ak.stock_individual_spot_xq(symbol=symbol)
+        if quote_df is None or quote_df.empty:
+            return None
+
+        self._cache_dataframe(
+            quote_df,
+            f"stock_live_{normalize_asset_code(asset_code)}_{date.today().isoformat()}.csv",
+        )
+        value_map = {
+            str(row["item"]): row["value"]
+            for _, row in quote_df.iterrows()
+        }
+        latest_price = self._to_float(value_map.get("现价"))
+        prev_close = self._to_float(value_map.get("昨收"))
+        if latest_price is None or prev_close in (None, 0):
+            raise DataSourceError(
+                f"AKShare live quote fields missing for {asset_code}. Actual items: {list(value_map.keys())}"
+            )
+
+        change_pct = (latest_price / prev_close - 1.0) * 100.0
+
+        quote_time_raw = value_map.get("时间")
+        quote_time = datetime.now()
+        if quote_time_raw is not None:
+            try:
+                parsed_time = pd.to_datetime(quote_time_raw).to_pydatetime()
+                if parsed_time.date() == date.today():
+                    quote_time = parsed_time
+                else:
+                    self.last_warnings.append(
+                        f"Warning: live quote timestamp for {asset_code} is stale ({parsed_time}), use local fetch time instead."
+                    )
+            except Exception:
+                quote_time = datetime.now()
+
+        name = str(value_map.get("名称") or normalize_asset_code(asset_code))
+        return LiveStockQuoteRecord(
+            trade_date=quote_time.date(),
+            quote_time=quote_time,
+            asset_code=normalize_asset_code(asset_code),
+            asset_name=name,
+            return_pct=float(change_pct) / 100.0,
+            source="akshare:xq_live",
+        )
+
+    def _to_float(self, value) -> float | None:
+        if value is None or pd.isna(value):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None

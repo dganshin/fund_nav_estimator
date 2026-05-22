@@ -119,6 +119,39 @@ class CalibrationStatsResult:
 
 
 @dataclass
+class LiveHoldingContribution:
+    asset_code: str
+    asset_name: str
+    asset_type: str
+    weight_pct: float
+    return_pct: float | None
+    contribution_pct: float | None
+
+
+@dataclass
+class LiveFundEstimateResult:
+    fund_code: str
+    fund_name: str
+    trade_date: date
+    quote_time: datetime | None
+    raw_estimate: float
+    coverage_adjusted_estimate: float | None
+    calibrated_estimate: float | None
+    final_estimate: float
+    final_method: str
+    confidence_level: str | None
+    covered_weight: float
+    missing_weight: float
+    latest_mae: float | None
+    direction_hit_rate: float | None
+    holding_version_id: int | None
+    best_status: str
+    decision_reason: str
+    warnings: list[str]
+    holdings: list[LiveHoldingContribution]
+
+
+@dataclass
 class CompareEstimatesResult:
     fund_code: str
     fund_name: str
@@ -350,6 +383,220 @@ def compute_coverage_adjusted_estimate(
         covered_weight,
         allocation.stock_weight,
     ), warnings
+
+
+def compute_live_fund_estimate(
+    session: Session,
+    fund_code: str,
+    live_quotes: dict[str, dict[str, object]],
+    trade_date: date,
+    quote_time: datetime | None = None,
+    fund_name: str | None = None,
+    selection_window: int = 20,
+    min_samples: int = 10,
+    min_improvement_bps: int = 5,
+    selection_policy: str = "coverage_first",
+    calibration_window: int = 20,
+    calibration_base: str = "coverage_adjusted",
+    calibration_min_samples: int = 5,
+) -> LiveFundEstimateResult | None:
+    fund = session.get(Fund, fund_code)
+    version = select_holding_version(session, fund_code, trade_date)
+    if version is None:
+        return None
+
+    warnings: list[str] = []
+    raw_estimate = 0.0
+    covered_weight = 0.0
+    holdings: list[LiveHoldingContribution] = []
+
+    for item in sorted(version.items, key=lambda row: row.weight, reverse=True):
+        quote = live_quotes.get(item.asset_code)
+        return_pct = None if quote is None else float(quote["return_pct"])
+        contribution_pct = None
+        if return_pct is not None:
+            covered_weight += item.weight
+            raw_estimate += item.weight * return_pct
+            contribution_pct = item.weight * return_pct * 100.0
+            if quote_time is None:
+                current_quote_time = quote.get("quote_time")
+                if isinstance(current_quote_time, datetime):
+                    quote_time = current_quote_time
+        else:
+            warnings.append(f"Warning: live quote missing for {item.asset_code}.")
+        holdings.append(
+            LiveHoldingContribution(
+                asset_code=item.asset_code,
+                asset_name=item.asset_name,
+                asset_type=item.asset_type,
+                weight_pct=round(item.weight * 100, 4),
+                return_pct=None if return_pct is None else round(return_pct * 100, 4),
+                contribution_pct=None if contribution_pct is None else round(contribution_pct, 4),
+            )
+        )
+
+    missing_weight = max(version.total_weight - covered_weight, 0.0)
+    coverage_adjusted_estimate, coverage_warnings = compute_coverage_adjusted_estimate(
+        session=session,
+        fund_code=fund_code,
+        trade_date=trade_date,
+        raw_estimate=raw_estimate,
+        covered_weight=covered_weight,
+    )
+    warnings.extend(coverage_warnings)
+
+    current_base_estimate = raw_estimate
+    if calibration_base == "coverage_adjusted" and coverage_adjusted_estimate is not None:
+        current_base_estimate = coverage_adjusted_estimate
+
+    training_samples = collect_training_samples(
+        session=session,
+        fund_code=fund_code,
+        trade_date=trade_date,
+        window=calibration_window,
+        requested_base=calibration_base,
+    )
+    sample_count = len(training_samples)
+    calibrated_estimate = None
+    calibrated_mae: float | None = None
+    calibrated_hit_rate: float | None = None
+    calibrated_corr: float | None = None
+    if sample_count >= calibration_min_samples:
+        x_values = [sample.base_estimate for sample in training_samples]
+        y_values = [sample.actual_return for sample in training_samples]
+        regression = calculate_linear_regression(x_values, y_values)
+        if regression is not None:
+            alpha, beta = regression
+            calibrated_estimate = alpha + beta * current_base_estimate
+            train_predictions = [alpha + beta * value for value in x_values]
+            train_errors = [actual - predicted for actual, predicted in zip(y_values, train_predictions)]
+            calibrated_mae = sum(abs(error) for error in train_errors) / sample_count
+            calibrated_hit_rate = sum(
+                1 for predicted, actual in zip(train_predictions, y_values)
+                if is_direction_hit(predicted, actual)
+            ) / sample_count
+            calibrated_corr = calculate_correlation(x_values, y_values)
+
+    history_rows = _collect_selection_history(
+        session=session,
+        fund_code=fund_code,
+        trade_date=trade_date,
+        selection_window=selection_window,
+    )
+    method_errors = _build_method_error_history(history_rows)
+    raw_mae = _calculate_mae_from_errors(method_errors["raw"])
+    coverage_mae = _calculate_mae_from_errors(method_errors["coverage_adjusted"])
+    raw_hit_rate = _calculate_hit_rate_from_errors(method_errors["raw"])
+    coverage_hit_rate = _calculate_hit_rate_from_errors(method_errors["coverage_adjusted"])
+    raw_corr = _calculate_corr_from_error_history(method_errors["raw"])
+    coverage_corr = _calculate_corr_from_error_history(method_errors["coverage_adjusted"])
+
+    selected_sample_count = len(history_rows)
+    best_method, best_estimate, best_status, decision_reason = _select_best_method_for_policy(
+        selection_policy=selection_policy,
+        raw_estimate=raw_estimate,
+        coverage_adjusted_estimate=coverage_adjusted_estimate,
+        calibrated_estimate=calibrated_estimate,
+        sample_count=selected_sample_count,
+        min_samples=min_samples,
+        improvement_threshold=min_improvement_bps / 10000.0,
+        min_improvement_bps=min_improvement_bps,
+        raw_mae=raw_mae,
+        coverage_mae=coverage_mae,
+        calibrated_mae=calibrated_mae,
+        raw_hit_rate=raw_hit_rate,
+        coverage_hit_rate=coverage_hit_rate,
+        calibrated_hit_rate=calibrated_hit_rate,
+        raw_corr=raw_corr,
+        coverage_corr=coverage_corr,
+        calibrated_corr=calibrated_corr,
+        method_errors=method_errors,
+        warnings=warnings,
+    )
+    best_mae = {
+        "raw": raw_mae,
+        "coverage_adjusted": coverage_mae,
+        "calibrated": calibrated_mae,
+    }.get(best_method)
+    best_hit_rate = {
+        "raw": raw_hit_rate,
+        "coverage_adjusted": coverage_hit_rate,
+        "calibrated": calibrated_hit_rate,
+    }.get(best_method)
+    best_corr = {
+        "raw": raw_corr,
+        "coverage_adjusted": coverage_corr,
+        "calibrated": calibrated_corr,
+    }.get(best_method)
+    _, confidence_level = determine_selected_confidence(
+        sample_count=selected_sample_count,
+        min_samples=min_samples,
+        mean_abs_error=best_mae,
+        direction_hit_rate=best_hit_rate,
+        corr=best_corr,
+        best_status=best_status,
+    )
+
+    return LiveFundEstimateResult(
+        fund_code=fund_code,
+        fund_name=fund_name or (fund.fund_name if fund is not None else fund_code),
+        trade_date=trade_date,
+        quote_time=quote_time,
+        raw_estimate=round(raw_estimate, 8),
+        coverage_adjusted_estimate=None if coverage_adjusted_estimate is None else round(coverage_adjusted_estimate, 8),
+        calibrated_estimate=None if calibrated_estimate is None else round(calibrated_estimate, 8),
+        final_estimate=round(best_estimate, 8),
+        final_method=best_method,
+        confidence_level=confidence_level,
+        covered_weight=round(covered_weight, 8),
+        missing_weight=round(missing_weight, 8),
+        latest_mae=best_mae,
+        direction_hit_rate=best_hit_rate,
+        holding_version_id=version.id,
+        best_status=best_status,
+        decision_reason=decision_reason,
+        warnings=warnings,
+        holdings=holdings,
+    )
+
+
+def compute_live_fund_estimates(
+    session: Session,
+    live_quotes: dict[str, dict[str, object]],
+    trade_date: date,
+    quote_time: datetime | None = None,
+    fund_code: str | None = None,
+    selection_window: int = 20,
+    min_samples: int = 10,
+    min_improvement_bps: int = 5,
+    selection_policy: str = "coverage_first",
+    calibration_window: int = 20,
+    calibration_base: str = "coverage_adjusted",
+    calibration_min_samples: int = 5,
+) -> list[LiveFundEstimateResult]:
+    stmt = select(Fund).where(Fund.is_active.is_(True)).order_by(Fund.fund_code.asc())
+    if fund_code:
+        stmt = stmt.where(Fund.fund_code == fund_code)
+    results: list[LiveFundEstimateResult] = []
+    for fund in session.scalars(stmt).all():
+        result = compute_live_fund_estimate(
+            session=session,
+            fund_code=fund.fund_code,
+            live_quotes=live_quotes,
+            trade_date=trade_date,
+            quote_time=quote_time,
+            fund_name=fund.fund_name,
+            selection_window=selection_window,
+            min_samples=min_samples,
+            min_improvement_bps=min_improvement_bps,
+            selection_policy=selection_policy,
+            calibration_window=calibration_window,
+            calibration_base=calibration_base,
+            calibration_min_samples=calibration_min_samples,
+        )
+        if result is not None:
+            results.append(result)
+    return results
 
 
 def build_fund_estimates(

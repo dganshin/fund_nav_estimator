@@ -12,6 +12,7 @@ if __package__ in {None, ""}:
     from src.data_sources import AKShareDataSource, DataSourceError
     from src.db import get_session_factory
     from src.estimator import (
+        compute_live_fund_estimates,
         calculate_calibration_stats,
         calculate_compare_estimates,
         calculate_error_stats,
@@ -51,6 +52,7 @@ else:
     from .data_sources import AKShareDataSource, DataSourceError
     from .db import get_session_factory
     from .estimator import (
+        compute_live_fund_estimates,
         calculate_calibration_stats,
         calculate_compare_estimates,
         calculate_error_stats,
@@ -739,31 +741,110 @@ def render_holdings_preview(rows: list[dict[str, object]]) -> None:
     st.markdown(f'<div class="holdings-list">{"".join(items)}</div>', unsafe_allow_html=True)
 
 
-def render_overview_page(
+def load_live_estimate_results(
     session_factory,
+    data_source,
     selection_policy: str,
     window: int,
+    min_samples: int,
+    sleep_seconds: float,
+    fund_code: str | None = None,
+) -> tuple[list, list[str]]:
+    with session_factory() as session:
+        holding_rows = load_holding_rows(session, fund_code)
+        asset_codes = list(dict.fromkeys(row["asset_code"] for row in holding_rows))
+    if not asset_codes:
+        return [], ["Warning: no active holdings available for live estimate."]
+
+    if hasattr(data_source, "last_warnings"):
+        data_source.last_warnings = []  # type: ignore[attr-defined]
+    live_records = data_source.fetch_stock_live_quotes(asset_codes=asset_codes, sleep_seconds=sleep_seconds)
+    warnings = list(getattr(data_source, "last_warnings", []))
+    if not live_records:
+        warnings.append("Warning: no live quotes fetched.")
+        return [], warnings
+
+    quote_time = max(record.quote_time for record in live_records)
+    live_quote_map = {
+        record.asset_code: {
+            "asset_name": record.asset_name,
+            "return_pct": record.return_pct,
+            "quote_time": record.quote_time,
+            "source": record.source,
+        }
+        for record in live_records
+    }
+    with session_factory() as session:
+        results = compute_live_fund_estimates(
+            session=session,
+            live_quotes=live_quote_map,
+            trade_date=quote_time.date(),
+            quote_time=quote_time,
+            fund_code=fund_code,
+            selection_window=window,
+            min_samples=max(10, min_samples),
+            min_improvement_bps=5,
+            selection_policy=selection_policy,
+            calibration_window=window,
+            calibration_base="coverage_adjusted",
+            calibration_min_samples=5,
+        )
+    return results, warnings
+
+
+def render_overview_page(
+    session_factory,
+    data_source,
+    selection_policy: str,
+    window: int,
+    min_samples: int,
+    sleep_seconds: float,
     sort_label: str,
 ) -> None:
+    results, warnings = load_live_estimate_results(
+        session_factory=session_factory,
+        data_source=data_source,
+        selection_policy=selection_policy,
+        window=window,
+        min_samples=min_samples,
+        sleep_seconds=sleep_seconds,
+    )
+    rows = [
+        {
+            "fund_code": item.fund_code,
+            "fund_name": item.fund_name,
+            "best_estimate": item.final_estimate,
+            "raw_estimate": item.raw_estimate,
+            "coverage_adjusted_estimate": item.coverage_adjusted_estimate,
+            "calibrated_estimate": item.calibrated_estimate,
+            "best_method": item.final_method,
+            "confidence_level": item.confidence_level,
+            "latest_estimate_date": item.trade_date,
+            "quote_time": item.quote_time,
+            "warnings": item.warnings,
+        }
+        for item in results
+    ]
     sort_by, descending = SORT_OPTIONS[sort_label]
-    with session_factory() as session:
-        rows = load_fund_overview_rows(
-            session=session,
-            selection_window=window,
-            selection_policy=selection_policy,
-            sort_by=sort_by,
-            descending=descending,
-        )
+    if sort_by == "best_estimate":
+        rows.sort(key=lambda row: -999999 if row["best_estimate"] is None else row["best_estimate"], reverse=descending)
+    elif sort_by == "fund_name":
+        rows.sort(key=lambda row: (row["fund_name"] or "", row["fund_code"]), reverse=descending)
+    elif sort_by == "latest_estimate_date":
+        rows.sort(key=lambda row: row["quote_time"] or datetime.min, reverse=descending)
+    elif sort_by == "confidence":
+        rows.sort(key=lambda row: {"A": 4, "B": 3, "C": 2, "D": 1}.get(row["confidence_level"], 0), reverse=descending)
 
     st.markdown('<div class="section-title">今日估值排序</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="section-caption">首页只做一件事: 让你先扫全基金池, 看谁涨跌大, 谁更准, 谁需要点进去看。</div>',
+        '<div class="section-caption">首页只看基金池实时估值。点详情时, 再看这只基金的持仓股票涨跌和贡献。</div>',
         unsafe_allow_html=True,
     )
 
-    latest_dates = [row["latest_estimate_date"] for row in rows if row["latest_estimate_date"] is not None]
-    latest_date_text = format_display_date(max(latest_dates)) if latest_dates else "N/A"
-    st.caption(f"更新时间: {latest_date_text} | 当前策略: {format_policy_name(selection_policy)} | 候选基金数: {len(rows)}")
+    latest_times = [row["quote_time"] for row in rows if row["quote_time"] is not None]
+    latest_time_text = max(latest_times).strftime("%H:%M:%S") if latest_times else "N/A"
+    st.caption(f"行情更新时间: {latest_time_text} | 估值日期: {format_display_date(rows[0]['latest_estimate_date']) if rows else 'N/A'} | 候选基金数: {len(rows)}")
+    show_warnings(warnings)
 
     st.markdown(
         """
@@ -771,11 +852,11 @@ def render_overview_page(
             <div class="overview-grid">
                 <div>基金</div>
                 <div>估值</div>
-                <div>方法</div>
+                <div>置信度</div>
                 <div>更新时间</div>
+                <div>方法</div>
                 <div>raw</div>
                 <div>coverage</div>
-                <div>calibrated</div>
                 <div></div>
             </div>
         </div>
@@ -784,27 +865,27 @@ def render_overview_page(
     )
 
     for row in rows:
-        row_cols = st.columns([2.9, 1.1, 0.9, 1, 0.95, 0.95, 0.95, 0.7])
+        row_cols = st.columns([2.9, 1.1, 0.85, 1.0, 0.95, 0.95, 0.95, 0.7])
         with row_cols[0]:
             st.markdown(
                 f"""
                 <div class="fund-name">{row['fund_name'] or '未命名基金'}</div>
-                <div class="fund-code">{row['fund_code']} | 净值 {format_display_date(row['latest_actual_date'])}</div>
+                <div class="fund-code">{row['fund_code']} | 实时估值</div>
                 """,
                 unsafe_allow_html=True,
             )
         with row_cols[1]:
             render_overview_metric("估值", format_percent(row["best_estimate"], signed=True))
         with row_cols[2]:
-            st.markdown(render_tag_badge(format_method_name(row["best_method"])), unsafe_allow_html=True)
+            st.markdown(render_tag_badge(row["confidence_level"] or "N/A", badge_type="confidence", level=row["confidence_level"]), unsafe_allow_html=True)
         with row_cols[3]:
-            render_overview_metric("更新", format_display_date(row["latest_estimate_date"]))
+            render_overview_metric("更新", row["quote_time"].strftime("%H:%M:%S") if row["quote_time"] else "N/A")
         with row_cols[4]:
-            render_overview_metric("raw", format_percent(row["raw_estimate"], signed=True))
+            st.markdown(render_tag_badge(format_method_name(row["best_method"])), unsafe_allow_html=True)
         with row_cols[5]:
-            render_overview_metric("coverage", format_percent(row["coverage_adjusted_estimate"], signed=True))
+            render_overview_metric("raw", format_percent(row["raw_estimate"], signed=True))
         with row_cols[6]:
-            render_overview_metric("calibrated", format_percent(row["calibrated_estimate"], signed=True))
+            render_overview_metric("coverage", format_percent(row["coverage_adjusted_estimate"], signed=True))
         with row_cols[7]:
             if st.button("详情", key=f"goto_detail_{row['fund_code']}", use_container_width=True):
                 st.session_state["selected_fund_code"] = row["fund_code"]
@@ -1125,24 +1206,35 @@ def render_industry_editor(session_factory, selected_fund: str | None) -> None:
 
 def render_dashboard_tab(
     session_factory,
+    data_source,
     selected_fund: str | None,
     start_date: date,
     end_date: date,
     selection_policy: str,
     window: int,
     base: str,
+    min_samples: int,
+    sleep_seconds: float,
 ) -> None:
     if not selected_fund:
         st.info("先在首页选择一只基金, 再进入详情。")
         return
 
+    live_results, live_warnings = load_live_estimate_results(
+        session_factory=session_factory,
+        data_source=data_source,
+        selection_policy=selection_policy,
+        window=window,
+        min_samples=min_samples,
+        sleep_seconds=sleep_seconds,
+        fund_code=selected_fund,
+    )
+    live_result = live_results[0] if live_results else None
+    if live_result is None:
+        st.warning("当前没有可用的实时估值结果, 请先确认 active holdings 和实时行情。")
+        return
+
     with session_factory() as session:
-        snapshot = get_latest_dashboard_snapshot(
-            session,
-            fund_code=selected_fund,
-            selection_window=window,
-            selection_policy=selection_policy,
-        )
         compare_rows = load_estimate_comparison_rows(
             session,
             fund_code=selected_fund,
@@ -1176,15 +1268,23 @@ def render_dashboard_tab(
             selection_window=window,
             selection_policy=selection_policy,
         )
-        holding_summary = get_active_holding_summary(session, selected_fund)
         allocation_summary = get_active_asset_allocation_summary(session, selected_fund)
-        detail_holdings = load_fund_detail_holdings(
-            session,
-            fund_code=selected_fund,
-            trade_date=snapshot["latest_estimate_date"],
-        )
+    snapshot = {
+        "fund_name": live_result.fund_name,
+        "fund_code": live_result.fund_code,
+        "latest_estimate_date": live_result.trade_date,
+        "raw_estimate": live_result.raw_estimate,
+        "coverage_adjusted_estimate": live_result.coverage_adjusted_estimate,
+        "calibrated_estimate": live_result.calibrated_estimate,
+        "best_estimate": live_result.final_estimate,
+        "best_method": live_result.final_method,
+        "confidence_level": live_result.confidence_level,
+        "latest_mae": live_result.latest_mae,
+        "direction_hit_rate": live_result.direction_hit_rate,
+    }
 
     render_detail_header(snapshot, selection_policy, window)
+    show_warnings(live_warnings + live_result.warnings)
 
     st.markdown('<div class="section-title">基金详情</div>', unsafe_allow_html=True)
     st.markdown(
@@ -1194,9 +1294,9 @@ def render_dashboard_tab(
 
     stock_weight_text = "N/A" if allocation_summary["stock_weight_pct"] is None else f"{allocation_summary['stock_weight_pct']:.2f}%"
     badge_line = [
-        f'<span class="info-badge">最新估值 {snapshot["latest_estimate_date"].isoformat() if snapshot["latest_estimate_date"] else "N/A"}</span>',
+        f'<span class="info-badge">行情时间 {live_result.quote_time.strftime("%H:%M:%S") if live_result.quote_time else "N/A"}</span>',
+        f'<span class="info-badge">估值日期 {snapshot["latest_estimate_date"].isoformat() if snapshot["latest_estimate_date"] else "N/A"}</span>',
         f'<span class="info-badge">最终方法 {format_method_name(snapshot["best_method"])}</span>',
-        f'<span class="info-badge">持仓报告日 {holding_summary["report_date"] or "N/A"}</span>',
         f'<span class="info-badge">股票仓位 {stock_weight_text}</span>',
     ]
     st.markdown(f'<div class="badge-line">{"".join(badge_line)}</div>', unsafe_allow_html=True)
@@ -1211,22 +1311,24 @@ def render_dashboard_tab(
     with estimate_cards_top[3]:
         render_stat_card("最终估值", format_percent(snapshot["best_estimate"], signed=True))
 
-    holdings_frame = pd.DataFrame(detail_holdings["rows"]).rename(
-        columns={
-            "asset_name": "名称",
-            "asset_code": "代码",
-            "weight_pct": "占比",
-            "return_pct": "涨跌幅",
-            "contribution_pct": "贡献",
-            "asset_type": "类型",
-        }
+    holdings_frame = pd.DataFrame(
+        [
+            {
+                "名称": row.asset_name,
+                "代码": row.asset_code,
+                "占比": row.weight_pct,
+                "涨跌幅": row.return_pct,
+                "贡献": row.contribution_pct,
+            }
+            for row in live_result.holdings
+        ]
     )
     if not holdings_frame.empty:
         holdings_frame["占比"] = holdings_frame["占比"].map(lambda value: format_table_percent(value, signed=False))
         holdings_frame["涨跌幅"] = holdings_frame["涨跌幅"].map(lambda value: format_table_percent(value, signed=True))
         holdings_frame["贡献"] = holdings_frame["贡献"].map(lambda value: format_table_percent(value, signed=True))
     st.markdown('<div class="section-title">前10持仓与当日贡献</div>', unsafe_allow_html=True)
-    st.caption(f"估值交易日: {format_display_date(detail_holdings['trade_date'])}")
+    st.caption(f"行情更新时间: {live_result.quote_time.strftime('%H:%M:%S') if live_result.quote_time else 'N/A'}")
     st.dataframe(
         holdings_frame[["名称", "代码", "占比", "涨跌幅", "贡献"]] if not holdings_frame.empty else holdings_frame,
         use_container_width=True,
@@ -1236,12 +1338,12 @@ def render_dashboard_tab(
 
     comparison_frame = comparison_rows_to_frame(compare_rows)
     with st.expander("分析与历史数据", expanded=False):
-        analysis_tab1, analysis_tab2, analysis_tab3, analysis_tab4 = st.tabs(
-            ["估值明细", "历史图表", "统计对比", "原始持仓列表"]
+        analysis_tab1, analysis_tab2, analysis_tab3 = st.tabs(
+            ["历史估值明细", "历史图表", "历史统计"]
         )
         with analysis_tab1:
             title_col, export_col = st.columns([5, 1.3])
-            title_col.markdown('<div class="section-title">估值明细</div>', unsafe_allow_html=True)
+            title_col.markdown('<div class="section-title">历史估值明细</div>', unsafe_allow_html=True)
             export_col.write("")
             export_col.write("")
             export_col.download_button(
@@ -1258,19 +1360,15 @@ def render_dashboard_tab(
             left_chart.plotly_chart(build_return_comparison_figure(chart_frame), use_container_width=True)
             right_chart.plotly_chart(build_error_figure(chart_frame), use_container_width=True)
         with analysis_tab3:
-            metric_tab1, metric_tab2, metric_tab3, metric_tab4 = st.tabs(
-                ["基础误差", "三种估值比较", "校准效果", "最终选择结果"]
+            metric_tab1, metric_tab2, metric_tab3 = st.tabs(
+                ["基础误差", "三种估值比较", "最终选择结果"]
             )
             with metric_tab1:
                 st.dataframe(stats_to_frame(stats_rows), use_container_width=True, hide_index=True)
             with metric_tab2:
                 st.dataframe(compare_to_frame(compare_stats_rows), use_container_width=True, hide_index=True)
             with metric_tab3:
-                st.dataframe(calibration_to_frame(calibration_rows), use_container_width=True, hide_index=True)
-            with metric_tab4:
                 st.dataframe(selected_to_frame(selected_rows), use_container_width=True, hide_index=True)
-        with analysis_tab4:
-            render_holdings_preview(holding_summary["rows"])
 
 
 def run_action(
@@ -1463,19 +1561,25 @@ def main() -> None:
         if page == "首页":
             render_overview_page(
                 session_factory=session_factory,
+                data_source=data_source,
                 selection_policy=selection_policy,
                 window=window,
+                min_samples=min_samples,
+                sleep_seconds=sleep_seconds,
                 sort_label=sort_label,
             )
         elif page == "详情":
             render_dashboard_tab(
                 session_factory=session_factory,
+                data_source=data_source,
                 selected_fund=selected_fund,
                 start_date=start_date,
                 end_date=end_date,
                 selection_policy=selection_policy,
                 window=window,
                 base=base,
+                min_samples=min_samples,
+                sleep_seconds=sleep_seconds,
             )
         elif page == "管理":
             manage_tab1, manage_tab2, manage_tab3, manage_tab4 = st.tabs(

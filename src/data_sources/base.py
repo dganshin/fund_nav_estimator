@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Protocol
 
 
@@ -27,6 +27,16 @@ class StockQuoteRecord:
     source: str
 
 
+@dataclass
+class LiveStockQuoteRecord:
+    trade_date: date
+    quote_time: datetime
+    asset_code: str
+    asset_name: str
+    return_pct: float
+    source: str
+
+
 class DataSource(Protocol):
     def fetch_fund_navs(
         self,
@@ -43,6 +53,13 @@ class DataSource(Protocol):
         end_date: date,
         sleep_seconds: float = 0.0,
     ) -> list[StockQuoteRecord]:
+        ...
+
+    def fetch_stock_live_quotes(
+        self,
+        asset_codes: list[str],
+        sleep_seconds: float = 0.0,
+    ) -> list[LiveStockQuoteRecord]:
         ...
 
     def fetch_fund_holdings(
