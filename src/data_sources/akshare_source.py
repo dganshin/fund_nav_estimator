@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -126,17 +127,24 @@ class AKShareDataSource:
         self.last_warnings = []
         records: list[LiveStockQuoteRecord] = []
         dedup_codes = list(dict.fromkeys(asset_codes))
-        for index, asset_code in enumerate(dedup_codes):
-            try:
-                record = self._fetch_stock_live_quote(asset_code)
-                if record is not None:
-                    records.append(record)
-            except Exception as exc:
-                self.last_warnings.append(
-                    f"Warning: live stock quote fetch failed for {asset_code}: {exc}"
-                )
-            if sleep_seconds > 0 and index < len(dedup_codes) - 1:
-                time.sleep(sleep_seconds)
+        max_workers = min(6, max(1, len(dedup_codes)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(self._fetch_stock_live_quote, asset_code): asset_code
+                for asset_code in dedup_codes
+            }
+            for future in as_completed(future_map):
+                asset_code = future_map[future]
+                try:
+                    record = future.result()
+                    if record is not None:
+                        records.append(record)
+                except Exception as exc:
+                    self.last_warnings.append(
+                        f"Warning: live stock quote fetch failed for {asset_code}: {exc}"
+                    )
+                if sleep_seconds > 0:
+                    time.sleep(sleep_seconds)
         records.sort(key=lambda item: item.asset_code)
         return records
 

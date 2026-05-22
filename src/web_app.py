@@ -716,6 +716,17 @@ def format_table_percent(value: float | None, signed: bool = False) -> str:
     return f"{value:.2f}%"
 
 
+def get_data_status(quote_time: datetime | None) -> tuple[str, str]:
+    if quote_time is None:
+        return "缺失", "error"
+    age_seconds = max(int((datetime.now() - quote_time).total_seconds()), 0)
+    if age_seconds > 300:
+        return f"过期 {age_seconds}s", "error"
+    if age_seconds > 60:
+        return f"偏旧 {age_seconds}s", "warning"
+    return f"实时 {age_seconds}s", "ok"
+
+
 def render_holdings_preview(rows: list[dict[str, object]]) -> None:
     if not rows:
         st.info("当前没有 active holdings。")
@@ -803,14 +814,15 @@ def render_overview_page(
     sleep_seconds: float,
     sort_label: str,
 ) -> None:
-    results, warnings = load_live_estimate_results(
-        session_factory=session_factory,
-        data_source=data_source,
-        selection_policy=selection_policy,
-        window=window,
-        min_samples=min_samples,
-        sleep_seconds=sleep_seconds,
-    )
+    with st.spinner("正在抓取实时行情并计算基金估值..."):
+        results, warnings = load_live_estimate_results(
+            session_factory=session_factory,
+            data_source=data_source,
+            selection_policy=selection_policy,
+            window=window,
+            min_samples=min_samples,
+            sleep_seconds=sleep_seconds,
+        )
     rows = [
         {
             "fund_code": item.fund_code,
@@ -821,6 +833,7 @@ def render_overview_page(
             "latest_mae": item.latest_mae,
             "latest_estimate_date": item.trade_date,
             "quote_time": item.quote_time,
+            "status_label": get_data_status(item.quote_time)[0],
             "warnings": item.warnings,
         }
         for item in results
@@ -846,6 +859,11 @@ def render_overview_page(
     st.caption(f"行情更新时间: {latest_time_text} | 估值日期: {format_display_date(rows[0]['latest_estimate_date']) if rows else 'N/A'} | 候选基金数: {len(rows)}")
     show_warnings(warnings)
 
+    if not rows:
+        st.error("当前没有生成任何实时估值结果。")
+        st.info("先检查 3 件事: 1. 是否有启用中的基金和持仓 2. 实时股票行情是否抓到 3. 点击一次“刷新实时估值”或“生成/更新修正权重”。")
+        return
+
     st.markdown(
         """
         <div class="overview-row overview-head">
@@ -854,6 +872,7 @@ def render_overview_page(
                 <div>实时估值</div>
                 <div>置信度</div>
                 <div>更新时间</div>
+                <div>状态</div>
                 <div>方法</div>
                 <div></div>
             </div>
@@ -863,7 +882,7 @@ def render_overview_page(
     )
 
     for row in rows:
-        row_cols = st.columns([3.2, 1.15, 0.9, 1.05, 1.0, 0.8])
+        row_cols = st.columns([3.0, 1.1, 0.8, 1.0, 1.0, 0.95, 0.75])
         with row_cols[0]:
             st.markdown(
                 f"""
@@ -879,8 +898,10 @@ def render_overview_page(
         with row_cols[3]:
             render_overview_metric("更新", row["quote_time"].strftime("%H:%M:%S") if row["quote_time"] else "N/A")
         with row_cols[4]:
-            st.markdown(render_tag_badge(format_method_name(row["best_method"])), unsafe_allow_html=True)
+            render_overview_metric("状态", row["status_label"])
         with row_cols[5]:
+            st.markdown(render_tag_badge(format_method_name(row["best_method"])), unsafe_allow_html=True)
+        with row_cols[6]:
             if st.button("详情", key=f"goto_detail_{row['fund_code']}", use_container_width=True):
                 st.session_state["selected_fund_code"] = row["fund_code"]
                 st.session_state["active_page"] = "详情"
@@ -1214,15 +1235,16 @@ def render_dashboard_tab(
         st.info("先在首页选择一只基金, 再进入详情。")
         return
 
-    live_results, live_warnings = load_live_estimate_results(
-        session_factory=session_factory,
-        data_source=data_source,
-        selection_policy=selection_policy,
-        window=window,
-        min_samples=min_samples,
-        sleep_seconds=sleep_seconds,
-        fund_code=selected_fund,
-    )
+    with st.spinner("正在抓取该基金实时行情和持仓贡献..."):
+        live_results, live_warnings = load_live_estimate_results(
+            session_factory=session_factory,
+            data_source=data_source,
+            selection_policy=selection_policy,
+            window=window,
+            min_samples=min_samples,
+            sleep_seconds=sleep_seconds,
+            fund_code=selected_fund,
+        )
     live_result = live_results[0] if live_results else None
     if live_result is None:
         st.warning("当前没有可用的实时估值结果, 请先确认 active holdings 和实时行情。")
@@ -1291,6 +1313,7 @@ def render_dashboard_tab(
     badge_line = [
         f'<span class="info-badge">行情时间 {live_result.quote_time.strftime("%H:%M:%S") if live_result.quote_time else "N/A"}</span>',
         f'<span class="info-badge">估值日期 {snapshot["latest_estimate_date"].isoformat() if snapshot["latest_estimate_date"] else "N/A"}</span>',
+        f'<span class="info-badge">数据状态 {get_data_status(live_result.quote_time)[0]}</span>',
         f'<span class="info-badge">最终方法 {format_method_name(snapshot["best_method"])}</span>',
         f'<span class="info-badge">股票仓位 {stock_weight_text}</span>',
     ]
@@ -1321,6 +1344,8 @@ def render_dashboard_tab(
         ]
     )
     if not holdings_frame.empty:
+        holdings_frame["贡献绝对值"] = holdings_frame["贡献"].abs()
+        holdings_frame = holdings_frame.sort_values("贡献绝对值", ascending=False).drop(columns=["贡献绝对值"])
         holdings_frame["公开权重"] = holdings_frame["公开权重"].map(lambda value: format_table_percent(value, signed=False))
         holdings_frame["修正权重"] = holdings_frame["修正权重"].map(lambda value: format_table_percent(value, signed=False))
         holdings_frame["涨跌幅"] = holdings_frame["涨跌幅"].map(lambda value: format_table_percent(value, signed=True))
