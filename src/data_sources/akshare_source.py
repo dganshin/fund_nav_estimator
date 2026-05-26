@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -123,6 +123,7 @@ class AKShareDataSource:
         self,
         asset_codes: list[str],
         sleep_seconds: float = 0.0,
+        timeout_seconds: float = 8.0,
     ) -> list[LiveStockQuoteRecord]:
         self.last_warnings = []
         records: list[LiveStockQuoteRecord] = []
@@ -133,18 +134,36 @@ class AKShareDataSource:
                 executor.submit(self._fetch_stock_live_quote, asset_code): asset_code
                 for asset_code in dedup_codes
             }
-            for future in as_completed(future_map):
-                asset_code = future_map[future]
-                try:
-                    record = future.result()
-                    if record is not None:
-                        records.append(record)
-                except Exception as exc:
+            pending = set(future_map)
+            deadline = time.monotonic() + max(timeout_seconds, 1.0)
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                done, pending = wait(
+                    pending,
+                    timeout=min(remaining, 1.0),
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in done:
+                    asset_code = future_map.get(future, "UNKNOWN")
+                    try:
+                        record = future.result()
+                        if record is not None:
+                            records.append(record)
+                    except Exception as exc:
+                        self.last_warnings.append(
+                            f"Warning: live stock quote fetch failed for {asset_code}: {exc}"
+                        )
+                    if sleep_seconds > 0:
+                        time.sleep(sleep_seconds)
+            if pending:
+                for future in pending:
+                    asset_code = future_map.get(future, "UNKNOWN")
+                    future.cancel()
                     self.last_warnings.append(
-                        f"Warning: live stock quote fetch failed for {asset_code}: {exc}"
+                        f"Warning: live stock quote fetch timed out for {asset_code}."
                     )
-                if sleep_seconds > 0:
-                    time.sleep(sleep_seconds)
         records.sort(key=lambda item: item.asset_code)
         return records
 

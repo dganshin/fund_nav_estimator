@@ -59,6 +59,7 @@ class DataSource(Protocol):
         self,
         asset_codes: list[str],
         sleep_seconds: float = 0.0,
+        timeout_seconds: float = 8.0,
     ) -> list[LiveStockQuoteRecord]:
         ...
 

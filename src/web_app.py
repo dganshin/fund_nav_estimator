@@ -148,7 +148,7 @@ def inject_styles() -> None:
             color: #172033;
         }
         .block-container {
-            padding-top: 1.4rem;
+            padding-top: 4.4rem;
             padding-bottom: 2.4rem;
             max-width: 1320px;
         }
@@ -790,7 +790,11 @@ def load_live_estimate_results(
 
     if hasattr(data_source, "last_warnings"):
         data_source.last_warnings = []  # type: ignore[attr-defined]
-    live_records = data_source.fetch_stock_live_quotes(asset_codes=asset_codes, sleep_seconds=sleep_seconds)
+    live_records = data_source.fetch_stock_live_quotes(
+        asset_codes=asset_codes,
+        sleep_seconds=sleep_seconds,
+        timeout_seconds=8.0,
+    )
     warnings = list(getattr(data_source, "last_warnings", []))
     if not live_records:
         warnings.append("Warning: no live quotes fetched.")
@@ -1601,7 +1605,7 @@ def main() -> None:
         end_date = filter_cols[2].date_input("结束日期", value=default_end, key="main_end_date")
         search_text = filter_cols[3].text_input("搜索基金", value="", placeholder="名称或代码")
         sort_label = filter_cols[4].selectbox("首页排序", options=list(SORT_OPTIONS.keys()), index=0)
-        refresh_mode = filter_cols[5].selectbox("自动刷新", options=["关闭", "5秒", "10秒", "30秒"], index=2)
+        refresh_mode = filter_cols[5].selectbox("自动刷新", options=["关闭", "5秒", "10秒", "30秒"], index=0)
         selection_policy = "coverage_first"
         with st.expander("高级参数", expanded=False):
             advanced_cols = st.columns(3)
