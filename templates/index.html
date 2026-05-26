@@ -1,60 +1,46 @@
 {% extends "base.html" %}
-
 {% block title %}基金实时估值榜{% endblock %}
 
 {% block content %}
-<section class="status-panel">
-  <div class="status-row">
-    <span>本地今天 {{ today_label }}</span>
-    <span>行情时间 {{ latest_time }}</span>
-    <span>估值基于 {{ estimate_date }}</span>
-    <span>数据来源 {{ data_mode }}</span>
-    <span>仅供参考</span>
-  </div>
-  <div class="status-message">{{ status_message }}</div>
-</section>
+<div class="status-bar">
+  <span>今日 {{ today_label }}</span>
+  <span class="sep">·</span>
+  <span>行情 <span id="latest-time">{{ latest_time }}</span></span>
+  <span class="sep">·</span>
+  <span>{{ data_mode }}</span>
+  <span class="sep">·</span>
+  <span id="status-message">{{ status_message }}</span>
+</div>
 
-<section class="toolbar-inline">
-  <form method="get" action="/" class="toolbar-form">
-    <select name="view">
-      {% for key, label in view_options.items() %}
-      <option value="{{ key }}" {% if view == key %}selected{% endif %}>{{ label }}</option>
-      {% endfor %}
-    </select>
-    <input type="text" name="search" value="{{ search }}" placeholder="搜索基金名称或代码">
-    <select name="sort">
-      {% for key, label in sort_options.items() %}
-      <option value="{{ key }}" {% if sort == key %}selected{% endif %}>{{ label }}</option>
-      {% endfor %}
-    </select>
-    <select name="refresh">
-      <option value="off" {% if refresh == 'off' %}selected{% endif %}>自动刷新关闭</option>
-      <option value="5" {% if refresh == '5' %}selected{% endif %}>5秒</option>
-      <option value="10" {% if refresh == '10' %}selected{% endif %}>10秒</option>
-      <option value="30" {% if refresh == '30' %}selected{% endif %}>30秒</option>
-    </select>
+<div class="toolbar">
+  <input id="search-input" type="text" value="{{ search }}" placeholder="搜索基金名称或代码…" autocomplete="off">
+  <select id="sort-select">
+    {% for key, label in sort_options.items() %}
+    <option value="{{ key }}" {% if sort == key %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <select id="refresh-select">
+    <option value="0" {% if refresh == 'off' or not refresh %}selected{% endif %}>不刷新</option>
+    <option value="10" {% if refresh == '10' %}selected{% endif %}>10秒</option>
+    <option value="30" {% if refresh == '30' %}selected{% endif %}>30秒</option>
+    <option value="60" {% if refresh == '60' %}selected{% endif %}>60秒</option>
+  </select>
+  <form method="get" action="/" style="display:contents">
     <input type="hidden" name="force" value="1">
-    <button type="submit">强制刷新</button>
+    <input type="hidden" name="search" value="{{ search }}">
+    <input type="hidden" name="sort" value="{{ sort }}">
+    <input type="hidden" name="refresh" value="{{ refresh }}">
+    <button type="submit">刷新</button>
   </form>
-</section>
+</div>
 
-<section class="list-head">
-  <div>基金</div>
-  <div class="align-right">实际估值</div>
-  <div class="align-right">今日盈亏</div>
-  <div class="align-center">置信</div>
-</section>
-
-<section class="fund-list">
+<div id="fund-list-container" class="fund-list">
   {% for row in rows %}
   <a class="fund-row" href="/fund/{{ row.fund_code }}">
     <div class="fund-main">
       <div class="fund-name">{{ row.fund_name }}</div>
       <div class="fund-sub">
-        {{ row.fund_code }}
-        {% if row.is_watchlist %} · 自选{% endif %}
-        {% if row.is_holding %} · 持有{% else %} · 观察{% endif %}
-        · {{ row.quote_time }}
+        {{ row.fund_code }}{% if row.is_watchlist %} · 自选{% endif %}{% if row.is_holding %} · 持有{% else %} · 观察{% endif %} · {{ row.quote_time }}
       </div>
     </div>
     <div class="fund-value {{ row.estimate_tone }}">{{ row.current_estimate_text }}</div>
@@ -62,7 +48,7 @@
     <div class="fund-badge badge-{{ row.confidence_level|lower }}">{{ row.confidence_level }}</div>
   </a>
   {% else %}
-  <div class="empty-panel">当前没有可展示的基金估值结果。</div>
+  <div class="empty-panel">当前没有可展示的基金估值结果。<br>请先在<a href="/manage" style="color:#1d4ed8">管理页</a>添加基金并录入持仓。</div>
   {% endfor %}
-</section>
+</div>
 {% endblock %}

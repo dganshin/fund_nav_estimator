@@ -40,6 +40,7 @@ from src.web_services import (
     load_user_position_rows,
     save_user_position_rows,
 )
+from src.data_sources.akshare_source import AKShareDataSource
 from tests.test_stage4 import make_mock_source, seed_fund_holdings_and_allocations
 
 
@@ -410,6 +411,22 @@ def test_live_effective_weight_estimate_matches_scaled_contribution(tmp_path):
     expected_effective = (0.2 * expected_scale * 0.03) + (0.15 * expected_scale * 0.01)
     assert result.effective_weight_estimate is not None
     assert round(result.effective_weight_estimate, 8) == round(expected_effective, 8)
+
+
+def test_tencent_live_quote_parser_builds_today_records():
+    source = AKShareDataSource.__new__(AKShareDataSource)
+    body = (
+        'v_sh600988="1~赤峰黄金~600988~37.15~36.03~35.26~~~~~~~'
+        '~~~~~~~~~~~~~~~~~~20260526113502~1.12~3.11~";\n'
+        'v_sz000975="51~山金国际~000975~25.03~24.34~24.07~~~~~~~'
+        '~~~~~~~~~~~~~~~~~~20260526113545~0.69~2.83~";'
+    )
+    records = source._parse_tencent_live_quote_response(body)
+
+    assert len(records) == 2
+    assert records[0].asset_code == "600988.SH"
+    assert records[0].trade_date.isoformat() == "2026-05-26"
+    assert round(records[0].return_pct, 6) == round((37.15 / 36.03) - 1.0, 6)
     assert round(result.coverage_adjusted_estimate or 0.0, 8) == round(expected_effective, 8)
 
 

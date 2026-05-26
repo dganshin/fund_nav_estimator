@@ -4,6 +4,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from urllib.request import ProxyHandler, Request, build_opener
 
 import pandas as pd
 
@@ -126,8 +127,21 @@ class AKShareDataSource:
         timeout_seconds: float = 8.0,
     ) -> list[LiveStockQuoteRecord]:
         self.last_warnings = []
-        records: list[LiveStockQuoteRecord] = []
         dedup_codes = list(dict.fromkeys(asset_codes))
+        try:
+            records = self._fetch_stock_live_quotes_from_tencent(
+                asset_codes=dedup_codes,
+                timeout_seconds=timeout_seconds,
+            )
+            if records:
+                records.sort(key=lambda item: item.asset_code)
+                return records
+        except Exception as exc:
+            self.last_warnings.append(
+                f"Warning: tencent live quote batch fetch failed: {exc}"
+            )
+
+        records: list[LiveStockQuoteRecord] = []
         max_workers = min(6, max(1, len(dedup_codes)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {
@@ -165,6 +179,65 @@ class AKShareDataSource:
                         f"Warning: live stock quote fetch timed out for {asset_code}."
                     )
         records.sort(key=lambda item: item.asset_code)
+        return records
+
+    def _fetch_stock_live_quotes_from_tencent(
+        self,
+        asset_codes: list[str],
+        timeout_seconds: float,
+    ) -> list[LiveStockQuoteRecord]:
+        if not asset_codes:
+            return []
+        symbols = [to_prefixed_symbol(asset_code) for asset_code in asset_codes]
+        records: list[LiveStockQuoteRecord] = []
+        for start in range(0, len(symbols), 50):
+            chunk = symbols[start:start + 50]
+            url = f"http://qt.gtimg.cn/q={','.join(chunk)}"
+            opener = build_opener(ProxyHandler({}))
+            opener.addheaders = [
+                ("User-Agent", "Mozilla/5.0"),
+                ("Referer", "http://gu.qq.com/"),
+            ]
+            request = Request(url)
+            with opener.open(request, timeout=max(timeout_seconds, 1.0)) as response:
+                body = response.read().decode("gbk", errors="ignore")
+            records.extend(self._parse_tencent_live_quote_response(body))
+        return records
+
+    def _parse_tencent_live_quote_response(self, body: str) -> list[LiveStockQuoteRecord]:
+        records: list[LiveStockQuoteRecord] = []
+        for line in body.splitlines():
+            line = line.strip()
+            if not line or "=" not in line:
+                continue
+            raw_value = line.split("=", 1)[1].strip().strip(";").strip('"')
+            if not raw_value:
+                continue
+            parts = raw_value.split("~")
+            if len(parts) < 33:
+                continue
+            asset_name = parts[1].strip()
+            plain_code = parts[2].strip()
+            latest_price = self._to_float(parts[3])
+            prev_close = self._to_float(parts[4])
+            quote_time_raw = parts[30].strip()
+            if not plain_code or latest_price is None or prev_close in (None, 0):
+                continue
+            try:
+                quote_time = datetime.strptime(quote_time_raw, "%Y%m%d%H%M%S")
+            except ValueError:
+                quote_time = datetime.now()
+            normalized_code = normalize_asset_code(plain_code)
+            records.append(
+                LiveStockQuoteRecord(
+                    trade_date=quote_time.date(),
+                    quote_time=quote_time,
+                    asset_code=normalized_code,
+                    asset_name=asset_name or normalized_code,
+                    return_pct=(latest_price / prev_close) - 1.0,
+                    source="tencent:qt_live",
+                )
+            )
         return records
 
     def fetch_fund_holdings(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 import sys
 from datetime import date, datetime, time
 from functools import lru_cache
@@ -9,7 +10,7 @@ from pathlib import Path
 from time import monotonic
 
 from fastapi import FastAPI, Form, Query, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -20,20 +21,18 @@ if __package__ in {None, ""}:
     from src.db import get_session_factory
     from src.estimator import compute_live_fund_estimates
     from src.init_db import init_db
-    from src.models import DailyQuote, Fund, UserFundPosition
+    from src.models import DailyQuote, EffectiveWeightVersion, Fund, UserFundPosition
     from src.web.actions import run_effective_weight_action
     from src.web_services import (
+        deactivate_fund,
         load_asset_allocation_rows,
         load_fund_rows,
         load_holding_rows,
-        load_industry_allocation_rows,
         load_user_position_rows,
         load_watchlist_rows,
-        deactivate_fund,
         save_asset_allocation_rows,
         save_fund_rows,
         save_holding_rows,
-        save_industry_allocation_rows,
         save_user_position_rows,
         save_watchlist_rows,
         toggle_watchlist_fund,
@@ -43,50 +42,43 @@ else:
     from .db import get_session_factory
     from .estimator import compute_live_fund_estimates
     from .init_db import init_db
-    from .models import DailyQuote, Fund, UserFundPosition
+    from .models import DailyQuote, EffectiveWeightVersion, Fund, UserFundPosition
     from .web.actions import run_effective_weight_action
     from .web_services import (
         deactivate_fund,
         load_asset_allocation_rows,
         load_fund_rows,
         load_holding_rows,
-        load_industry_allocation_rows,
         load_user_position_rows,
         load_watchlist_rows,
         save_asset_allocation_rows,
         save_fund_rows,
         save_holding_rows,
-        save_industry_allocation_rows,
         save_user_position_rows,
         save_watchlist_rows,
         toggle_watchlist_fund,
     )
 
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RAW_CACHE_DIR = PROJECT_ROOT / "data" / "raw" / "akshare"
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
 STATIC_DIR = PROJECT_ROOT / "static"
 
-app = FastAPI(title="Fund NAV Estimator Frontend")
+app = FastAPI(title="基金实时估值")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 SORT_OPTIONS = {
-    "estimate_desc": "按估值排序",
-    "profit_desc": "按盈亏排序",
-    "confidence_desc": "按置信度排序",
-    "name_asc": "按基金名称排序",
+    "estimate_desc": "估值排序",
+    "profit_desc": "盈亏排序",
+    "confidence_desc": "置信度排序",
+    "name_asc": "名称排序",
 }
-VIEW_OPTIONS = {
-    "watchlist": "自选",
-    "holding": "持有",
-    "all": "全部",
-}
-
 CONFIDENCE_RANK = {"A": 4, "B": 3, "C": 2, "D": 1, None: 0}
-LIVE_BUNDLE_CACHE: dict[str, tuple[float, tuple[list, str, bool]]] = {}
-LIVE_BUNDLE_TTL_SECONDS = 12.0
+LIVE_BUNDLE_CACHE: dict[str, tuple[float, tuple]] = {}
+LIVE_BUNDLE_TTL = 12.0
 
 
 @lru_cache(maxsize=1)
@@ -100,55 +92,29 @@ def get_cached_data_source():
     return AKShareDataSource(raw_dir=RAW_CACHE_DIR)
 
 
-def get_data_status(quote_time: datetime | None) -> tuple[str, str]:
-    if quote_time is None:
-        return "无数据", "muted"
-    age_seconds = max(int((datetime.now() - quote_time).total_seconds()), 0)
-    if age_seconds > 300:
-        return "数据过期", "stale"
-    if age_seconds > 60:
-        return "可能延迟", "delay"
-    return "实时", "live"
+def format_percent(v: float | None) -> str:
+    return "--" if v is None else f"{v:+.2%}"
 
 
-def summarize_runtime_status(warnings: list[str], used_fallback: bool) -> str:
-    if used_fallback:
-        return "部分行情延迟, 已使用最近收盘缓存继续估值。"
-    if any("timed out" in item or "failed" in item for item in warnings):
-        return "部分行情延迟, 已使用可用行情继续估值。"
-    return "实时行情正常。"
+def format_amount(v: float | None) -> str:
+    return "--" if v is None else f"{v:+.2f}"
 
 
-def format_percent(value: float | None) -> str:
-    if value is None:
-        return "--"
-    return f"{value:+.2%}"
-
-
-def format_amount(value: float | None) -> str:
-    if value is None:
-        return "--"
-    return f"{value:+.2f}"
-
-
-def get_tone(value: float | None) -> str:
-    if value is None:
+def get_tone(v: float | None) -> str:
+    if v is None:
         return "muted"
-    if value > 0:
-        return "up"
-    if value < 0:
-        return "down"
-    return "muted"
+    return "up" if v > 0 else ("down" if v < 0 else "muted")
 
 
-def parse_csv_text(content: str) -> list[dict[str, object]]:
-    if not content.strip():
-        return []
-    reader = csv.DictReader(io.StringIO(content.strip()))
-    return [dict(row) for row in reader]
+def summarize_status(warnings: list[str], used_fallback: bool) -> str:
+    if used_fallback:
+        return "部分行情延迟，已使用最近收盘缓存"
+    if any("timed out" in w or "failed" in w for w in warnings):
+        return "部分行情延迟，已使用可用行情"
+    return "实时行情正常"
 
 
-def load_latest_daily_quote_map(session, asset_codes: list[str]) -> tuple[dict[str, dict[str, object]], bool]:
+def load_latest_daily_quote_map(session, asset_codes: list[str]):
     if not asset_codes:
         return {}, False
     rows = session.scalars(
@@ -156,82 +122,85 @@ def load_latest_daily_quote_map(session, asset_codes: list[str]) -> tuple[dict[s
         .where(DailyQuote.asset_code.in_(asset_codes))
         .order_by(DailyQuote.trade_date.desc())
     ).all()
-    quote_map: dict[str, dict[str, object]] = {}
-    for quote in rows:
-        if quote.asset_code in quote_map:
+    quote_map: dict = {}
+    for q in rows:
+        if q.asset_code in quote_map:
             continue
-        quote_map[quote.asset_code] = {
-            "asset_name": quote.asset_name,
-            "return_pct": quote.return_pct,
-            "quote_time": datetime.combine(quote.trade_date, time(hour=15, minute=0)),
-            "source": f"{quote.source}:fallback_daily",
+        quote_map[q.asset_code] = {
+            "asset_name": q.asset_name,
+            "return_pct": q.return_pct,
+            "quote_time": datetime.combine(q.trade_date, time(15, 0)),
+            "source": f"{q.source}:fallback_daily",
         }
     return quote_map, bool(quote_map)
 
 
-def load_live_estimate_bundle(fund_code: str | None = None, force_refresh: bool = False) -> tuple[list, str, bool]:
+def load_live_estimate_bundle(fund_code: str | None = None, force_refresh: bool = False):
     cache_key = fund_code or "__all__"
     cached = LIVE_BUNDLE_CACHE.get(cache_key)
-    if not force_refresh and cached and monotonic() - cached[0] <= LIVE_BUNDLE_TTL_SECONDS:
+    if not force_refresh and cached and monotonic() - cached[0] <= LIVE_BUNDLE_TTL:
         return cached[1]
+
     session_factory = get_cached_session_factory()
     data_source = get_cached_data_source()
 
     with session_factory() as session:
-        target_fund_code = fund_code
-        if target_fund_code is None:
-            position_rows = [row for row in load_user_position_rows(session) if row.get("is_active")]
-            watchlist_rows = [row for row in load_watchlist_rows(session) if row.get("is_active")]
-            active_codes = {str(row["fund_code"]) for row in position_rows}
-            active_codes.update(str(row["fund_code"]) for row in watchlist_rows)
-            if active_codes:
-                holding_rows = [row for row in load_holding_rows(session) if row["fund_code"] in active_codes]
-            else:
-                holding_rows = load_holding_rows(session, None)
+        if fund_code is None:
+            pos_rows = [r for r in load_user_position_rows(session) if r.get("is_active")]
+            wl_rows = [r for r in load_watchlist_rows(session) if r.get("is_active")]
+            active_codes = {str(r["fund_code"]) for r in pos_rows} | {str(r["fund_code"]) for r in wl_rows}
+            holding_rows = load_holding_rows(session) if not active_codes else [
+                r for r in load_holding_rows(session) if r["fund_code"] in active_codes
+            ]
         else:
-            holding_rows = load_holding_rows(session, target_fund_code)
-        asset_codes = list(dict.fromkeys(str(row["asset_code"]) for row in holding_rows))
-    if not asset_codes:
-        return [], "当前没有可用持仓。", False
+            holding_rows = load_holding_rows(session, fund_code)
 
-    if hasattr(data_source, "last_warnings"):
-        data_source.last_warnings = []  # type: ignore[attr-defined]
-    live_records = data_source.fetch_stock_live_quotes(
-        asset_codes=asset_codes,
-        sleep_seconds=0.0,
-        timeout_seconds=8.0,
-    )
-    warnings = list(getattr(data_source, "last_warnings", []))
+    asset_codes = list(dict.fromkeys(str(r["asset_code"]) for r in holding_rows))
+    if not asset_codes:
+        return [], "当前没有可用持仓", False
+
+    try:
+        if hasattr(data_source, "last_warnings"):
+            data_source.last_warnings = []
+        live_records = data_source.fetch_stock_live_quotes(
+            asset_codes=asset_codes, sleep_seconds=0.0, timeout_seconds=8.0
+        )
+        warnings = list(getattr(data_source, "last_warnings", []))
+    except Exception as exc:
+        logger.warning("fetch_stock_live_quotes failed: %s", exc)
+        live_records = []
+        warnings = [str(exc)]
+
     live_quote_map = {
-        record.asset_code: {
-            "asset_name": record.asset_name,
-            "return_pct": record.return_pct,
-            "quote_time": record.quote_time,
-            "source": record.source,
+        r.asset_code: {
+            "asset_name": r.asset_name,
+            "return_pct": r.return_pct,
+            "quote_time": r.quote_time,
+            "source": r.source,
         }
-        for record in live_records
+        for r in live_records
     }
+
     used_fallback = False
     with session_factory() as session:
         fallback_map, has_fallback = load_latest_daily_quote_map(session, asset_codes)
+
     if not live_records and has_fallback:
         live_quote_map = fallback_map
         used_fallback = True
         warnings.append("fallback_to_daily_quotes")
     elif live_records and len(live_quote_map) < len(asset_codes) and has_fallback:
-        for asset_code, payload in fallback_map.items():
-            live_quote_map.setdefault(asset_code, payload)
+        for code, payload in fallback_map.items():
+            live_quote_map.setdefault(code, payload)
         used_fallback = True
-        warnings.append("partial_fallback_to_daily_quotes")
-    if not live_quote_map:
-        return [], "当前抓不到实时行情, 也没有可用缓存。", False
+        warnings.append("partial_fallback")
 
-    quote_times = [
-        payload.get("quote_time")
-        for payload in live_quote_map.values()
-        if isinstance(payload.get("quote_time"), datetime)
-    ]
+    if not live_quote_map:
+        return [], "当前抓不到实时行情，也没有可用缓存", False
+
+    quote_times = [p["quote_time"] for p in live_quote_map.values() if isinstance(p.get("quote_time"), datetime)]
     quote_time = max(quote_times) if quote_times else datetime.now()
+
     with session_factory() as session:
         results = compute_live_fund_estimates(
             session=session,
@@ -247,71 +216,47 @@ def load_live_estimate_bundle(fund_code: str | None = None, force_refresh: bool 
             calibration_base="coverage_adjusted",
             calibration_min_samples=5,
         )
-    payload = (results, summarize_runtime_status(warnings, used_fallback), used_fallback)
+
+    payload = (results, summarize_status(warnings, used_fallback), used_fallback)
     LIVE_BUNDLE_CACHE[cache_key] = (monotonic(), payload)
     return payload
 
 
-def build_home_rows(results: list) -> list[dict[str, object]]:
+def build_home_rows(results: list) -> list[dict]:
     rows = []
     for item in results:
-        status_label, status_tone = get_data_status(item.quote_time)
-        rows.append(
-            {
-                "fund_code": item.fund_code,
-                "fund_name": item.fund_name,
-                "current_estimate": item.current_estimate,
-                "current_estimate_text": format_percent(item.current_estimate),
-                "estimate_tone": get_tone(item.current_estimate),
-                "holding_amount": item.holding_amount,
-                "estimated_today_profit": item.estimated_today_profit,
-                "estimated_today_profit_text": format_amount(item.estimated_today_profit),
-                "profit_tone": get_tone(item.estimated_today_profit),
-                "confidence_level": item.confidence_level or "D",
-                "quote_time": item.quote_time.strftime("%H:%M:%S") if item.quote_time else "--",
-                "status_label": status_label,
-                "status_tone": status_tone,
-                "latest_real_nav_date": item.latest_real_nav_date.isoformat() if item.latest_real_nav_date else "--",
-                "effective_method": item.effective_method,
-                "is_holding": item.holding_amount is not None,
-                "is_watchlist": False,
-            }
-        )
+        rows.append({
+            "fund_code": item.fund_code,
+            "fund_name": item.fund_name,
+            "current_estimate": item.current_estimate,
+            "current_estimate_text": format_percent(item.current_estimate),
+            "estimate_tone": get_tone(item.current_estimate),
+            "holding_amount": item.holding_amount,
+            "estimated_today_profit": item.estimated_today_profit,
+            "estimated_today_profit_text": format_amount(item.estimated_today_profit),
+            "profit_tone": get_tone(item.estimated_today_profit),
+            "confidence_level": item.confidence_level or "D",
+            "quote_time": item.quote_time.strftime("%H:%M:%S") if item.quote_time else "--",
+            "is_holding": item.holding_amount is not None,
+            "is_watchlist": False,
+        })
     return rows
 
 
-def sort_home_rows(rows: list[dict[str, object]], sort_key: str) -> list[dict[str, object]]:
+def sort_home_rows(rows: list[dict], sort_key: str) -> list[dict]:
     if sort_key == "profit_desc":
-        rows.sort(key=lambda row: -999999 if row["estimated_today_profit"] is None else row["estimated_today_profit"], reverse=True)
+        rows.sort(key=lambda r: r["estimated_today_profit"] if r["estimated_today_profit"] is not None else -999999, reverse=True)
     elif sort_key == "confidence_desc":
-        rows.sort(key=lambda row: CONFIDENCE_RANK.get(row["confidence_level"], 0), reverse=True)
+        rows.sort(key=lambda r: CONFIDENCE_RANK.get(r["confidence_level"], 0), reverse=True)
     elif sort_key == "name_asc":
-        rows.sort(key=lambda row: (row["fund_name"], row["fund_code"]))
+        rows.sort(key=lambda r: (r["fund_name"], r["fund_code"]))
     else:
-        rows.sort(key=lambda row: -999999 if row["current_estimate"] is None else row["current_estimate"], reverse=True)
+        rows.sort(key=lambda r: r["current_estimate"] if r["current_estimate"] is not None else -999999, reverse=True)
     return rows
 
 
-def build_detail_context(result) -> dict[str, object]:
-    holdings = []
-    sorted_holdings = sorted(
-        result.holdings,
-        key=lambda row: abs(row.contribution_pct or 0.0),
-        reverse=True,
-    )
-    for row in sorted_holdings:
-        holdings.append(
-            {
-                "asset_name": row.asset_name,
-                "asset_code": row.asset_code,
-                "published_weight": f"{row.published_weight_pct:.2f}%",
-                "effective_weight": f"{row.effective_weight_pct:.2f}%",
-                "live_return": "--" if row.return_pct is None else f"{row.return_pct:+.2f}%",
-                "return_tone": get_tone(row.return_pct),
-                "contribution": "--" if row.contribution_pct is None else f"{row.contribution_pct:+.2f}%",
-                "contribution_tone": get_tone(row.contribution_pct),
-            }
-        )
+def build_detail_context(result, is_watchlist: bool = False) -> dict:
+    holdings = sorted(result.holdings, key=lambda h: abs(h.contribution_pct or 0.0), reverse=True)
     return {
         "fund_code": result.fund_code,
         "fund_name": result.fund_name,
@@ -324,110 +269,140 @@ def build_detail_context(result) -> dict[str, object]:
         "trade_date": result.trade_date.isoformat(),
         "latest_real_nav_date": result.latest_real_nav_date.isoformat() if result.latest_real_nav_date else "--",
         "is_realtime": result.quote_time.date() == date.today() if result.quote_time else False,
-        "holdings": holdings,
+        "is_watchlist": is_watchlist,
+        "holdings": [
+            {
+                "asset_name": h.asset_name,
+                "asset_code": h.asset_code,
+                "published_weight": f"{h.published_weight_pct:.2f}%",
+                "effective_weight": f"{h.effective_weight_pct:.2f}%",
+                "live_return": "--" if h.return_pct is None else f"{h.return_pct:+.2f}%",
+                "return_tone": get_tone(h.return_pct),
+                "contribution": "--" if h.contribution_pct is None else f"{h.contribution_pct:+.2f}%",
+                "contribution_tone": get_tone(h.contribution_pct),
+            }
+            for h in holdings
+        ],
         "advanced_rows": [
             ("公开权重合计", f"{result.covered_weight * 100:.2f}%"),
             ("修正权重合计", f"{result.current_scale_factor * result.covered_weight * 100:.2f}%"),
             ("当前缩放系数", f"{result.current_scale_factor:.4f}"),
-            ("最近真实净值日期", result.latest_real_nav_date.isoformat() if result.latest_real_nav_date else "--"),
+            ("最近真实净值日", result.latest_real_nav_date.isoformat() if result.latest_real_nav_date else "--"),
             ("最近误差", "--" if result.latest_mae is None else f"{result.latest_mae:.2%}"),
         ],
     }
 
 
+# ── Routes ─────────────────────────────────────────────────────────────────
+
 @app.get("/")
 def index(
     request: Request,
-    search: str = Query("", description="搜索基金"),
-    sort: str = Query("estimate_desc", description="排序"),
-    refresh: str = Query("off", description="自动刷新"),
-    view: str = Query("watchlist", description="首页视图"),
-    force: int = Query(0, description="强制刷新"),
+    search: str = Query(""),
+    sort: str = Query("estimate_desc"),
+    refresh: str = Query("off"),
+    force: int = Query(0),
 ):
     results, status_message, used_fallback = load_live_estimate_bundle(force_refresh=bool(force))
     rows = build_home_rows(results)
+
     session_factory = get_cached_session_factory()
     with session_factory() as session:
-        watchlist_codes = {
-            str(row["fund_code"])
-            for row in load_watchlist_rows(session)
-            if row.get("is_active")
-        }
+        watchlist_codes = {str(r["fund_code"]) for r in load_watchlist_rows(session) if r.get("is_active")}
+
     for row in rows:
         row["is_watchlist"] = row["fund_code"] in watchlist_codes
-    if view == "watchlist":
-        watchlist_rows = [row for row in rows if row["is_watchlist"]]
-        if watchlist_rows:
-            rows = watchlist_rows
-    elif view == "holding":
-        holding_rows = [row for row in rows if row["is_holding"]]
-        if holding_rows:
-            rows = holding_rows
+
     if search.strip():
-        keyword = search.strip().lower()
-        rows = [
-            row for row in rows
-            if keyword in row["fund_name"].lower() or keyword in row["fund_code"].lower()
-        ]
+        kw = search.strip().lower()
+        rows = [r for r in rows if kw in r["fund_name"].lower() or kw in r["fund_code"].lower()]
+
     rows = sort_home_rows(rows, sort)
-    latest_time = max((row["quote_time"] for row in rows), default="--")
-    estimate_date = "--"
-    data_mode = "实时行情"
-    if rows:
-        quote_dates = [result.quote_time.date().isoformat() for result in results if result.quote_time is not None]
-        if quote_dates:
-            estimate_date = max(quote_dates)
-    if used_fallback:
-        data_mode = "最近收盘缓存"
-    return templates.TemplateResponse(
-        request,
-        "index.html",
-        {
-            "rows": rows,
-            "status_message": status_message,
-            "used_fallback": used_fallback,
-            "search": search,
-            "sort": sort,
-            "sort_options": SORT_OPTIONS,
-            "refresh": refresh,
-            "view": view,
-            "view_options": VIEW_OPTIONS,
-            "force": force,
-            "latest_time": latest_time,
-            "estimate_date": estimate_date,
-            "data_mode": data_mode,
-            "today_label": date.today().isoformat(),
-        },
-    )
+    latest_time = max((r["quote_time"] for r in rows), default="--")
+    data_mode = "最近收盘缓存" if used_fallback else "实时行情"
+    quote_dates = [res.quote_time.date().isoformat() for res in results if res.quote_time]
+    estimate_date = max(quote_dates) if quote_dates else "--"
+
+    return templates.TemplateResponse(request, "index.html", {
+        "rows": rows,
+        "status_message": status_message,
+        "search": search,
+        "sort": sort,
+        "sort_options": SORT_OPTIONS,
+        "refresh": refresh,
+        "latest_time": latest_time,
+        "estimate_date": estimate_date,
+        "data_mode": data_mode,
+        "today_label": date.today().isoformat(),
+    })
+
+
+@app.get("/api/live-estimates")
+def api_live_estimates(
+    search: str = Query(""),
+    sort: str = Query("estimate_desc"),
+):
+    try:
+        results, status_message, used_fallback = load_live_estimate_bundle()
+    except Exception as exc:
+        logger.error("api_live_estimates error: %s", exc)
+        return JSONResponse({"rows": [], "status_message": "行情获取失败", "latest_time": "--"})
+
+    rows = build_home_rows(results)
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        watchlist_codes = {str(r["fund_code"]) for r in load_watchlist_rows(session) if r.get("is_active")}
+    for row in rows:
+        row["is_watchlist"] = row["fund_code"] in watchlist_codes
+
+    if search.strip():
+        kw = search.strip().lower()
+        rows = [r for r in rows if kw in r["fund_name"].lower() or kw in r["fund_code"].lower()]
+
+    rows = sort_home_rows(rows, sort)
+    latest_time = max((r["quote_time"] for r in rows), default="--")
+    data_mode = "最近收盘缓存" if used_fallback else "实时行情"
+
+    return JSONResponse({
+        "rows": rows,
+        "status_message": status_message,
+        "latest_time": latest_time,
+        "data_mode": data_mode,
+    })
 
 
 @app.get("/fund/{fund_code}")
 def fund_detail(request: Request, fund_code: str, debug: int = 0):
     results, status_message, used_fallback = load_live_estimate_bundle(fund_code=fund_code)
     result = results[0] if results else None
+    session_factory = get_cached_session_factory()
+    is_watchlist = False
+    with session_factory() as session:
+        wl_rows = load_watchlist_rows(session)
+        is_watchlist = any(str(r["fund_code"]) == fund_code and r.get("is_active") for r in wl_rows)
+
     if result is None:
         return templates.TemplateResponse(
-            request,
-            "fund_detail.html",
-            {
-                "detail": None,
-                "status_message": status_message,
-                "used_fallback": used_fallback,
-                "debug": debug,
-            },
+            request, "fund_detail.html",
+            {"detail": None, "status_message": status_message, "debug": debug},
             status_code=404,
         )
-    return templates.TemplateResponse(
-        request,
-        "fund_detail.html",
-        {
-            "detail": build_detail_context(result),
-            "status_message": status_message,
-            "used_fallback": used_fallback,
-            "debug": debug,
-        },
-    )
+    return templates.TemplateResponse(request, "fund_detail.html", {
+        "detail": build_detail_context(result, is_watchlist),
+        "status_message": status_message,
+        "debug": debug,
+    })
 
+
+@app.post("/fund/{fund_code}/watch")
+def toggle_watch(fund_code: str):
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        toggle_watchlist_fund(session, fund_code)
+    return RedirectResponse(url=f"/fund/{fund_code}", status_code=303)
+
+
+# ── Portfolio ──────────────────────────────────────────────────────────────
 
 @app.get("/portfolio")
 def portfolio(request: Request, saved: int = 0):
@@ -435,17 +410,18 @@ def portfolio(request: Request, saved: int = 0):
     with session_factory() as session:
         positions = load_user_position_rows(session)
         funds = load_fund_rows(session)
-        watchlist_rows = load_watchlist_rows(session)
-    return templates.TemplateResponse(
-        request,
-        "portfolio.html",
-        {
-            "positions": positions,
-            "funds": funds,
-            "watchlist_rows": watchlist_rows,
-            "saved": saved,
-        },
-    )
+        wl_rows = load_watchlist_rows(session)
+    fund_name_map = {f["fund_code"]: f["fund_name"] for f in funds}
+    for p in positions:
+        p["fund_name"] = fund_name_map.get(p["fund_code"], "")
+    for w in wl_rows:
+        w["fund_name"] = fund_name_map.get(w["fund_code"], "")
+    return templates.TemplateResponse(request, "portfolio.html", {
+        "positions": positions,
+        "funds": [f for f in funds if f["is_active"]],
+        "watchlist_rows": wl_rows,
+        "saved": saved,
+    })
 
 
 @app.post("/portfolio")
@@ -459,47 +435,44 @@ def save_portfolio(
 ):
     session_factory = get_cached_session_factory()
     with session_factory() as session:
-        save_user_position_rows(
-            session,
-            [
-                {
-                    "fund_code": fund_code,
-                    "holding_amount": None if not holding_amount.strip() else float(holding_amount),
-                    "holding_share": None if not holding_share.strip() else float(holding_share),
-                    "cost_nav": None if not cost_nav.strip() else float(cost_nav),
-                    "platform": platform.strip() or None,
-                    "is_active": is_active == "1",
-                }
-            ],
-        )
+        save_user_position_rows(session, [{
+            "fund_code": fund_code,
+            "holding_amount": None if not holding_amount.strip() else float(holding_amount),
+            "holding_share": None if not holding_share.strip() else float(holding_share),
+            "cost_nav": None if not cost_nav.strip() else float(cost_nav),
+            "platform": platform.strip() or None,
+            "is_active": is_active == "1",
+        }])
     return RedirectResponse(url="/portfolio?saved=1", status_code=303)
 
 
 @app.post("/portfolio/watchlist")
-def save_watchlist(
-    fund_code: str = Form(...),
-    is_active: str = Form("1"),
-):
+def save_watchlist(fund_code: str = Form(...), is_active: str = Form("1")):
     session_factory = get_cached_session_factory()
     with session_factory() as session:
-        save_watchlist_rows(
-            session,
-            [
-                {
-                    "fund_code": fund_code,
-                    "is_active": is_active == "1",
-                }
-            ],
-        )
+        save_watchlist_rows(session, [{"fund_code": fund_code, "is_active": is_active == "1"}])
     return RedirectResponse(url="/portfolio?saved=1", status_code=303)
 
 
-@app.post("/fund/{fund_code}/watch")
-def toggle_watch(fund_code: str):
-    session_factory = get_cached_session_factory()
-    with session_factory() as session:
-        toggle_watchlist_fund(session, fund_code)
-    return RedirectResponse(url=f"/fund/{fund_code}", status_code=303)
+# ── Manage ──────────────────────────────────────────────────────────────────
+
+def _load_eff_weights(session) -> list[dict]:
+    rows = session.scalars(
+        select(EffectiveWeightVersion)
+        .where(EffectiveWeightVersion.is_active.is_(True))
+        .order_by(EffectiveWeightVersion.fund_code, EffectiveWeightVersion.report_date.desc())
+    ).all()
+    return [
+        {
+            "fund_code": r.fund_code,
+            "report_date": r.report_date.isoformat(),
+            "stock_weight": r.stock_weight,
+            "scale_factor": r.scale_factor,
+            "covered_weight": r.covered_weight,
+            "total_effective_weight": r.total_effective_weight,
+        }
+        for r in rows[:30]
+    ]
 
 
 @app.get("/manage")
@@ -507,20 +480,135 @@ def manage(request: Request, message: str = ""):
     session_factory = get_cached_session_factory()
     with session_factory() as session:
         funds = load_fund_rows(session)
-        holdings = load_holding_rows(session)
+        holdings = load_holding_rows(session)[:30]
         assets = load_asset_allocation_rows(session)
-        industries = load_industry_allocation_rows(session)
-    return templates.TemplateResponse(
-        request,
-        "manage.html",
-        {
-            "message": message,
-            "funds": funds,
-            "holdings": holdings[:20],
-            "assets": assets[:20],
-            "industries": industries[:20],
-        },
-    )
+        eff_weights = _load_eff_weights(session)
+    return templates.TemplateResponse(request, "manage.html", {
+        "message": message,
+        "funds": funds,
+        "holdings": holdings,
+        "assets": assets,
+        "eff_weights": eff_weights,
+    })
+
+
+@app.post("/manage/fund/save")
+def manage_fund_save(
+    fund_code: str = Form(...),
+    fund_name: str = Form(...),
+    fund_type: str = Form("equity"),
+    market: str = Form("A股"),
+    is_active: str = Form("1"),
+):
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        save_fund_rows(session, [{
+            "fund_code": fund_code.strip(),
+            "fund_name": fund_name.strip(),
+            "fund_type": fund_type,
+            "market": market,
+            "is_active": is_active == "1",
+        }])
+    return RedirectResponse(url=f"/manage?message=已保存基金 {fund_code}", status_code=303)
+
+
+@app.post("/manage/fund/disable")
+def manage_fund_disable(fund_code: str = Form(...)):
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        ok = deactivate_fund(session, fund_code)
+    msg = f"已停用基金 {fund_code}" if ok else "未找到该基金"
+    return RedirectResponse(url=f"/manage?message={msg}", status_code=303)
+
+
+@app.post("/manage/holding/save")
+async def manage_holding_save(request: Request):
+    form = await request.form()
+    fund_code = str(form.get("fund_code", "")).strip()
+    report_date = str(form.get("report_date", "")).strip()
+    source = str(form.get("source", "官网")).strip() or "官网"
+
+    if not fund_code or not report_date:
+        return RedirectResponse(url="/manage?message=请填写基金代码和报告日", status_code=303)
+
+    rows = []
+    i = 0
+    while True:
+        code = str(form.get(f"asset_code_{i}", "")).strip()
+        name = str(form.get(f"asset_name_{i}", "")).strip()
+        atype = str(form.get(f"asset_type_{i}", "stock")).strip() or "stock"
+        weight_str = str(form.get(f"weight_pct_{i}", "")).strip()
+        if not code and not name and i >= 10:
+            break
+        if code and name and weight_str:
+            try:
+                rows.append({
+                    "fund_code": fund_code,
+                    "report_date": report_date,
+                    "source": source,
+                    "asset_code": code,
+                    "asset_name": name,
+                    "asset_type": atype,
+                    "weight_pct": float(weight_str),
+                })
+            except ValueError:
+                pass
+        i += 1
+
+    if not rows:
+        return RedirectResponse(url="/manage?message=未填写有效持仓行", status_code=303)
+
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        count = save_holding_rows(session, rows)
+    return RedirectResponse(url=f"/manage?message=已保存持仓 {count} 条", status_code=303)
+
+
+@app.post("/manage/asset-allocation/save")
+def manage_asset_save(
+    fund_code: str = Form(...),
+    report_date: str = Form(...),
+    source: str = Form("官网"),
+    stock_weight_pct: str = Form("0"),
+    bond_weight_pct: str = Form("0"),
+    cash_weight_pct: str = Form("0"),
+    other_weight_pct: str = Form("0"),
+):
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        save_asset_allocation_rows(session, [{
+            "fund_code": fund_code.strip(),
+            "report_date": report_date,
+            "source": source.strip() or "官网",
+            "stock_weight_pct": float(stock_weight_pct or 0),
+            "bond_weight_pct": float(bond_weight_pct or 0),
+            "cash_weight_pct": float(cash_weight_pct or 0),
+            "other_weight_pct": float(other_weight_pct or 0),
+        }])
+    return RedirectResponse(url=f"/manage?message=已保存资产配置", status_code=303)
+
+
+@app.post("/manage/effective-weight/generate")
+def manage_eff_weight(fund_code: str = Form(...), trade_date: str = Form(...)):
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        run_effective_weight_action(
+            session=session,
+            fund_code=fund_code,
+            trade_date=date.fromisoformat(trade_date),
+        )
+    return RedirectResponse(url="/manage?message=已生成或更新修正权重", status_code=303)
+
+
+# ── Legacy routes (keep old URLs working) ──────────────────────────────────
+
+@app.post("/manage/funds")
+def manage_funds_csv(csv_text: str = Form(...)):
+    rows = _parse_csv(csv_text)
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        count = save_fund_rows(session, rows)
+    return RedirectResponse(url=f"/manage?message=已保存基金 {count} 条", status_code=303)
 
 
 @app.post("/manage/funds/deactivate")
@@ -528,23 +616,13 @@ def manage_fund_deactivate(fund_code: str = Form(...)):
     session_factory = get_cached_session_factory()
     with session_factory() as session:
         ok = deactivate_fund(session, fund_code)
-    if ok:
-        return RedirectResponse(url=f"/manage?message=已停用基金 {fund_code}", status_code=303)
-    return RedirectResponse(url="/manage?message=未找到该基金", status_code=303)
-
-
-@app.post("/manage/funds")
-def manage_funds(csv_text: str = Form(...)):
-    rows = parse_csv_text(csv_text)
-    session_factory = get_cached_session_factory()
-    with session_factory() as session:
-        count = save_fund_rows(session, rows)
-    return RedirectResponse(url=f"/manage?message=已保存基金 {count} 条", status_code=303)
+    msg = f"已停用基金 {fund_code}" if ok else "未找到该基金"
+    return RedirectResponse(url=f"/manage?message={msg}", status_code=303)
 
 
 @app.post("/manage/holdings")
-def manage_holdings(csv_text: str = Form(...)):
-    rows = parse_csv_text(csv_text)
+def manage_holdings_csv(csv_text: str = Form(...)):
+    rows = _parse_csv(csv_text)
     session_factory = get_cached_session_factory()
     with session_factory() as session:
         count = save_holding_rows(session, rows)
@@ -552,21 +630,12 @@ def manage_holdings(csv_text: str = Form(...)):
 
 
 @app.post("/manage/assets")
-def manage_assets(csv_text: str = Form(...)):
-    rows = parse_csv_text(csv_text)
+def manage_assets_csv(csv_text: str = Form(...)):
+    rows = _parse_csv(csv_text)
     session_factory = get_cached_session_factory()
     with session_factory() as session:
         count = save_asset_allocation_rows(session, rows)
     return RedirectResponse(url=f"/manage?message=已保存资产配置 {count} 条", status_code=303)
-
-
-@app.post("/manage/industries")
-def manage_industries(csv_text: str = Form(...)):
-    rows = parse_csv_text(csv_text)
-    session_factory = get_cached_session_factory()
-    with session_factory() as session:
-        count = save_industry_allocation_rows(session, rows)
-    return RedirectResponse(url=f"/manage?message=已保存行业配置 {count} 条", status_code=303)
 
 
 @app.post("/manage/effective-weights")
@@ -584,3 +653,10 @@ def manage_effective_weights(fund_code: str = Form(...), trade_date: str = Form(
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+def _parse_csv(content: str) -> list[dict]:
+    if not content.strip():
+        return []
+    reader = csv.DictReader(io.StringIO(content.strip()))
+    return [dict(row) for row in reader]

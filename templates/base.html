@@ -3,20 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="个人版养基宝增强估值工具：修正权重驱动的基金实时估值">
   <title>{% block title %}基金实时估值{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
 </head>
-<body data-refresh="{{ refresh if refresh is defined else 'off' }}">
+<body>
   <div class="app-shell">
     <header class="topbar">
-      <div>
+      <div class="app-brand">
         <h1 class="app-title">基金实时估值</h1>
-        <div class="app-subtitle">修正权重驱动的个人版养基宝增强估值</div>
+        <span class="app-subtitle">修正权重驱动 · 个人版养基宝</span>
       </div>
       <nav class="topnav">
-        <a href="/" class="{% if request.url.path == '/' %}active{% endif %}">首页</a>
-        <a href="/portfolio" class="{% if request.url.path == '/portfolio' %}active{% endif %}">我的持仓</a>
-        <a href="/manage" class="{% if request.url.path == '/manage' %}active{% endif %}">管理</a>
+        <a href="/" {% if request.url.path == '/' %}class="active"{% endif %}>首页</a>
+        <a href="/portfolio" {% if request.url.path == '/portfolio' %}class="active"{% endif %}>我的持仓</a>
+        <a href="/manage" {% if request.url.path == '/manage' %}class="active"{% endif %}>管理</a>
       </nav>
     </header>
     {% block content %}{% endblock %}

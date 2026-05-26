@@ -1,345 +1,509 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; }
+
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", sans-serif;
-  background: #f5f8fc;
-  color: #1f2a44;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans SC', sans-serif;
+  background: #f0f4f9;
+  color: #1a2436;
+  font-size: 15px;
+  line-height: 1.5;
 }
 
-a {
-  color: inherit;
-  text-decoration: none;
-}
+a { color: inherit; text-decoration: none; }
 
+/* ── 布局 ── */
 .app-shell {
-  max-width: 860px;
+  max-width: 880px;
   margin: 0 auto;
-  padding: 20px 16px 36px;
+  padding: 16px 16px 48px;
 }
 
+/* ── 顶栏 ── */
 .topbar {
   display: flex;
   justify-content: space-between;
-  align-items: flex-end;
-  gap: 16px;
-  margin-bottom: 14px;
-}
-
-.app-title {
-  margin: 0;
-  font-size: 34px;
-  font-weight: 800;
-  color: #2c5ff6;
-}
-
-.app-subtitle {
-  color: #6f7e99;
-  margin-top: 6px;
-  font-size: 14px;
-}
-
-.topnav {
-  display: flex;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.topnav a {
-  color: #6f7e99;
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.topnav a.active {
-  color: #2c5ff6;
-}
-
-.status-panel,
-.panel,
-.advanced-box,
-.detail-top {
-  background: #ffffff;
-  border: 1px solid #e2e8f3;
-  border-radius: 16px;
-  padding: 14px 16px;
-  margin-bottom: 14px;
-  box-shadow: 0 8px 24px rgba(73, 96, 140, 0.08);
-}
-
-.status-row {
-  display: flex;
+  align-items: center;
   gap: 12px;
-  flex-wrap: wrap;
-  color: #6e7e98;
-  font-size: 13px;
-}
-
-.status-message {
-  margin-top: 8px;
-  color: #556581;
-  font-size: 14px;
-}
-
-.status-message.ok {
-  color: #2c5ff6;
-}
-
-.toolbar-inline {
   margin-bottom: 12px;
 }
 
-.toolbar-form {
-  display: grid;
-  grid-template-columns: 0.9fr 1.3fr 1fr 1fr 112px;
-  gap: 10px;
+.app-brand { display: flex; align-items: baseline; gap: 10px; }
+
+.app-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 800;
+  color: #1d4ed8;
+  letter-spacing: -0.5px;
 }
 
-input,
-select,
-textarea,
-button {
+.app-subtitle {
+  color: #6b7a99;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.topnav { display: flex; gap: 20px; }
+
+.topnav a {
+  color: #6b7a99;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 4px 0;
+  border-bottom: 2px solid transparent;
+  transition: color .15s, border-color .15s;
+}
+
+.topnav a:hover { color: #1d4ed8; }
+.topnav a.active { color: #1d4ed8; border-bottom-color: #1d4ed8; }
+
+/* ── 状态条 ── */
+.status-bar {
+  display: flex;
+  gap: 0;
+  align-items: center;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 8px 14px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: #6b7a99;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.status-bar .sep { color: #d1d8e8; }
+#status-message { color: #3b5bdb; font-weight: 500; }
+
+/* ── 工具栏 ── */
+.toolbar {
+  display: grid;
+  grid-template-columns: 1fr 120px 120px auto;
+  gap: 8px;
+  margin-bottom: 12px;
+  align-items: center;
+}
+
+/* ── 表单控件统一高度 44px ── */
+input, select, textarea, button {
   font: inherit;
 }
 
-input,
-select,
+input[type="text"],
+input[type="number"],
+input[type="date"],
+select {
+  width: 100%;
+  height: 44px;
+  padding: 0 12px;
+  border: 1.5px solid #dde3ef;
+  border-radius: 10px;
+  background: #fff;
+  color: #1a2436;
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+
+input:focus, select:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59,130,246,.12);
+}
+
 textarea {
   width: 100%;
-  box-sizing: border-box;
-  border: 1px solid #d8e2f0;
-  border-radius: 12px;
-  background: #ffffff;
-  color: #22314d;
-  padding: 11px 12px;
-}
-
-textarea {
+  padding: 10px 12px;
+  border: 1.5px solid #dde3ef;
+  border-radius: 10px;
+  background: #fff;
+  color: #1a2436;
+  outline: none;
   resize: vertical;
-  min-height: 110px;
+  min-height: 100px;
+  transition: border-color .15s;
 }
 
-button {
+textarea:focus { border-color: #3b82f6; }
+
+button, .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 44px;
+  padding: 0 18px;
   border: none;
-  border-radius: 12px;
-  background: #2c5ff6;
-  color: #ffffff;
-  padding: 11px 12px;
+  border-radius: 10px;
+  background: #1d4ed8;
+  color: #fff;
+  font-weight: 700;
+  font-size: 14px;
   cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, transform .1s;
+}
+
+button:hover, .btn:hover { background: #1e40af; }
+button:active, .btn:active { transform: scale(.97); }
+
+.btn-sm { height: 34px; padding: 0 12px; font-size: 13px; border-radius: 8px; }
+
+.btn-danger { background: #dc2626; }
+.btn-danger:hover { background: #b91c1c; }
+
+.btn-warn { background: #d97706; }
+.btn-warn:hover { background: #b45309; }
+
+.btn-ghost {
+  background: transparent;
+  color: #1d4ed8;
+  border: 1.5px solid #1d4ed8;
+}
+.btn-ghost:hover { background: #eff6ff; }
+
+.btn-secondary {
+  background: #f0f4f9;
+  color: #334155;
+  border: 1.5px solid #dde3ef;
+}
+.btn-secondary:hover { background: #e2e8f0; }
+
+/* ── 基金列表（首页） ── */
+.fund-list { display: flex; flex-direction: column; gap: 6px; }
+
+.fund-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto 44px;
+  gap: 12px;
+  align-items: center;
+  background: #fff;
+  border: 1px solid #e8edf5;
+  border-radius: 12px;
+  padding: 12px 16px;
+  min-height: 64px;
+  cursor: pointer;
+  transition: border-color .15s, box-shadow .15s, transform .1s;
+}
+
+.fund-row:hover {
+  border-color: #93c5fd;
+  box-shadow: 0 4px 16px rgba(59,130,246,.1);
+  transform: translateY(-1px);
+}
+
+.fund-main { min-width: 0; }
+
+.fund-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1a2436;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fund-sub {
+  margin-top: 2px;
+  color: #8898b8;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fund-value {
+  text-align: right;
+  font-size: 22px;
+  font-weight: 800;
+  min-width: 80px;
+}
+
+.fund-profit {
+  text-align: right;
+  font-size: 13px;
+  font-weight: 600;
+  min-width: 70px;
+}
+
+.fund-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 22px;
+  border-radius: 6px;
+  font-size: 12px;
   font-weight: 700;
 }
 
-.inline-action {
-  margin-top: 10px;
+/* ── 颜色语义 ── */
+.up { color: #dc2626; }
+.down { color: #16a34a; }
+.muted { color: #9baac0; }
+.stale, .delay { color: #d97706; }
+.live { color: #2563eb; }
+
+.badge-a { background: #dbeafe; color: #1d4ed8; }
+.badge-b { background: #e0e7ff; color: #4338ca; }
+.badge-c { background: #fef3c7; color: #92400e; }
+.badge-d { background: #f1f5f9; color: #64748b; }
+
+/* ── 空状态 ── */
+.empty-panel {
+  background: #fff;
+  border: 1.5px dashed #dde3ef;
+  border-radius: 12px;
+  padding: 32px;
+  color: #8898b8;
+  text-align: center;
+  font-size: 14px;
 }
 
-.list-head {
-  display: grid;
-  grid-template-columns: 1.8fr 1fr 1fr 64px;
-  gap: 12px;
-  color: #6f7e99;
+/* ── 卡片/面板 ── */
+.panel {
+  background: #fff;
+  border: 1px solid #e8edf5;
+  border-radius: 14px;
+  padding: 18px 20px;
+  margin-bottom: 14px;
+}
+
+.panel-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #1a2436;
+  margin: 0 0 12px;
+}
+
+.panel-note {
+  color: #7c8ca8;
   font-size: 13px;
-  padding: 0 8px 8px;
+  margin: 4px 0 0;
 }
 
-.detail-grid-head {
-  grid-template-columns: 1.7fr 0.9fr 0.9fr 0.9fr 0.9fr;
+/* ── 详情页顶部 ── */
+.detail-top {
+  background: #fff;
+  border: 1px solid #e8edf5;
+  border-radius: 14px;
+  padding: 18px 20px;
+  margin-bottom: 12px;
 }
 
-.fund-list,
-.holding-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.fund-row,
-.holding-row {
-  display: grid;
-  grid-template-columns: 1.8fr 1fr 1fr 64px;
-  gap: 12px;
-  align-items: center;
-  background: #ffffff;
-  border: 1px solid #e2e8f3;
-  border-radius: 16px;
-  padding: 14px 16px;
-  box-shadow: 0 8px 24px rgba(73, 96, 140, 0.08);
-}
-
-.holding-row {
-  grid-template-columns: 1.7fr 0.9fr 0.9fr 0.9fr 0.9fr;
-}
-
-.fund-name,
-.holding-name,
 .detail-title {
   font-size: 20px;
   font-weight: 800;
-  color: #1f2a44;
+  color: #1a2436;
+  margin-bottom: 2px;
 }
 
-.fund-sub,
-.holding-sub,
-.detail-sub,
-.panel-note {
-  margin-top: 4px;
-  color: #7c8ca8;
-  font-size: 13px;
+.detail-sub { color: #7c8ca8; font-size: 13px; }
+
+.detail-metrics {
+  display: flex;
+  gap: 24px;
+  margin: 14px 0;
+  flex-wrap: wrap;
 }
 
-.fund-value,
-.fund-profit,
+.metric-label { color: #8898b8; font-size: 12px; margin-bottom: 2px; }
+
 .metric-value {
-  text-align: right;
   font-size: 26px;
   font-weight: 800;
 }
 
-.align-right {
-  text-align: right;
-}
-
-.align-center {
-  text-align: center;
-}
-
-.up {
-  color: #f05555;
-}
-
-.down {
-  color: #16a36c;
-}
-
-.muted {
-  color: #93a0b8;
-}
-
-.stale,
-.delay {
-  color: #d48b20;
-}
-
-.live {
-  color: #2c5ff6;
-}
-
-.fund-badge,
 .metric-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 34px;
-  height: 26px;
-  border-radius: 999px;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.badge-a {
-  background: #dfe9ff;
-  color: #2c5ff6;
-}
-
-.badge-b {
-  background: #e9effa;
-  color: #536b9d;
-}
-
-.badge-c {
-  background: #fff1d7;
-  color: #b27b00;
-}
-
-.badge-d {
-  background: #edf0f5;
-  color: #77839a;
-}
-
-.detail-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
-  margin: 14px 0;
-}
-
-.metric-label,
-.advanced-label {
-  color: #6f7e99;
-  font-size: 13px;
-  margin-bottom: 4px;
-}
-
-.advanced-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.advanced-value {
-  color: #243352;
+  min-width: 36px;
+  height: 28px;
+  border-radius: 8px;
   font-size: 15px;
   font-weight: 700;
 }
 
-.empty-panel {
-  background: #ffffff;
-  border: 1px dashed #d7dfeb;
-  border-radius: 16px;
-  padding: 20px 16px;
-  color: #7b8aa5;
-}
+/* ── 持仓贡献列表（详情页） ── */
+.holding-list { display: flex; flex-direction: column; gap: 5px; }
 
-.form-grid {
+.list-head {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+  color: #8898b8;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 14px 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
-.compact-form {
-  grid-template-columns: repeat(2, minmax(0, 1fr)) 140px;
+.holding-head { grid-template-columns: 1.8fr 0.9fr 0.9fr 0.9fr 0.9fr; }
+
+.holding-row {
+  display: grid;
+  gap: 10px;
+  align-items: center;
+  background: #fff;
+  border: 1px solid #e8edf5;
+  border-radius: 10px;
+  padding: 10px 14px;
+  grid-template-columns: 1.8fr 0.9fr 0.9fr 0.9fr 0.9fr;
 }
 
-.table-wrap {
-  overflow-x: auto;
+.holding-name { font-size: 14px; font-weight: 700; color: #1a2436; }
+.holding-sub { color: #8898b8; font-size: 12px; margin-top: 1px; }
+
+.align-right { text-align: right; }
+.align-center { text-align: center; }
+
+/* ── 高级调试折叠 ── */
+.advanced-box {
+  background: #f8fafc;
+  border: 1px solid #e8edf5;
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-top: 10px;
+  font-size: 13px;
 }
+
+.advanced-box summary {
+  cursor: pointer;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 600;
+  user-select: none;
+}
+
+.advanced-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.advanced-label { color: #94a3b8; font-size: 12px; }
+.advanced-value { color: #1a2436; font-weight: 600; }
+
+/* ── Tab ── */
+.tab-bar {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.tab-btn {
+  height: 36px;
+  padding: 0 16px;
+  border: 1.5px solid #dde3ef;
+  border-radius: 8px;
+  background: #f0f4f9;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .15s;
+}
+
+.tab-btn:hover { background: #e2e8f0; }
+.tab-btn.active { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
+
+/* ── 表格 ── */
+.table-wrap { overflow-x: auto; margin-top: 10px; }
 
 .plain-table {
   width: 100%;
   border-collapse: collapse;
+  font-size: 14px;
 }
 
-.plain-table th,
-.plain-table td {
-  padding: 10px 8px;
-  border-bottom: 1px solid #edf1f7;
+.plain-table th {
+  padding: 10px 10px;
+  border-bottom: 2px solid #e8edf5;
   text-align: left;
-  color: #33415e;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .03em;
 }
 
-@media (max-width: 760px) {
-  .topbar {
-    flex-direction: column;
-    align-items: flex-start;
-  }
+.plain-table td {
+  padding: 10px 10px;
+  border-bottom: 1px solid #f1f5f9;
+  color: #1a2436;
+  vertical-align: middle;
+}
 
-  .toolbar-form {
-    grid-template-columns: 1fr;
-  }
+.plain-table tr:last-child td { border-bottom: none; }
+.plain-table tr:hover td { background: #f8fafc; }
 
-  .list-head,
-  .fund-row {
-    grid-template-columns: 1.6fr 1fr 0.8fr 52px;
-  }
+/* ── 行内操作 ── */
+.row-actions { display: flex; gap: 6px; align-items: center; }
 
-  .detail-grid-head,
-  .holding-row {
-    grid-template-columns: 1.5fr 0.8fr 0.8fr 0.8fr 0.8fr;
-  }
+/* ── 表单网格 ── */
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-bottom: 12px;
+}
 
-  .detail-metrics,
-  .form-grid,
-  .compact-form,
-  .advanced-grid {
-    grid-template-columns: 1fr;
-  }
+.form-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.form-field { display: flex; flex-direction: column; gap: 4px; }
+.form-label { font-size: 12px; font-weight: 600; color: #64748b; }
+
+.form-actions { display: flex; gap: 8px; margin-top: 4px; }
+
+/* ── 消息提示 ── */
+.msg-ok {
+  background: #dcfce7;
+  border: 1px solid #86efac;
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: #166534;
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 12px;
+}
+
+.msg-err {
+  background: #fee2e2;
+  border: 1px solid #fca5a5;
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: #991b1b;
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 12px;
+}
+
+/* ── 权重合计提示 ── */
+#weight-sum {
+  font-size: 13px;
+  font-weight: 600;
+  color: #2563eb;
+  padding: 4px 0;
+}
+
+/* ── 响应式 ── */
+@media (max-width: 640px) {
+  .topbar { flex-direction: column; align-items: flex-start; }
+  .toolbar { grid-template-columns: 1fr 1fr; }
+  .fund-row { grid-template-columns: 1fr auto 40px; }
+  .fund-profit { display: none; }
+  .holding-head, .holding-row { grid-template-columns: 1.5fr 0.8fr 0.8fr 0.8fr; }
+  .holding-row > :nth-child(3) { display: none; }
+  .form-grid { grid-template-columns: 1fr; }
+  .form-grid-2 { grid-template-columns: 1fr; }
+  .detail-metrics { gap: 16px; }
+  .metric-value { font-size: 20px; }
 }
