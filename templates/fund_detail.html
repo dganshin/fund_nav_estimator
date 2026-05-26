@@ -2,6 +2,10 @@
 {% block title %}基金详情 · {{ detail.fund_code if detail else '未找到' }}{% endblock %}
 
 {% block content %}
+{% if msg %}
+<div class="msg-ok">{{ msg }}</div>
+{% endif %}
+
 {% if detail %}
 <section class="detail-top">
   <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px;">
@@ -9,9 +13,15 @@
       <div class="detail-title">{{ detail.fund_name }}</div>
       <div class="detail-sub">{{ detail.fund_code }}</div>
     </div>
-    <form method="post" action="/fund/{{ detail.fund_code }}/watch">
-      <button type="submit" class="btn-ghost btn">{% if detail.is_watchlist %}移出自选{% else %}加入自选{% endif %}</button>
-    </form>
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+      <form method="post" action="/fund/{{ detail.fund_code }}/watch">
+        <button type="submit" class="btn-ghost btn">{% if detail.is_watchlist %}移出自选{% else %}加入自选{% endif %}</button>
+      </form>
+      <form method="post" action="/manage/calibration/run">
+        <input type="hidden" name="fund_code" value="{{ detail.fund_code }}">
+        <button type="submit" class="btn-secondary btn" title="使用最新已公布真实净值更新校准参数">手动校准</button>
+      </form>
+    </div>
   </div>
 
   <div class="detail-metrics">
@@ -25,8 +35,14 @@
     </div>
     <div>
       <div class="metric-label">置信度</div>
-      <div class="metric-badge badge-{{ detail.confidence_level|lower }}">{{ detail.confidence_level }}</div>
+      <div class="metric-badge badge-{{ detail.confidence_level|lower }}" style="font-size:20px; width:44px; height:44px; border-radius:10px;">{{ detail.confidence_level }}</div>
     </div>
+    {% if cal_stats and cal_stats.current_scale %}
+    <div>
+      <div class="metric-label">当前 scale</div>
+      <div style="font-size:18px; font-weight:700; color:#334155;">{{ cal_stats.current_scale }}</div>
+    </div>
+    {% endif %}
   </div>
 
   <div class="status-bar" style="margin-bottom:0">
@@ -65,7 +81,50 @@
   {% endfor %}
 </div>
 
-<details class="advanced-box" {% if debug == 1 %}open{% endif %} style="margin-top:12px">
+<!-- 校准残差折叠区 -->
+<details class="advanced-box" style="margin-top:12px" id="calibration-section">
+  <summary>校准残差 <span id="cal-summary-badge" style="font-size:12px; color:#64748b; margin-left:8px;"></span></summary>
+
+  {% if cal_stats %}
+  <div class="advanced-grid" style="margin-bottom:12px">
+    {% if cal_stats.sample_count is defined %}
+    <div><div class="advanced-label">样本数</div><div class="advanced-value">{{ cal_stats.sample_count }}</div></div>
+    {% endif %}
+    {% if cal_stats.raw_mae is defined %}
+    <div><div class="advanced-label">原始 MAE</div><div class="advanced-value">{{ cal_stats.raw_mae }}</div></div>
+    {% endif %}
+    {% if cal_stats.effective_mae is defined %}
+    <div><div class="advanced-label">修正后 MAE</div><div class="advanced-value">{{ cal_stats.effective_mae }}</div></div>
+    {% endif %}
+    {% if cal_stats.improvement is defined %}
+    <div><div class="advanced-label">MAE 改善</div><div class="advanced-value">{{ cal_stats.improvement }}</div></div>
+    {% endif %}
+    {% if cal_stats.latest_residual is defined %}
+    <div><div class="advanced-label">最近残差</div><div class="advanced-value">{{ cal_stats.latest_residual }}</div></div>
+    {% endif %}
+    {% if cal_stats.last_calibration_date is defined %}
+    <div><div class="advanced-label">最近校准日</div><div class="advanced-value">{{ cal_stats.last_calibration_date }}</div></div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div id="residual-table-wrap" style="display:none">
+    <div class="table-wrap">
+      <table class="plain-table" id="residual-table">
+        <thead>
+          <tr>
+            <th>日期</th><th>实际涨跌</th><th>原始估值</th><th>修正估值</th>
+            <th>残差</th><th>|残差|</th><th>scale_used</th><th>obs_scale</th><th>更新</th><th>跳过原因</th>
+          </tr>
+        </thead>
+        <tbody id="residual-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+  <p id="residual-loading" style="color:#94a3b8; font-size:13px;">点击展开后加载残差数据…</p>
+</details>
+
+<details class="advanced-box" {% if debug == 1 %}open{% endif %} style="margin-top:8px">
   <summary>高级调试信息</summary>
   <div class="advanced-grid">
     {% for label, value in detail.advanced_rows %}
@@ -76,6 +135,54 @@
     {% endfor %}
   </div>
 </details>
+
+<script>
+(function() {
+  var fundCode = {{ detail.fund_code | tojson }};
+  var section = document.getElementById('calibration-section');
+  var loaded = false;
+  section.addEventListener('toggle', function() {
+    if (section.open && !loaded) {
+      loaded = true;
+      var loadingEl = document.getElementById('residual-loading');
+      loadingEl.textContent = '加载中…';
+      fetch('/api/fund/' + fundCode + '/calibration-residuals?limit=90')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          loadingEl.style.display = 'none';
+          var rows = data.residuals || [];
+          if (rows.length === 0) {
+            loadingEl.style.display = 'block';
+            loadingEl.textContent = '暂无残差记录。请先点击"手动校准"。';
+            return;
+          }
+          var badge = document.getElementById('cal-summary-badge');
+          badge.textContent = rows.length + ' 条记录';
+          var tbody = document.getElementById('residual-tbody');
+          tbody.innerHTML = '';
+          rows.forEach(function(r) {
+            var tr = document.createElement('tr');
+            tr.innerHTML = [
+              r.trade_date, r.actual_return, r.raw_estimate, r.effective_estimate,
+              r.residual, r.abs_residual, r.scale_used, r.observed_scale,
+              r.is_used, r.skip_reason || ''
+            ].map(function(v, i) {
+              var cls = '';
+              if (i === 4) { cls = v.startsWith('+') ? ' class="up"' : (v.startsWith('-') ? ' class="down"' : ''); }
+              if (i === 8) { cls = v === '✓' ? ' style="color:#16a34a"' : ' style="color:#94a3b8"'; }
+              return '<td' + cls + '>' + v + '</td>';
+            }).join('');
+            tbody.appendChild(tr);
+          });
+          document.getElementById('residual-table-wrap').style.display = 'block';
+        })
+        .catch(function(e) {
+          loadingEl.textContent = '加载失败：' + e.message;
+        });
+    }
+  });
+})();
+</script>
 
 {% else %}
 <section class="empty-panel">当前没有该基金的估值详情。<br>请检查基金代码，或先在<a href="/manage" style="color:#1d4ed8">管理页</a>添加持仓。</section>

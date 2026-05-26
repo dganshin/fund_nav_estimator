@@ -35,6 +35,7 @@ class Fund(Base):
     online_calibration_states: Mapped[list["OnlineCalibrationState"]] = relationship(back_populates="fund")
     calibrated_estimates: Mapped[list["CalibratedEstimate"]] = relationship(back_populates="fund")
     selected_estimates: Mapped[list["SelectedEstimate"]] = relationship(back_populates="fund")
+    calibration_residuals: Mapped[list["CalibrationResidual"]] = relationship(back_populates="fund")
 
 
 class HoldingVersion(Base):
@@ -296,6 +297,33 @@ class OnlineCalibrationState(Base):
     )
 
     fund: Mapped["Fund"] = relationship(back_populates="online_calibration_states")
+
+
+class CalibrationResidual(Base):
+    """逐日因果校准残差记录。每天只使用 T-1 及以前的 scale 计算 effective_estimate。"""
+    __tablename__ = "calibration_residuals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False, index=True)
+    holding_version_id: Mapped[int] = mapped_column(ForeignKey("holding_versions.id"), nullable=False, index=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    actual_return: Mapped[float] = mapped_column(Float, nullable=False)
+    raw_estimate: Mapped[float] = mapped_column(Float, nullable=False)
+    effective_estimate: Mapped[float] = mapped_column(Float, nullable=False)
+    residual: Mapped[float] = mapped_column(Float, nullable=False)
+    abs_residual: Mapped[float] = mapped_column(Float, nullable=False)
+    scale_factor_used: Mapped[float] = mapped_column(Float, nullable=False)
+    observed_scale: Mapped[float | None] = mapped_column(Float, nullable=True)
+    updated_scale_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_used_for_update: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    skip_reason: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("fund_code", "holding_version_id", "trade_date", name="uq_calibration_residual"),
+    )
+
+    fund: Mapped["Fund"] = relationship(back_populates="calibration_residuals")
 
 
 class EstimateError(Base):

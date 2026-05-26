@@ -13,7 +13,7 @@
 </div>
 
 <div class="toolbar">
-  <input id="search-input" type="text" value="{{ search }}" placeholder="搜索基金名称或代码…" autocomplete="off">
+  <input id="search-input" type="text" value="{{ search }}" placeholder="搜索基金名称 / 输入基金代码…" autocomplete="off">
   <select id="sort-select">
     {% for key, label in sort_options.items() %}
     <option value="{{ key }}" {% if sort == key %}selected{% endif %}>{{ label }}</option>
@@ -34,6 +34,20 @@
   </form>
 </div>
 
+<!-- 搜索到新基金时弹出（JS 控制） -->
+<div id="new-fund-panel" class="panel" style="display:none; border:1.5px solid #3b82f6;">
+  <div class="panel-title" style="color:#1d4ed8">发现新基金</div>
+  <div id="new-fund-info" style="font-size:14px; color:#334155; margin-bottom:12px;"></div>
+  <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+    <button id="btn-quick-add" class="btn btn-ghost" style="height:44px">加入自选</button>
+    <div style="display:flex; gap:6px; align-items:center;">
+      <input id="quick-buy-amount" type="number" placeholder="持有金额 (元)" style="width:160px; height:44px">
+      <button id="btn-quick-buy" class="btn" style="height:44px">按金额买入</button>
+    </div>
+    <span id="new-fund-result" style="font-size:13px; color:#16a34a; font-weight:600"></span>
+  </div>
+</div>
+
 <div id="fund-list-container" class="fund-list">
   {% for row in rows %}
   <a class="fund-row" href="/fund/{{ row.fund_code }}">
@@ -48,7 +62,7 @@
     <div class="fund-badge badge-{{ row.confidence_level|lower }}">{{ row.confidence_level }}</div>
   </a>
   {% else %}
-  <div class="empty-panel">当前没有可展示的基金估值结果。<br>请先在<a href="/manage" style="color:#1d4ed8">管理页</a>添加基金并录入持仓。</div>
+  <div class="empty-panel">当前没有可展示的基金估值结果。<br>请在搜索框输入基金代码，加入自选或按金额买入。</div>
   {% endfor %}
 </div>
 {% endblock %}

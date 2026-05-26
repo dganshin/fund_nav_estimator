@@ -8,7 +8,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 import pandas as pd
 
-from .base import DataSourceError, FundNavRecord, LiveStockQuoteRecord, StockQuoteRecord
+from .base import DataSourceError, FundNavRecord, FundProfile, LiveStockQuoteRecord, StockQuoteRecord
 from .code_utils import normalize_asset_code, to_plain_symbol, to_prefixed_symbol
 
 
@@ -239,6 +239,55 @@ class AKShareDataSource:
                 )
             )
         return records
+
+    def fetch_fund_profile(self, fund_code: str) -> FundProfile:
+        """拉取基金基础信息：名称、最新净值、净值日期。失败时返回降级结果，不报错。"""
+        fund_name = fund_code
+        latest_unit_nav: float | None = None
+        latest_nav_date: date | None = None
+        accumulated_nav: float | None = None
+        try:
+            df = self._call_fund_open_info(fund_code=fund_code, indicator="单位净值走势")
+            if df is not None and not df.empty and "净值日期" in df.columns and "单位净值" in df.columns:
+                df = df.copy()
+                df["净值日期"] = pd.to_datetime(df["净值日期"]).dt.date
+                df = df.sort_values("净值日期", ascending=False)
+                row = df.iloc[0]
+                latest_nav_date = row["净值日期"]
+                latest_unit_nav = float(row["单位净值"]) if pd.notna(row["单位净值"]) else None
+        except Exception:
+            pass
+        try:
+            acc_df = self._call_fund_open_info(fund_code=fund_code, indicator="累计净值走势")
+            if acc_df is not None and not acc_df.empty and "净值日期" in acc_df.columns and "累计净值" in acc_df.columns:
+                acc_df = acc_df.copy()
+                acc_df["净值日期"] = pd.to_datetime(acc_df["净值日期"]).dt.date
+                acc_df = acc_df.sort_values("净值日期", ascending=False)
+                acc_row = acc_df.iloc[0]
+                accumulated_nav = float(acc_row["累计净值"]) if pd.notna(acc_row["累计净值"]) else None
+        except Exception:
+            pass
+        # 尝试拉基金名称
+        try:
+            info_df = self.ak.fund_open_fund_info_em(fund=fund_code, indicator="基本概况") if hasattr(self.ak, "fund_open_fund_info_em") else None
+            if info_df is not None and not info_df.empty:
+                for _, r in info_df.iterrows():
+                    item_val = str(r.get("item", "") or "")
+                    if "基金简称" in item_val or "基金名称" in item_val:
+                        fund_name = str(r.get("value", fund_code) or fund_code).strip() or fund_code
+                        break
+        except Exception:
+            pass
+        return FundProfile(
+            fund_code=fund_code,
+            fund_name=fund_name,
+            fund_type="equity",
+            market="CN",
+            latest_unit_nav=latest_unit_nav,
+            latest_nav_date=latest_nav_date,
+            accumulated_nav=accumulated_nav,
+            source="akshare",
+        )
 
     def fetch_fund_holdings(
         self,

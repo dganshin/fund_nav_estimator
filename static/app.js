@@ -1,184 +1,325 @@
 (function () {
   'use strict';
 
-  // ── 页面检测：manage/portfolio/fund-detail 不启动自动刷新 ──
-  const path = window.location.pathname;
-  const isHomePage = path === '/';
+  // ══════════════════════════════════════════════════════════════════════
+  // § 1. 基本配置 & 页面检测
+  // ══════════════════════════════════════════════════════════════════════
+  var path = window.location.pathname;
+  var isHomePage = path === '/';
+
+  // ══════════════════════════════════════════════════════════════════════
+  // § 2. Tab 切换（管理页）
+  // ══════════════════════════════════════════════════════════════════════
+  window.switchTab = function (tabId) {
+    document.querySelectorAll('.tab-panel').forEach(function (el) {
+      el.style.display = 'none';
+    });
+    document.querySelectorAll('.tab-btn').forEach(function (btn) {
+      btn.classList.toggle('active', btn.dataset.tab === tabId);
+    });
+    var panel = document.getElementById(tabId);
+    if (panel) panel.style.display = 'block';
+  };
+  // 初始化：显示第一个 tab
+  (function () {
+    var panels = document.querySelectorAll('.tab-panel');
+    var btns = document.querySelectorAll('.tab-btn');
+    if (!panels.length) return;
+    panels.forEach(function (el) { el.style.display = 'none'; });
+    panels[0].style.display = 'block';
+    if (btns.length) btns[0].classList.add('active');
+  })();
+
+  // ══════════════════════════════════════════════════════════════════════
+  // § 3. 持仓行增删（管理页）
+  // ══════════════════════════════════════════════════════════════════════
+  var rowIndex = 10;
+
+  window.addHoldingRow = function () {
+    var tbody = document.getElementById('holding-items-tbody');
+    if (!tbody) return;
+    var tr = document.createElement('tr');
+    tr.innerHTML = [
+      '<td><input type="text" name="asset_code_' + rowIndex + '" placeholder="600988.SH" style="width:100%"></td>',
+      '<td><input type="text" name="asset_name_' + rowIndex + '" placeholder="股票名称" style="width:100%"></td>',
+      '<td><input type="text" name="asset_type_' + rowIndex + '" placeholder="stock" value="stock" style="width:100%"></td>',
+      '<td><input type="number" step="0.01" name="weight_pct_' + rowIndex + '" placeholder="9.50" style="width:100%" oninput="updateWeightSum()"></td>',
+      '<td><button type="button" class="btn-danger btn-sm btn" onclick="removeRow(this)">删除</button></td>',
+    ].join('');
+    tbody.appendChild(tr);
+    rowIndex++;
+  };
+
+  window.removeRow = function (btn) {
+    var tr = btn.closest('tr');
+    if (tr) { tr.remove(); updateWeightSum(); }
+  };
+
+  window.updateWeightSum = function () {
+    var sumEl = document.getElementById('weight-sum');
+    if (!sumEl) return;
+    var inputs = document.querySelectorAll('[name^="weight_pct_"]');
+    var total = 0;
+    inputs.forEach(function (inp) {
+      var v = parseFloat(inp.value);
+      if (!isNaN(v)) total += v;
+    });
+    sumEl.textContent = total > 0 ? '权重合计：' + total.toFixed(2) + '%' : '';
+    sumEl.style.color = Math.abs(total - 100) < 0.1 ? '#16a34a' : (total > 0 ? '#2563eb' : '#2563eb');
+  };
+
+  // ══════════════════════════════════════════════════════════════════════
+  // § 4. 首页：新基金搜索面板
+  // ══════════════════════════════════════════════════════════════════════
+  var searchInput = document.getElementById('search-input');
+  var newFundPanel = document.getElementById('new-fund-panel');
+  var newFundInfo = document.getElementById('new-fund-info');
+  var newFundResult = document.getElementById('new-fund-result');
+  var currentSearchCode = '';
+
+  // 判断输入是否像基金代码（纯6位数字）
+  function looksLikeFundCode(s) {
+    return /^\d{6}$/.test(s.trim());
+  }
+
+  var searchTimer = null;
+
+  function hideNewFundPanel() {
+    if (newFundPanel) newFundPanel.style.display = 'none';
+    currentSearchCode = '';
+  }
+
+  function doFundCodeSearch(code) {
+    if (!newFundPanel) return;
+    currentSearchCode = code;
+    fetch('/api/search-fund?code=' + encodeURIComponent(code))
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data.found) {
+          newFundPanel.style.display = 'block';
+          newFundInfo.innerHTML = '<strong>' + code + '</strong> — 基金信息拉取失败，请确认代码正确。';
+          newFundResult.textContent = '';
+          return;
+        }
+        var name = data.fund_name || code;
+        var nav = data.latest_unit_nav ? ('最新净值：' + data.latest_unit_nav + '（' + (data.latest_nav_date || '') + '）') : '';
+        if (data.in_db) {
+          var statusParts = [];
+          if (data.in_watchlist) statusParts.push('✓ 已在自选');
+          if (data.has_position) statusParts.push('✓ 已有持仓 ¥' + (data.holding_amount || '--'));
+          newFundPanel.style.display = 'block';
+          newFundInfo.innerHTML = '<strong>' + name + '</strong>（' + code + '）' +
+            (statusParts.length ? ' &nbsp;·&nbsp; ' + statusParts.join('、') : '') +
+            (nav ? '<br><span style="color:#64748b;font-size:12px">' + nav + '</span>' : '');
+        } else {
+          newFundPanel.style.display = 'block';
+          newFundInfo.innerHTML = '<strong>' + name + '</strong>（' + code + '）&nbsp;·&nbsp; 未添加到本地' +
+            (nav ? '<br><span style="color:#64748b;font-size:12px">' + nav + '</span>' : '');
+        }
+        newFundResult.textContent = '';
+      })
+      .catch(function () { hideNewFundPanel(); });
+  }
+
+  if (searchInput && isHomePage) {
+    searchInput.addEventListener('input', function () {
+      var val = searchInput.value.trim();
+      clearTimeout(searchTimer);
+      if (!looksLikeFundCode(val)) {
+        hideNewFundPanel();
+        return;
+      }
+      searchTimer = setTimeout(function () { doFundCodeSearch(val); }, 600);
+    });
+    searchInput.addEventListener('blur', function () {
+      // 短暂延迟，保证按钮 click 事件先触发
+      setTimeout(function () {
+        var val = searchInput.value.trim();
+        if (!looksLikeFundCode(val)) hideNewFundPanel();
+      }, 300);
+    });
+  }
+
+  // 加入自选
+  var btnQuickAdd = document.getElementById('btn-quick-add');
+  if (btnQuickAdd) {
+    btnQuickAdd.addEventListener('click', function () {
+      var code = currentSearchCode || (searchInput && searchInput.value.trim());
+      if (!code) return;
+      btnQuickAdd.disabled = true;
+      btnQuickAdd.textContent = '加入中…';
+      fetch('/api/quick-add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fund_code: code }),
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.ok) {
+            newFundResult.textContent = '✓ 已加入自选：' + (data.fund_name || code);
+            newFundResult.style.color = '#16a34a';
+            setTimeout(function () { window.location.reload(); }, 1200);
+          } else {
+            newFundResult.textContent = '失败：' + (data.error || '未知错误');
+            newFundResult.style.color = '#dc2626';
+            btnQuickAdd.disabled = false;
+            btnQuickAdd.textContent = '加入自选';
+          }
+        })
+        .catch(function (e) {
+          newFundResult.textContent = '请求失败：' + e.message;
+          newFundResult.style.color = '#dc2626';
+          btnQuickAdd.disabled = false;
+          btnQuickAdd.textContent = '加入自选';
+        });
+    });
+  }
+
+  // 按金额买入
+  var btnQuickBuy = document.getElementById('btn-quick-buy');
+  if (btnQuickBuy) {
+    btnQuickBuy.addEventListener('click', function () {
+      var code = currentSearchCode || (searchInput && searchInput.value.trim());
+      var amountEl = document.getElementById('quick-buy-amount');
+      var amount = amountEl ? parseFloat(amountEl.value) : NaN;
+      if (!code) { alert('请先输入基金代码'); return; }
+      if (!amount || amount <= 0) { alert('请输入正确的持有金额'); return; }
+      btnQuickBuy.disabled = true;
+      btnQuickBuy.textContent = '保存中…';
+      fetch('/api/quick-buy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fund_code: code, holding_amount: amount }),
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.ok) {
+            newFundResult.textContent = '✓ 已添加持仓：' + (data.fund_name || code) + ' ¥' + amount;
+            newFundResult.style.color = '#16a34a';
+            setTimeout(function () { window.location.reload(); }, 1200);
+          } else {
+            newFundResult.textContent = '失败：' + (data.error || '未知错误');
+            newFundResult.style.color = '#dc2626';
+            btnQuickBuy.disabled = false;
+            btnQuickBuy.textContent = '按金额买入';
+          }
+        })
+        .catch(function (e) {
+          newFundResult.textContent = '请求失败：' + e.message;
+          newFundResult.style.color = '#dc2626';
+          btnQuickBuy.disabled = false;
+          btnQuickBuy.textContent = '按金额买入';
+        });
+    });
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // § 5. 首页：JSON 局部刷新（不打断输入）
+  // ══════════════════════════════════════════════════════════════════════
   if (!isHomePage) return;
 
-  // ── 读取自动刷新间隔 ──
-  const refreshSelect = document.getElementById('refresh-select');
-  const searchInput = document.getElementById('search-input');
-  const sortSelect = document.getElementById('sort-select');
-  const listContainer = document.getElementById('fund-list-container');
+  var refreshSelect = document.getElementById('refresh-select');
+  var sortSelect = document.getElementById('sort-select');
+  var listContainer = document.getElementById('fund-list-container');
+  var statusMsg = document.getElementById('status-message');
+  var latestTime = document.getElementById('latest-time');
 
-  let refreshTimer = null;
-  let searchFocused = false;
-  let blurTimer = null;
+  var paused = false;
+  var refreshTimer = null;
+  var FUND_CODE_RE = /^\d{6}$/;
 
-  function getRefreshSeconds() {
+  function getRefreshInterval() {
     if (!refreshSelect) return 0;
-    const v = Number(refreshSelect.value);
-    return isNaN(v) ? 0 : v;
+    var v = parseInt(refreshSelect.value, 10);
+    return isNaN(v) ? 0 : v * 1000;
   }
 
-  // ── 局部刷新：fetch /api/live-estimates ──
-  function fetchAndUpdate() {
-    if (!listContainer) return;
-    const search = searchInput ? searchInput.value.trim() : '';
-    const sort = sortSelect ? sortSelect.value : 'estimate_desc';
-    const params = new URLSearchParams({ search, sort });
-    fetch('/api/live-estimates?' + params.toString())
-      .then(function (r) { return r.json(); })
-      .then(function (data) { renderList(data); })
-      .catch(function () { /* 静默失败，不破坏页面 */ });
+  function tone(v) {
+    if (v === undefined || v === null) return 'muted';
+    var f = parseFloat(v);
+    if (isNaN(f)) return 'muted';
+    return f > 0 ? 'up' : (f < 0 ? 'down' : 'muted');
   }
 
-  function renderList(data) {
+  function renderFundList(rows) {
     if (!listContainer) return;
-    if (!data.rows || data.rows.length === 0) {
-      listContainer.innerHTML = '<div class="empty-panel">当前没有可展示的基金估值结果。</div>';
+    if (!rows || rows.length === 0) {
+      listContainer.innerHTML = '<div class="empty-panel">当前没有可展示的基金估值结果。<br>请在搜索框输入基金代码，加入自选或按金额买入。</div>';
       return;
     }
-    // 更新状态栏
-    const statusEl = document.getElementById('status-message');
-    if (statusEl && data.status_message) statusEl.textContent = data.status_message;
-    const latestTimeEl = document.getElementById('latest-time');
-    if (latestTimeEl && data.latest_time) latestTimeEl.textContent = data.latest_time;
-
-    listContainer.innerHTML = data.rows.map(function (row) {
-      var confidenceClass = 'badge-' + (row.confidence_level || 'd').toLowerCase();
-      var estimateTone = row.estimate_tone || 'muted';
-      var profitTone = row.profit_tone || 'muted';
-      var tags = row.fund_code;
-      if (row.is_watchlist) tags += ' · 自选';
-      tags += row.is_holding ? ' · 持有' : ' · 观察';
-      tags += ' · ' + (row.quote_time || '--');
-      return '<a class="fund-row" href="/fund/' + row.fund_code + '">' +
-        '<div class="fund-main">' +
-          '<div class="fund-name">' + escHtml(row.fund_name) + '</div>' +
-          '<div class="fund-sub">' + escHtml(tags) + '</div>' +
-        '</div>' +
-        '<div class="fund-value ' + estimateTone + '">' + escHtml(row.current_estimate_text) + '</div>' +
-        '<div class="fund-profit ' + profitTone + '">' + escHtml(row.estimated_today_profit_text) + '</div>' +
-        '<div class="fund-badge ' + confidenceClass + '">' + escHtml(row.confidence_level || 'D') + '</div>' +
-      '</a>';
+    listContainer.innerHTML = rows.map(function (row) {
+      var isWl = row.is_watchlist ? ' · 自选' : '';
+      var isHolding = row.is_holding ? ' · 持有' : ' · 观察';
+      var badgeCls = 'badge-' + (row.confidence_level || 'd').toLowerCase();
+      return [
+        '<a class="fund-row" href="/fund/' + row.fund_code + '">',
+        '<div class="fund-main">',
+        '<div class="fund-name">' + (row.fund_name || row.fund_code) + '</div>',
+        '<div class="fund-sub">' + row.fund_code + isWl + isHolding + ' · ' + (row.quote_time || '--') + '</div>',
+        '</div>',
+        '<div class="fund-value ' + (row.estimate_tone || 'muted') + '">' + (row.current_estimate_text || '--') + '</div>',
+        '<div class="fund-profit ' + (row.profit_tone || 'muted') + '">' + (row.estimated_today_profit_text || '--') + '</div>',
+        '<div class="fund-badge ' + badgeCls + '">' + (row.confidence_level || 'D') + '</div>',
+        '</a>',
+      ].join('');
     }).join('');
   }
 
-  function escHtml(s) {
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  function fetchAndUpdateList() {
+    if (paused) return scheduleNext();
+    var kw = searchInput ? searchInput.value.trim() : '';
+    var sort = sortSelect ? sortSelect.value : 'estimate_desc';
+    // 如果是纯6位数字代码，新基金搜索模式，不局部刷新列表
+    if (FUND_CODE_RE.test(kw)) return scheduleNext();
+    var url = '/api/live-estimates?search=' + encodeURIComponent(kw) + '&sort=' + encodeURIComponent(sort);
+    fetch(url)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        renderFundList(data.rows);
+        if (statusMsg) statusMsg.textContent = data.status_message || '';
+        if (latestTime) latestTime.textContent = data.latest_time || '--';
+        scheduleNext();
+      })
+      .catch(function () { scheduleNext(); });
   }
 
-  // ── 定时器管理 ──
-  function startTimer() {
-    stopTimer();
-    var secs = getRefreshSeconds();
-    if (!secs || secs <= 0) return;
-    refreshTimer = setTimeout(function () {
-      if (!searchFocused) {
-        fetchAndUpdate();
-        startTimer();
-      }
-    }, secs * 1000);
+  function scheduleNext() {
+    clearTimeout(refreshTimer);
+    var interval = getRefreshInterval();
+    if (interval > 0) {
+      refreshTimer = setTimeout(fetchAndUpdateList, interval);
+    }
   }
 
-  function stopTimer() {
-    if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
-  }
-
-  // ── 搜索框防打断 ──
+  // 输入框 focus 暂停，blur 后延迟 2s 恢复
   if (searchInput) {
-    searchInput.addEventListener('focus', function () {
-      searchFocused = true;
-      if (blurTimer) { clearTimeout(blurTimer); blurTimer = null; }
-      stopTimer();
-    });
+    searchInput.addEventListener('focus', function () { paused = true; clearTimeout(refreshTimer); });
     searchInput.addEventListener('blur', function () {
-      blurTimer = setTimeout(function () {
-        searchFocused = false;
-        startTimer();
-      }, 2000);
+      setTimeout(function () { paused = false; scheduleNext(); }, 2000);
+    });
+    // 实时搜索过滤（非代码模式）
+    searchInput.addEventListener('input', function () {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(function () {
+        var kw = searchInput.value.trim();
+        if (!looksLikeFundCode(kw)) {
+          // 触发局部刷新（带搜索词）
+          fetchAndUpdateList();
+        }
+      }, 400);
     });
   }
 
-  // ── 刷新选择器变化时重置定时器 ──
+  // sort 切换立即刷新
+  if (sortSelect) {
+    sortSelect.addEventListener('change', function () { fetchAndUpdateList(); });
+  }
+
+  // refresh interval 切换
   if (refreshSelect) {
-    refreshSelect.addEventListener('change', function () {
-      startTimer();
-    });
+    refreshSelect.addEventListener('change', function () { clearTimeout(refreshTimer); scheduleNext(); });
   }
 
-  // ── 初始启动 ──
-  startTimer();
+  scheduleNext();
 
-  // ── manage 页 Tab 切换（若在 manage 页执行到这里则忽略，path 检测已 return） ──
 })();
-
-// ── manage 页 Tab 切换（全局函数） ──
-function switchTab(tabId) {
-  document.querySelectorAll('.tab-panel').forEach(function (el) {
-    el.style.display = 'none';
-  });
-  document.querySelectorAll('.tab-btn').forEach(function (el) {
-    el.classList.remove('active');
-  });
-  var panel = document.getElementById(tabId);
-  if (panel) panel.style.display = 'block';
-  var btn = document.querySelector('[data-tab="' + tabId + '"]');
-  if (btn) btn.classList.add('active');
-  try { localStorage.setItem('manage_tab', tabId); } catch(e) {}
-}
-
-// ── manage 页初始化 Tab ──
-(function () {
-  if (window.location.pathname !== '/manage') return;
-  var panels = document.querySelectorAll('.tab-panel');
-  if (!panels.length) return;
-  panels.forEach(function (el) { el.style.display = 'none'; });
-  var saved = '';
-  try { saved = localStorage.getItem('manage_tab') || ''; } catch(e) {}
-  var first = saved && document.getElementById(saved) ? saved : (panels[0] && panels[0].id);
-  if (first) switchTab(first);
-})();
-
-// ── 持仓行管理 ──
-function addHoldingRow() {
-  var tbody = document.getElementById('holding-items-tbody');
-  if (!tbody) return;
-  var idx = tbody.querySelectorAll('tr').length;
-  var tr = document.createElement('tr');
-  tr.innerHTML =
-    '<td><input type="text" name="asset_code_' + idx + '" placeholder="600988.SH" style="width:100%"></td>' +
-    '<td><input type="text" name="asset_name_' + idx + '" placeholder="股票名称" style="width:100%"></td>' +
-    '<td><input type="text" name="asset_type_' + idx + '" placeholder="stock" value="stock" style="width:100%"></td>' +
-    '<td><input type="number" step="0.01" name="weight_pct_' + idx + '" placeholder="9.50" style="width:100%"></td>' +
-    '<td><button type="button" class="btn-danger btn-sm" onclick="removeRow(this)">删除</button></td>';
-  tbody.appendChild(tr);
-}
-
-function removeRow(btn) {
-  var tr = btn.closest('tr');
-  if (tr) tr.remove();
-  updateWeightSum();
-}
-
-function updateWeightSum() {
-  var inputs = document.querySelectorAll('[name^="weight_pct_"]');
-  var total = 0;
-  inputs.forEach(function (inp) {
-    var v = parseFloat(inp.value);
-    if (!isNaN(v)) total += v;
-  });
-  var el = document.getElementById('weight-sum');
-  if (el) {
-    el.textContent = '权重合计: ' + total.toFixed(2) + '%';
-    el.style.color = total > 100 ? '#f05555' : '#2c5ff6';
-  }
-}
-
-document.addEventListener('input', function (e) {
-  if (e.target && e.target.name && e.target.name.startsWith('weight_pct_')) {
-    updateWeightSum();
-  }
-});

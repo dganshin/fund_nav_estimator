@@ -10,6 +10,18 @@ class DataSourceError(RuntimeError):
 
 
 @dataclass
+class FundProfile:
+    fund_code: str
+    fund_name: str
+    fund_type: str
+    market: str
+    latest_unit_nav: float | None
+    latest_nav_date: date | None
+    accumulated_nav: float | None
+    source: str
+
+
+@dataclass
 class FundNavRecord:
     trade_date: date
     fund_code: str

@@ -17,11 +17,17 @@ from sqlalchemy import select
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from src.calibration import (
+        ensure_fund_by_code,
+        get_calibration_stats,
+        load_calibration_residuals,
+        run_online_calibration,
+    )
     from src.data_sources import AKShareDataSource
     from src.db import get_session_factory
     from src.estimator import compute_live_fund_estimates
     from src.init_db import init_db
-    from src.models import DailyQuote, EffectiveWeightVersion, Fund, UserFundPosition
+    from src.models import DailyQuote, EffectiveWeightVersion, Fund, UserFundPosition, UserWatchlistFund
     from src.web.actions import run_effective_weight_action
     from src.web_services import (
         deactivate_fund,
@@ -38,11 +44,17 @@ if __package__ in {None, ""}:
         toggle_watchlist_fund,
     )
 else:
+    from .calibration import (
+        ensure_fund_by_code,
+        get_calibration_stats,
+        load_calibration_residuals,
+        run_online_calibration,
+    )
     from .data_sources import AKShareDataSource
     from .db import get_session_factory
     from .estimator import compute_live_fund_estimates
     from .init_db import init_db
-    from .models import DailyQuote, EffectiveWeightVersion, Fund, UserFundPosition
+    from .models import DailyQuote, EffectiveWeightVersion, Fund, UserFundPosition, UserWatchlistFund
     from .web.actions import run_effective_weight_action
     from .web_services import (
         deactivate_fund,
@@ -372,25 +384,32 @@ def api_live_estimates(
 
 
 @app.get("/fund/{fund_code}")
-def fund_detail(request: Request, fund_code: str, debug: int = 0):
+def fund_detail(request: Request, fund_code: str, debug: int = 0, msg: str = ""):
     results, status_message, used_fallback = load_live_estimate_bundle(fund_code=fund_code)
     result = results[0] if results else None
     session_factory = get_cached_session_factory()
     is_watchlist = False
+    cal_stats: dict = {}
     with session_factory() as session:
         wl_rows = load_watchlist_rows(session)
         is_watchlist = any(str(r["fund_code"]) == fund_code and r.get("is_active") for r in wl_rows)
+        try:
+            cal_stats = get_calibration_stats(session, fund_code)
+        except Exception:
+            pass
 
     if result is None:
         return templates.TemplateResponse(
             request, "fund_detail.html",
-            {"detail": None, "status_message": status_message, "debug": debug},
+            {"detail": None, "status_message": status_message, "debug": debug, "msg": msg, "cal_stats": cal_stats},
             status_code=404,
         )
     return templates.TemplateResponse(request, "fund_detail.html", {
         "detail": build_detail_context(result, is_watchlist),
         "status_message": status_message,
         "debug": debug,
+        "msg": msg,
+        "cal_stats": cal_stats,
     })
 
 
@@ -650,9 +669,163 @@ def manage_effective_weights(fund_code: str = Form(...), trade_date: str = Form(
     return RedirectResponse(url="/manage?message=已生成或更新修正权重", status_code=303)
 
 
+
+# ── Fund Search API ────────────────────────────────────────────────────────
+
+@app.get("/api/search-fund")
+def api_search_fund(code: str = Query("")):
+    """搜索基金：先查本地库，如果没有则尝试拉取基础信息（不创建记录）。"""
+    code = code.strip()
+    if not code:
+        return JSONResponse({"found": False, "in_db": False})
+
+    session_factory = get_cached_session_factory()
+    data_source = get_cached_data_source()
+
+    with session_factory() as session:
+        fund = session.get(Fund, code)
+        if fund is not None:
+            # 查持仓状态
+            pos = session.scalar(
+                select(UserFundPosition).where(UserFundPosition.fund_code == code)
+            )
+            wl = session.scalar(
+                select(UserWatchlistFund).where(UserWatchlistFund.fund_code == code)
+            )
+            return JSONResponse({
+                "found": True,
+                "in_db": True,
+                "fund_code": fund.fund_code,
+                "fund_name": fund.fund_name,
+                "is_active": fund.is_active,
+                "has_position": pos is not None,
+                "holding_amount": pos.holding_amount if pos else None,
+                "in_watchlist": bool(wl and wl.is_active),
+            })
+
+    # 不在库里，尝试拉取基础信息
+    try:
+        profile = data_source.fetch_fund_profile(code)
+        return JSONResponse({
+            "found": True,
+            "in_db": False,
+            "fund_code": profile.fund_code,
+            "fund_name": profile.fund_name,
+            "latest_unit_nav": profile.latest_unit_nav,
+            "latest_nav_date": profile.latest_nav_date.isoformat() if profile.latest_nav_date else None,
+        })
+    except Exception as exc:
+        logger.warning("search_fund fetch_fund_profile failed for %s: %s", code, exc)
+        return JSONResponse({"found": False, "in_db": False, "fund_code": code})
+
+
+@app.post("/api/quick-add")
+async def api_quick_add(request: Request):
+    """快速加入自选：只需 fund_code，自动拉取基金名称。"""
+    body = await request.json()
+    fund_code = str(body.get("fund_code", "")).strip()
+    if not fund_code:
+        return JSONResponse({"ok": False, "error": "fund_code 不能为空"})
+
+    session_factory = get_cached_session_factory()
+    data_source = get_cached_data_source()
+    with session_factory() as session:
+        result = ensure_fund_by_code(session, fund_code, data_source)
+        # 加入自选
+        save_watchlist_rows(session, [{"fund_code": fund_code, "is_active": True}])
+
+    return JSONResponse({
+        "ok": True,
+        "fund_code": result["fund_code"],
+        "fund_name": result["fund_name"],
+        "created": result.get("created", False),
+    })
+
+
+@app.post("/api/quick-buy")
+async def api_quick_buy(request: Request):
+    """快速买入：fund_code + holding_amount，自动创建基金和持仓。"""
+    body = await request.json()
+    fund_code = str(body.get("fund_code", "")).strip()
+    holding_amount_raw = body.get("holding_amount")
+    if not fund_code:
+        return JSONResponse({"ok": False, "error": "fund_code 不能为空"})
+    try:
+        holding_amount = float(holding_amount_raw)
+        assert holding_amount > 0
+    except Exception:
+        return JSONResponse({"ok": False, "error": "持有金额必须是正数"})
+
+    session_factory = get_cached_session_factory()
+    data_source = get_cached_data_source()
+    with session_factory() as session:
+        fund_info = ensure_fund_by_code(session, fund_code, data_source)
+        # 估算 holding_share
+        nav = fund_info.get("latest_unit_nav")
+        holding_share = (holding_amount / nav) if nav and nav > 0 else None
+        save_user_position_rows(session, [{
+            "fund_code": fund_code,
+            "holding_amount": holding_amount,
+            "holding_share": holding_share,
+            "platform": "支付宝/蚂蚁财富",
+            "is_active": True,
+        }])
+
+    return JSONResponse({
+        "ok": True,
+        "fund_code": fund_info["fund_code"],
+        "fund_name": fund_info["fund_name"],
+        "holding_amount": holding_amount,
+        "estimated_share": holding_share,
+    })
+
+
+# ── Calibration Routes ─────────────────────────────────────────────────────
+
+@app.post("/manage/calibration/run")
+def manage_calibration_run(
+    fund_code: str = Form(...),
+    calibration_date: str = Form(""),
+    force: str = Form("0"),
+):
+    """手动触发单基金因果校准。"""
+    session_factory = get_cached_session_factory()
+    cal_date = date.fromisoformat(calibration_date) if calibration_date.strip() else None
+    with session_factory() as session:
+        result = run_online_calibration(
+            session=session,
+            fund_code=fund_code,
+            calibration_date=cal_date,
+            force=force == "1",
+        )
+    if result is None:
+        msg = f"校准失败：{fund_code} 暂无可用数据（需要 active 持仓 + 已公布真实净值）"
+    elif result.is_updated:
+        msg = (f"已校准 {fund_code}：scale {result.scale_factor_before:.4f} → "
+               f"{result.scale_factor_after:.4f}，残差 {result.residual:+.4%}，"
+               f"置信度 {result.confidence_level}")
+    else:
+        msg = (f"校准记录已写入（跳过更新）：{fund_code}，"
+               f"原因: {result.skip_reason}")
+    return RedirectResponse(url=f"/fund/{fund_code}?msg={msg}", status_code=303)
+
+
+@app.get("/api/fund/{fund_code}/calibration-residuals")
+def api_calibration_residuals(fund_code: str, limit: int = Query(90)):
+    """返回某基金的逐日校准残差，用于详情页折叠展示。"""
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        rows = load_calibration_residuals(session, fund_code, limit=limit)
+        stats = get_calibration_stats(session, fund_code)
+    return JSONResponse({"residuals": rows, "stats": stats})
+
+
+# ── Health ─────────────────────────────────────────────────────────────────
+
 @app.get("/health")
 def health():
     return {"ok": True}
+
 
 
 def _parse_csv(content: str) -> list[dict]:
