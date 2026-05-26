@@ -11,6 +11,10 @@ def normalize_asset_code(asset_code: str) -> str:
         digits, market = code.split(".", 1)
         return f"{digits}.{market.upper()}"
     if len(code) == 6:
+        if code.startswith("1"):
+            return f"{code}.SZ"
+        if code.startswith("5"):
+            return f"{code}.SH"
         if code.startswith(("6", "9")):
             return f"{code}.SH"
         if code.startswith(("0", "2", "3")):

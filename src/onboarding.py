@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, timedelta
 from typing import Optional
 
@@ -39,6 +40,93 @@ def _pick(row: dict[str, object], *names: str) -> object | None:
         if val is not None:
             return val
     return None
+
+
+def _rows_to_map(rows) -> dict[str, str]:
+    result: dict[str, str] = {}
+    if rows is None:
+        return result
+    records = rows.to_dict(orient="records") if hasattr(rows, "to_dict") else rows
+    for row in records or []:
+        item = str(row.get("item") or row.get("项目") or "").strip()
+        value = str(row.get("value") or row.get("值") or "").strip()
+        if item:
+            result[item] = value
+    return result
+
+
+def _fetch_xq_basic_info(data_source, fund_code: str) -> dict[str, str]:
+    ak = getattr(data_source, "ak", None)
+    if ak is None or not hasattr(ak, "fund_individual_basic_info_xq"):
+        return {}
+    try:
+        return _rows_to_map(ak.fund_individual_basic_info_xq(symbol=fund_code))
+    except Exception:
+        return {}
+
+
+def _is_etf_feeder(fund_name: str, fund_type: str, basic_info: dict[str, str]) -> bool:
+    text = " ".join([fund_name, fund_type, basic_info.get("基金全称", ""), basic_info.get("投资策略", "")])
+    return "ETF" in text.upper() and "联接" in text
+
+
+def _parse_target_weight_pct(basic_info: dict[str, str]) -> float:
+    benchmark = basic_info.get("业绩比较基准", "")
+    match = re.search(r"[×xX*]\s*(\d+(?:\.\d+)?)%", benchmark)
+    if match:
+        return float(match.group(1))
+    strategy = basic_info.get("投资策略", "")
+    match = re.search(r"不低于.*?(\d+(?:\.\d+)?)%", strategy)
+    if match:
+        return float(match.group(1))
+    return 95.0
+
+
+def _find_target_etf(data_source, fund_name: str, basic_info: dict[str, str]) -> dict[str, object] | None:
+    ak = getattr(data_source, "ak", None)
+    if ak is None:
+        return None
+    full_name = fund_name if "ETF" in fund_name.upper() else (basic_info.get("基金全称") or fund_name)
+    manager = (basic_info.get("基金公司") or "").replace("基金管理有限公司", "").replace("基金", "")
+    theme_match = re.search(r"中证(.+?)ETF", full_name)
+    theme = theme_match.group(1) if theme_match else ""
+    if not theme:
+        return None
+    try:
+        df = ak.fund_etf_spot_em()
+    except Exception:
+        try:
+            df = ak.fund_etf_category_sina(symbol="ETF基金")
+        except Exception:
+            return None
+    if df is None or df.empty:
+        return None
+    name_col = "名称" if "名称" in df.columns else "基金名称"
+    code_col = "代码" if "代码" in df.columns else "基金代码"
+    theme_keywords = [theme]
+    for noise in ("主题", "指数", "行业"):
+        theme_keywords.append(theme.replace(noise, ""))
+    if "有色金属" in theme:
+        theme_keywords.append("有色金属")
+        theme_keywords.append("工业有色")
+    candidates = []
+    for _, row in df.iterrows():
+        name = str(row.get(name_col, "") or "")
+        code = str(row.get(code_col, "") or "").replace("sz", "").replace("sh", "").strip()
+        if "联接" in name or "ETF" not in name.upper():
+            continue
+        theme_hit = any(keyword and keyword in name for keyword in theme_keywords)
+        manager_hit = bool(manager and manager in name)
+        if theme_hit:
+            candidates.append((0 if manager_hit else 1, code, name))
+    if not candidates:
+        return None
+    _, code, name = sorted(candidates)[0]
+    return {
+        "asset_code": normalize_asset_code(code),
+        "asset_name": name,
+        "weight_pct": _parse_target_weight_pct(basic_info),
+    }
 
 
 def _parse_report_date(value: object) -> date | None:
@@ -181,33 +269,57 @@ def ensure_fund_full_onboarded(
     today = date.today()
     status = "ready"
     warnings: list[str] = []
+    print(f"[onboard] fund_code={fund_code} start")
 
     profile = data_source.fetch_fund_profile(fund_code)
+    basic_info = _fetch_xq_basic_info(data_source, fund_code)
+    fund_name = basic_info.get("基金名称") or profile.fund_name or fund_code
+    fund_type = basic_info.get("基金类型") or profile.fund_type or "equity"
+    is_etf_feeder = _is_etf_feeder(fund_name, fund_type, basic_info)
+    print(f"[onboard] profile fetched: name={fund_name}, type={fund_type}")
     import_funds_from_rows(session, [{
         "fund_code": fund_code,
-        "fund_name": profile.fund_name or fund_code,
-        "fund_type": profile.fund_type or "equity",
+        "fund_name": fund_name,
+        "fund_type": "etf_feeder" if is_etf_feeder else fund_type,
         "market": profile.market or "CN",
         "is_active": True,
     }])
 
     holdings_rows: list[dict[str, object]] = []
     try:
-        if hasattr(data_source, "fetch_fund_public_holdings"):
-            raw_holdings = data_source.fetch_fund_public_holdings(fund_code)
+        target_etf = _find_target_etf(data_source, fund_name, basic_info) if is_etf_feeder else None
+        if target_etf is not None:
+            holdings_rows = [{
+                "fund_code": fund_code,
+                "report_date": date(today.year, 3, 31).isoformat(),
+                "source": "akshare:target_etf",
+                "asset_code": target_etf["asset_code"],
+                "asset_name": target_etf["asset_name"],
+                "asset_type": "etf",
+                "weight_pct": target_etf["weight_pct"],
+            }]
+            print(
+                f"[onboard] etf feeder target: code={target_etf['asset_code']}, "
+                f"name={target_etf['asset_name']}, weight={target_etf['weight_pct']}"
+            )
         else:
-            raw_holdings = data_source.fetch_fund_holdings(fund_code, year=today.year)
-        if not isinstance(raw_holdings, list):
-            raw_holdings = []
-        holdings_rows = _normalize_holding_rows(fund_code, raw_holdings or [])
+            if hasattr(data_source, "fetch_fund_public_holdings"):
+                raw_holdings = data_source.fetch_fund_public_holdings(fund_code)
+            else:
+                raw_holdings = data_source.fetch_fund_holdings(fund_code, year=today.year)
+            if not isinstance(raw_holdings, list):
+                raw_holdings = []
+            holdings_rows = _normalize_holding_rows(fund_code, raw_holdings or [])
+        print(f"[onboard] holdings fetched: count={len(holdings_rows)}")
         if holdings_rows:
             import_holdings_from_rows(session, holdings_rows)
         else:
             status = "missing_holdings"
-            warnings.append("缺持仓, 需手动补充")
+            warnings.append("缺公开持仓")
     except Exception as exc:
         status = "missing_holdings"
         warnings.append(f"公开持仓拉取失败: {exc}")
+        print(f"[onboard] holdings fetched: count=0, error={exc}")
 
     active_holding = session.scalar(
         select(HoldingVersion)
@@ -217,10 +329,24 @@ def ensure_fund_full_onboarded(
     report_date = active_holding.report_date if active_holding else today - timedelta(days=60)
 
     try:
-        raw_alloc = data_source.fetch_fund_asset_allocation(fund_code, report_date=report_date)
-        if not isinstance(raw_alloc, list):
-            raw_alloc = []
-        alloc_rows = _normalize_asset_allocation_rows(fund_code, raw_alloc or [], report_date)
+        if is_etf_feeder and holdings_rows:
+            target_weight = float(holdings_rows[0]["weight_pct"])
+            alloc_rows = [{
+                "fund_code": fund_code,
+                "report_date": report_date.isoformat(),
+                "source": "benchmark:target_etf",
+                "stock_weight_pct": target_weight,
+                "bond_weight_pct": 0,
+                "cash_weight_pct": max(0.0, 100.0 - target_weight),
+                "other_weight_pct": 0,
+            }]
+        else:
+            raw_alloc = data_source.fetch_fund_asset_allocation(fund_code, report_date=report_date)
+            if not isinstance(raw_alloc, list):
+                raw_alloc = []
+            alloc_rows = _normalize_asset_allocation_rows(fund_code, raw_alloc or [], report_date)
+        stock_weight = None if not alloc_rows else alloc_rows[0]["stock_weight_pct"]
+        print(f"[onboard] asset allocation fetched: stock_weight={stock_weight}")
         if alloc_rows:
             import_asset_allocations_from_rows(session, alloc_rows)
         else:
@@ -230,16 +356,20 @@ def ensure_fund_full_onboarded(
 
     start_date = max(report_date, today - timedelta(days=60))
     try:
-        fetch_and_store_fund_navs(session, data_source, fund_code, start_date, today)
+        nav_report = fetch_and_store_fund_navs(session, data_source, fund_code, start_date, today)
+        print(f"[onboard] nav rows imported: {nav_report.imported_count}")
     except Exception as exc:
         warnings.append(f"基金净值回填失败: {exc}")
+        print(f"[onboard] nav rows imported: 0, error={exc}")
 
     asset_codes = [item.asset_code for item in active_holding.items] if active_holding else []
     if asset_codes:
         try:
-            fetch_and_store_stock_quotes(session, data_source, start_date, today, asset_codes)
+            quote_report = fetch_and_store_stock_quotes(session, data_source, start_date, today, asset_codes)
+            print(f"[onboard] stock quote rows imported: {quote_report.imported_count}")
         except Exception as exc:
             warnings.append(f"股票日K回填失败: {exc}")
+            print(f"[onboard] stock quote rows imported: 0, error={exc}")
         try:
             build_effective_weight_version(session, fund_code, today)
             session.commit()
@@ -254,8 +384,10 @@ def ensure_fund_full_onboarded(
             )
             if residual_count == 0:
                 warnings.append("暂无可用残差样本")
+            print(f"[onboard] residual rows built: {residual_count}")
         except Exception as exc:
             warnings.append(f"在线校准失败: {exc}")
+            print(f"[onboard] residual rows built: 0, error={exc}")
 
     if add_watchlist:
         save_watchlist_rows(session, [{"fund_code": fund_code, "is_active": True}])
@@ -274,9 +406,10 @@ def ensure_fund_full_onboarded(
     fund = session.get(Fund, fund_code)
     if status == "ready" and warnings and any("失败" in w for w in warnings):
         status = "onboarding"
+    print(f"[onboard] status={status}")
     return {
         "fund_code": fund_code,
-        "fund_name": fund.fund_name if fund else fund_code,
+        "fund_name": fund.fund_name if fund else fund_name,
         "latest_unit_nav": profile.latest_unit_nav,
         "latest_nav_date": profile.latest_nav_date.isoformat() if profile.latest_nav_date else None,
         "status": status,

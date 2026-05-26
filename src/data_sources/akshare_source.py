@@ -371,6 +371,17 @@ class AKShareDataSource:
         start_date: date,
         end_date: date,
     ) -> list[StockQuoteRecord]:
+        if self._looks_like_etf_code(asset_code):
+            try:
+                return self._fetch_etf_fund_records(
+                    asset_code=asset_code,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            except Exception as exc:
+                self.last_warnings.append(
+                    f"Warning: etf quote fetch failed for {asset_code}: {exc}"
+                )
         eastmoney_error: Exception | None = None
         try:
             return self._fetch_stock_records_from_eastmoney(
@@ -395,6 +406,47 @@ class AKShareDataSource:
                 f"AKShare fetch stock quotes failed for {asset_code}. "
                 f"eastmoney_error={eastmoney_error}; sina_error={exc}"
             ) from exc
+
+    def _looks_like_etf_code(self, asset_code: str) -> bool:
+        plain = to_plain_symbol(asset_code)
+        return len(plain) == 6 and plain.startswith(("1", "5"))
+
+    def _fetch_etf_fund_records(
+        self,
+        asset_code: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[StockQuoteRecord]:
+        plain = to_plain_symbol(asset_code)
+        df = self.ak.fund_etf_fund_info_em(
+            fund=plain,
+            start_date=start_date.strftime("%Y%m%d"),
+            end_date=end_date.strftime("%Y%m%d"),
+        )
+        if df is None or df.empty:
+            return []
+        self._cache_dataframe(df, f"etf_nav_{plain}_{start_date}_{end_date}.csv")
+        expected = {"净值日期", "日增长率"}
+        if not expected.issubset(set(df.columns)):
+            raise DataSourceError(
+                f"AKShare etf nav columns changed for {plain}. Actual columns: {list(df.columns)}"
+            )
+        df = df.copy()
+        df["净值日期"] = pd.to_datetime(df["净值日期"]).dt.date
+        records: list[StockQuoteRecord] = []
+        for _, row in df.iterrows():
+            if pd.isna(row["日增长率"]):
+                continue
+            records.append(
+                StockQuoteRecord(
+                    trade_date=row["净值日期"],
+                    asset_code=normalize_asset_code(plain),
+                    asset_name=normalize_asset_code(plain),
+                    return_pct=float(row["日增长率"]) / 100.0,
+                    source="akshare:etf_nav",
+                )
+            )
+        return records
 
     def _fetch_stock_records_from_eastmoney(
         self,
