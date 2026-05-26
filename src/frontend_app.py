@@ -440,16 +440,53 @@ def get_compare_residuals(session, fund_codes: list[str]) -> dict:
     return {r.fund_code: r for r in residuals}
 
 
+MARKET_OPEN_TIME = time(9, 30)
+
+
+def select_visible_actual_return(
+    residual,
+    quote_time: datetime | None = None,
+    now: datetime | None = None,
+) -> tuple[float | None, date | None]:
+    """行情仍是前收缓存时, 保留同日实际收盘用于对比。"""
+    if not residual:
+        return None, None
+
+    current_time = now or datetime.now()
+    residual_date = residual.trade_date
+    quote_date = quote_time.date() if quote_time else None
+
+    if quote_date and residual_date == quote_date:
+        return residual.actual_return, residual_date
+    if residual_date == current_time.date():
+        return residual.actual_return, residual_date
+    if current_time.time() < MARKET_OPEN_TIME and residual_date < current_time.date():
+        return residual.actual_return, residual_date
+    return None, None
+
+
+def actual_return_source_label(
+    actual_return_date: date | None, now: datetime | None = None
+) -> str:
+    if actual_return_date is None:
+        return "实时估值涨跌"
+    current_time = now or datetime.now()
+    if actual_return_date == current_time.date():
+        return "今日实际涨跌"
+    return "最近收盘涨跌"
+
+
 def build_home_rows(
     results: list,
     residuals_map: dict | None = None,
     position_context: dict[str, dict] | None = None,
     watchlist_codes: set[str] | None = None,
+    now: datetime | None = None,
 ) -> list[dict]:
     residuals_map = residuals_map or {}
     position_context = position_context or {}
     watchlist_codes = watchlist_codes or set()
-    today_date = date.today()
+    now = now or datetime.now()
     rows = []
 
     for item in results:
@@ -466,8 +503,8 @@ def build_home_rows(
             status_text = "不可估"
 
         res = residuals_map.get(item.fund_code)
-        actual_return_today = (
-            res.actual_return if (res and res.trade_date == today_date) else None
+        actual_return_today, actual_return_date = select_visible_actual_return(
+            res, item.quote_time, now
         )
 
         pos_ctx = position_context.get(item.fund_code, {})
@@ -505,6 +542,9 @@ def build_home_rows(
                 "actual_return_today_text": format_percent(actual_return_today),
                 "actual_return_tone": get_tone(actual_return_today),
                 "actual_return_available": actual_return_today is not None,
+                "actual_return_date": actual_return_date.isoformat()
+                if actual_return_date
+                else None,
                 "holding_amount": holding_amount,
                 "holding_amount_text": format_money(holding_amount)
                 if holding_amount is not None
@@ -583,6 +623,7 @@ def build_detail_context(
     holding_report_date: date | None = None,
     position_context: dict | None = None,
     latest_residual: CalibrationResidual | None = None,
+    now: datetime | None = None,
 ) -> dict:
     holdings = sorted(
         result.holdings, key=lambda h: abs(h.contribution_pct or 0.0), reverse=True
@@ -602,9 +643,10 @@ def build_detail_context(
         0.0,
     )
 
-    actual_return_today = None
-    if latest_residual and latest_residual.trade_date == date.today():
-        actual_return_today = latest_residual.actual_return
+    now = now or datetime.now()
+    actual_return_today, actual_return_date = select_visible_actual_return(
+        latest_residual, result.quote_time, now
+    )
 
     profit_return = (
         actual_return_today
@@ -623,6 +665,9 @@ def build_detail_context(
         "actual_return_today_text": format_percent(actual_return_today),
         "actual_return_today_tone": get_tone(actual_return_today),
         "actual_return_available": actual_return_today is not None,
+        "actual_return_date": actual_return_date.isoformat()
+        if actual_return_date
+        else None,
         "estimated_today_profit_text": format_amount(estimated_today_profit),
         "estimated_today_profit_tone": get_tone(estimated_today_profit),
         "holding_amount": format_money(holding_amount)
@@ -637,6 +682,9 @@ def build_detail_context(
         "profit_return_source": "actual"
         if actual_return_today is not None
         else "estimate",
+        "profit_return_source_label": actual_return_source_label(
+            actual_return_date, now
+        ),
         "confidence_level": result.confidence_level or "D",
         "error_band_label": result.error_band_label or "样本不足",
         "confidence_text": result.confidence_text,
@@ -691,7 +739,7 @@ def build_detail_context(
             ("今日参与盈亏金额", format_money(profit_base_amount)),
             (
                 "盈亏口径",
-                "今日实际涨跌" if actual_return_today is not None else "实时估值涨跌",
+                actual_return_source_label(actual_return_date, now),
             ),
         ],
     }

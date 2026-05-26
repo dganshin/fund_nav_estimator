@@ -53,7 +53,7 @@
       <div class="metric-label">今日估算盈亏</div>
       <div class="metric-value {{ detail.estimated_today_profit_tone }}">{{ detail.estimated_today_profit_text }}</div>
       <div style="font-size:12px; color:#94a3b8; margin-top:2px;">
-        口径：{{ '实际涨跌' if detail.profit_return_source == 'actual' else '实时估值' }}；参与金额 ¥{{ detail.profit_base_amount_today }}
+        口径：{{ detail.profit_return_source_label }}；参与金额 ¥{{ detail.profit_base_amount_today }}
       </div>
     </div>
     <div>

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -235,3 +236,61 @@ def test_api_live_estimates_search_filter(tmp_path, monkeypatch):
     data = resp.json()
     for row in data.get("rows", []):
         assert "002207" in row["fund_code"] or "002207" in row["fund_name"]
+
+
+def make_home_result(**kwargs):
+    base = {
+        "fund_code": "001467",
+        "fund_name": "测试基金",
+        "current_estimate": 0.039,
+        "best_status": "ready",
+        "error_band_label": "预计误差≤±0.30%",
+        "holding_amount": 1000.0,
+        "confidence_level": None,
+        "error_band_pct": 0.003,
+        "confidence_text": "",
+        "quote_time": datetime(2026, 5, 26, 16, 15),
+    }
+    base.update(kwargs)
+    return SimpleNamespace(**base)
+
+
+def test_home_rows_keep_previous_close_when_using_quote_cache():
+    result = make_home_result()
+    residual = SimpleNamespace(
+        fund_code="001467",
+        trade_date=date(2026, 5, 26),
+        actual_return=0.028,
+    )
+
+    rows = build_home_rows(
+        [result],
+        residuals_map={"001467": residual},
+        now=datetime(2026, 5, 27, 8, 30),
+    )
+
+    row = rows[0]
+    assert row["actual_return_available"] is True
+    assert row["actual_return_today_text"] == "+2.80%"
+    assert row["actual_return_date"] == "2026-05-26"
+    assert abs(row["estimated_today_profit"] - 28.0) < 0.01
+
+
+def test_home_rows_hide_stale_close_after_realtime_quote_starts():
+    result = make_home_result(quote_time=datetime(2026, 5, 27, 9, 35))
+    residual = SimpleNamespace(
+        fund_code="001467",
+        trade_date=date(2026, 5, 26),
+        actual_return=0.028,
+    )
+
+    rows = build_home_rows(
+        [result],
+        residuals_map={"001467": residual},
+        now=datetime(2026, 5, 27, 9, 35),
+    )
+
+    row = rows[0]
+    assert row["actual_return_available"] is False
+    assert row["profit_return_source"] == "estimate"
+    assert abs(row["estimated_today_profit"] - 39.0) < 0.01
