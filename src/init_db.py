@@ -10,6 +10,33 @@ def migrate_schema(engine) -> None:
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
 
+    if "online_calibration_states" in table_names:
+        columns = {column["name"] for column in inspector.get_columns("online_calibration_states")}
+        with engine.begin() as connection:
+            for name, ddl in {
+                "beta_known": "ALTER TABLE online_calibration_states ADD COLUMN beta_known FLOAT NOT NULL DEFAULT 1.0",
+                "beta_unknown": "ALTER TABLE online_calibration_states ADD COLUMN beta_unknown FLOAT NOT NULL DEFAULT 1.0",
+                "alpha": "ALTER TABLE online_calibration_states ADD COLUMN alpha FLOAT NOT NULL DEFAULT 0.0",
+            }.items():
+                if name not in columns:
+                    connection.execute(text(ddl))
+
+    if "calibration_residuals" in table_names:
+        columns = {column["name"] for column in inspector.get_columns("calibration_residuals")}
+        with engine.begin() as connection:
+            for name, ddl in {
+                "known_estimate": "ALTER TABLE calibration_residuals ADD COLUMN known_estimate FLOAT NOT NULL DEFAULT 0.0",
+                "unknown_estimate": "ALTER TABLE calibration_residuals ADD COLUMN unknown_estimate FLOAT NOT NULL DEFAULT 0.0",
+                "base_estimate": "ALTER TABLE calibration_residuals ADD COLUMN base_estimate FLOAT NOT NULL DEFAULT 0.0",
+                "calibrated_estimate": "ALTER TABLE calibration_residuals ADD COLUMN calibrated_estimate FLOAT NOT NULL DEFAULT 0.0",
+                "beta_known": "ALTER TABLE calibration_residuals ADD COLUMN beta_known FLOAT NOT NULL DEFAULT 1.0",
+                "beta_unknown": "ALTER TABLE calibration_residuals ADD COLUMN beta_unknown FLOAT NOT NULL DEFAULT 1.0",
+                "alpha": "ALTER TABLE calibration_residuals ADD COLUMN alpha FLOAT NOT NULL DEFAULT 0.0",
+                "sample_count": "ALTER TABLE calibration_residuals ADD COLUMN sample_count INTEGER NOT NULL DEFAULT 0",
+            }.items():
+                if name not in columns:
+                    connection.execute(text(ddl))
+
     if "fund_estimates" in table_names:
         columns = {column["name"] for column in inspector.get_columns("fund_estimates")}
         if "missing_assets_json" not in columns:

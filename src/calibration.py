@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 LEARNING_RATE = 0.10
 MAX_ABS_RESIDUAL = 0.02   # 超过此残差不更新 scale（异常日）
 MIN_RAW_ESTIMATE = 0.001  # raw_estimate 太小时不更新 scale
+MIN_QUOTE_COVERAGE = 0.70
+TWO_FACTOR_MIN_SAMPLES = 15
+SCALE_MIN_SAMPLES = 5
+RIDGE_LAMBDA = 20.0
+RIDGE_DECAY = 0.90
+RIDGE_WINDOW = 30
 
 
 def calculate_error_band(
@@ -64,6 +70,7 @@ def calculate_error_band(
         .where(
             CalibrationResidual.fund_code == fund_code,
             CalibrationResidual.holding_version_id == holding_version_id,
+            CalibrationResidual.is_used_for_update.is_(True),
         )
         .order_by(CalibrationResidual.trade_date.desc())
         .limit(window)
@@ -105,6 +112,15 @@ class CalibrationResult(NamedTuple):
     confidence_level: str
 
 
+class CalibrationFeatures(NamedTuple):
+    known_estimate: float
+    unknown_estimate: float
+    base_estimate: float
+    quote_coverage: float
+    covered_weight: float
+    stock_weight: float
+
+
 def _get_or_init_calibration_state(
     session: Session,
     fund_code: str,
@@ -126,6 +142,9 @@ def _get_or_init_calibration_state(
             current_scale_factor=base_scale,
             min_scale_factor=base_scale * 0.80,
             max_scale_factor=base_scale * 1.20,
+            beta_known=1.0,
+            beta_unknown=1.0,
+            alpha=0.0,
             sample_count=0,
         )
         session.add(state)
@@ -151,22 +170,137 @@ def _compute_base_scale(session: Session, holding_version: HoldingVersion) -> fl
     return allocation.stock_weight / covered_weight
 
 
-def _compute_raw_estimate_from_daily_quotes(
+def _select_asset_allocation_for_holding(
+    session: Session,
+    holding_version: HoldingVersion,
+) -> FundAssetAllocation | None:
+    return session.scalar(
+        select(FundAssetAllocation)
+        .where(
+            FundAssetAllocation.fund_code == holding_version.fund_code,
+            FundAssetAllocation.report_date <= holding_version.report_date,
+            FundAssetAllocation.is_active.is_(True),
+        )
+        .order_by(FundAssetAllocation.report_date.desc(), FundAssetAllocation.created_at.desc())
+    )
+
+
+def _compute_features_from_daily_quotes(
     session: Session,
     holding_version: HoldingVersion,
     trade_date: date,
-) -> float:
-    """用 daily_quotes 收盘数据计算 raw_estimate。"""
+) -> CalibrationFeatures:
+    """构造 known + unknown proxy 两个低维特征。"""
     items = holding_version.items
-    total = 0.0
+    known = 0.0
+    quoted_weight = 0.0
+    covered_weight = sum(item.weight for item in items)
+    allocation = _select_asset_allocation_for_holding(session, holding_version)
+    stock_weight = covered_weight if allocation is None else allocation.stock_weight
     for item in items:
         q = session.scalar(
             select(DailyQuote)
             .where(DailyQuote.asset_code == item.asset_code, DailyQuote.trade_date == trade_date)
         )
         if q is not None:
-            total += item.weight * q.return_pct
-    return total
+            quoted_weight += item.weight
+            known += item.weight * q.return_pct
+    known_avg = known / quoted_weight if quoted_weight > 0 else 0.0
+    unknown_weight = max((stock_weight or 0.0) - covered_weight, 0.0)
+    unknown = unknown_weight * known_avg
+    quote_coverage = quoted_weight / covered_weight if covered_weight > 0 else 0.0
+    return CalibrationFeatures(
+        known_estimate=known,
+        unknown_estimate=unknown,
+        base_estimate=known + unknown,
+        quote_coverage=quote_coverage,
+        covered_weight=covered_weight,
+        stock_weight=stock_weight or covered_weight,
+    )
+
+
+def _solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[float] | None:
+    """小型高斯消元, 避免为 3 个参数强依赖 numpy。"""
+    n = len(vector)
+    a = [row[:] + [vector[i]] for i, row in enumerate(matrix)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(a[r][col]))
+        if abs(a[pivot][col]) < 1e-12:
+            return None
+        a[col], a[pivot] = a[pivot], a[col]
+        div = a[col][col]
+        for j in range(col, n + 1):
+            a[col][j] /= div
+        for r in range(n):
+            if r == col:
+                continue
+            factor = a[r][col]
+            for j in range(col, n + 1):
+                a[r][j] -= factor * a[col][j]
+    return [a[i][n] for i in range(n)]
+
+
+def _training_rows(
+    session: Session,
+    fund_code: str,
+    holding_version_id: int,
+    trade_date: date,
+    window: int = RIDGE_WINDOW,
+) -> list[CalibrationResidual]:
+    rows = session.scalars(
+        select(CalibrationResidual)
+        .where(
+            CalibrationResidual.fund_code == fund_code,
+            CalibrationResidual.holding_version_id == holding_version_id,
+            CalibrationResidual.trade_date < trade_date,
+            CalibrationResidual.is_used_for_update.is_(True),
+        )
+        .order_by(CalibrationResidual.trade_date.desc())
+        .limit(window)
+    ).all()
+    return list(reversed(rows))
+
+
+def _fit_single_scale(rows: list[CalibrationResidual], base_scale: float) -> float:
+    if not rows:
+        return base_scale
+    scale = base_scale
+    for row in rows:
+        base = row.base_estimate or row.raw_estimate
+        if abs(base) < MIN_RAW_ESTIMATE:
+            continue
+        observed = row.actual_return / base
+        observed = max(base_scale * 0.80, min(base_scale * 1.20, observed))
+        scale = 0.8 * scale + 0.2 * observed
+    return max(base_scale * 0.80, min(base_scale * 1.20, scale))
+
+
+def _fit_two_factor(rows: list[CalibrationResidual]) -> tuple[float, float, float]:
+    if len(rows) < TWO_FACTOR_MIN_SAMPLES:
+        return 1.0, 1.0, 0.0
+    rows = rows[-RIDGE_WINDOW:]
+    xtx = [[0.0, 0.0, 0.0] for _ in range(3)]
+    xty = [0.0, 0.0, 0.0]
+    latest_index = len(rows) - 1
+    for idx, row in enumerate(rows):
+        w = RIDGE_DECAY ** (latest_index - idx)
+        x = [row.known_estimate, row.unknown_estimate, 1.0]
+        y = row.actual_return
+        for i in range(3):
+            xty[i] += w * x[i] * y
+            for j in range(3):
+                xtx[i][j] += w * x[i] * x[j]
+    theta0 = [1.0, 1.0, 0.0]
+    for i in range(3):
+        xtx[i][i] += RIDGE_LAMBDA
+        xty[i] += RIDGE_LAMBDA * theta0[i]
+    solved = _solve_linear_system(xtx, xty)
+    if solved is None:
+        return 1.0, 1.0, 0.0
+    beta_known = max(0.80, min(1.20, solved[0]))
+    beta_unknown = max(0.50, min(1.80, solved[1]))
+    alpha = max(-0.001, min(0.001, solved[2]))
+    return beta_known, beta_unknown, alpha
 
 
 def run_online_calibration(
@@ -230,49 +364,64 @@ def run_online_calibration(
     # 4. 幂等检查：如果已经校准过同一天且 force=False，则跳过更新但仍记录
     already_calibrated = (state.last_update_trade_date == calibration_date)
 
-    # 5. 计算 raw_estimate（用 daily_quotes 收盘数据）
-    raw_estimate = _compute_raw_estimate_from_daily_quotes(session, holding_version, calibration_date)
+    # 5. 构造当天特征, 训练样本严格限制在 trade_date < D。
+    features = _compute_features_from_daily_quotes(session, holding_version, calibration_date)
+    training = _training_rows(session, fund_code, holding_version.id, calibration_date)
+    sample_count = len(training)
+    raw_estimate = features.base_estimate
 
-    # 6. 计算 effective_estimate（用校准前的 current_scale_factor，因果保证）
     scale_before = state.current_scale_factor
-    effective_estimate = raw_estimate * scale_before
+    if sample_count >= TWO_FACTOR_MIN_SAMPLES:
+        beta_known, beta_unknown, alpha = _fit_two_factor(training)
+        scale_for_row = beta_known
+        model_mode = "two_factor"
+    elif sample_count >= SCALE_MIN_SAMPLES:
+        scale_for_row = _fit_single_scale(training, 1.0)
+        beta_known, beta_unknown, alpha = scale_for_row, scale_for_row, 0.0
+        model_mode = "single_scale"
+    else:
+        beta_known, beta_unknown, alpha = 1.0, 1.0, 0.0
+        scale_for_row = 1.0
+        model_mode = "coverage_adjusted"
+
+    effective_estimate = (
+        beta_known * features.known_estimate
+        + beta_unknown * features.unknown_estimate
+        + alpha
+    )
 
     residual = actual_return_val - effective_estimate
     abs_residual = abs(residual)
 
-    # 7. 决定是否更新 scale
+    # 6. 决定该日样本是否可用于后续日期训练。
     observed_scale: float | None = None
     skip_reason = ""
     is_updated = False
-    new_scale = scale_before
+    new_scale = scale_for_row
 
     if already_calibrated and not force:
         skip_reason = "already_calibrated_this_date"
-    elif abs(raw_estimate) < MIN_RAW_ESTIMATE:
-        skip_reason = f"raw_estimate_too_small({raw_estimate:.6f})"
+    elif features.quote_coverage < MIN_QUOTE_COVERAGE:
+        skip_reason = f"quote_coverage_too_low({features.quote_coverage:.2%})"
+    elif abs(features.base_estimate) < MIN_RAW_ESTIMATE:
+        skip_reason = f"raw_estimate_too_small({features.base_estimate:.6f})"
     elif abs_residual > MAX_ABS_RESIDUAL:
         skip_reason = f"abs_residual_too_large({abs_residual:.4%})"
     else:
-        observed_scale = actual_return_val / raw_estimate
-        # clip
-        observed_scale = max(state.min_scale_factor, min(state.max_scale_factor, observed_scale))
-        # EWMA update
-        new_scale = (1 - LEARNING_RATE) * scale_before + LEARNING_RATE * observed_scale
-        # clip final
-        new_scale = max(state.min_scale_factor, min(state.max_scale_factor, new_scale))
+        observed_scale = actual_return_val / features.base_estimate
         is_updated = True
 
-    # 8. 更新 state
+    # 7. 更新 state。参数由 T 以前样本训练而来, 只服务 T 之后盘中。
     if is_updated:
         state.current_scale_factor = new_scale
+        state.beta_known = beta_known
+        state.beta_unknown = beta_unknown
+        state.alpha = alpha
         state.last_update_trade_date = calibration_date
         state.sample_count = (state.sample_count or 0) + 1
-        # 更新 ewma_error
         prev_ewma = state.ewma_error or abs_residual
         state.ewma_error = 0.9 * prev_ewma + 0.1 * abs_residual
-        # 更新 recent_mae
         state.recent_mae = abs_residual
-        # 更新 confidence_level
         ewma = state.ewma_error or abs_residual
         if ewma < 0.005:
             state.confidence_level = "A"
@@ -282,8 +431,9 @@ def run_online_calibration(
             state.confidence_level = "C"
         else:
             state.confidence_level = "D"
+        state.warning_json = f'["{model_mode}"]'
 
-    # 9. 写入 calibration_residuals（幂等 upsert）
+    # 8. 写入 calibration_residuals（幂等 upsert）
     existing_residual = session.scalar(
         select(CalibrationResidual).where(
             CalibrationResidual.fund_code == fund_code,
@@ -297,11 +447,19 @@ def run_online_calibration(
             holding_version_id=holding_version.id,
             trade_date=calibration_date,
             actual_return=actual_return_val,
+            known_estimate=features.known_estimate,
+            unknown_estimate=features.unknown_estimate,
+            base_estimate=features.base_estimate,
             raw_estimate=raw_estimate,
+            calibrated_estimate=effective_estimate,
             effective_estimate=effective_estimate,
             residual=residual,
             abs_residual=abs_residual,
-            scale_factor_used=scale_before,
+            scale_factor_used=scale_for_row,
+            beta_known=beta_known,
+            beta_unknown=beta_unknown,
+            alpha=alpha,
+            sample_count=sample_count,
             observed_scale=observed_scale,
             updated_scale_factor=new_scale if is_updated else None,
             is_used_for_update=is_updated,
@@ -310,11 +468,19 @@ def run_online_calibration(
         session.add(residual_row)
     else:
         existing_residual.actual_return = actual_return_val
+        existing_residual.known_estimate = features.known_estimate
+        existing_residual.unknown_estimate = features.unknown_estimate
+        existing_residual.base_estimate = features.base_estimate
         existing_residual.raw_estimate = raw_estimate
+        existing_residual.calibrated_estimate = effective_estimate
         existing_residual.effective_estimate = effective_estimate
         existing_residual.residual = residual
         existing_residual.abs_residual = abs_residual
-        existing_residual.scale_factor_used = scale_before
+        existing_residual.scale_factor_used = scale_for_row
+        existing_residual.beta_known = beta_known
+        existing_residual.beta_unknown = beta_unknown
+        existing_residual.alpha = alpha
+        existing_residual.sample_count = sample_count
         existing_residual.observed_scale = observed_scale
         existing_residual.updated_scale_factor = new_scale if is_updated else None
         existing_residual.is_used_for_update = is_updated
@@ -368,14 +534,22 @@ def load_calibration_residuals(
         {
             "trade_date": r.trade_date.isoformat(),
             "actual_return": f"{r.actual_return:+.4%}",
+            "known_estimate": f"{r.known_estimate:+.4%}",
+            "unknown_estimate": f"{r.unknown_estimate:+.4%}",
+            "base_estimate": f"{r.base_estimate:+.4%}",
             "raw_estimate": f"{r.raw_estimate:+.4%}",
+            "calibrated_estimate": f"{r.calibrated_estimate:+.4%}",
             "effective_estimate": f"{r.effective_estimate:+.4%}",
             "residual": f"{r.residual:+.4%}",
             "abs_residual": f"{r.abs_residual:.4%}",
             "scale_used": f"{r.scale_factor_used:.4f}",
+            "beta_known": f"{r.beta_known:.4f}",
+            "beta_unknown": f"{r.beta_unknown:.4f}",
+            "alpha": f"{r.alpha:+.4%}",
+            "sample_count": r.sample_count,
             "observed_scale": f"{r.observed_scale:.4f}" if r.observed_scale is not None else "--",
             "updated_scale": f"{r.updated_scale_factor:.4f}" if r.updated_scale_factor is not None else "--",
-            "is_used": "✓" if r.is_used_for_update else "✗",
+            "is_used": "Y" if r.is_used_for_update else "N",
             "skip_reason": r.skip_reason or "",
         }
         for r in rows
@@ -420,9 +594,9 @@ def get_calibration_stats(
             "last_calibration_date": state.last_update_trade_date.isoformat() if state and state.last_update_trade_date else "--",
         }
 
-    raw_maes = [r.abs_residual for r in rows]
+    raw_maes = [abs(r.actual_return - (r.base_estimate or r.raw_estimate)) for r in rows]
     raw_mae = sum(raw_maes) / len(raw_maes)
-    eff_maes = [abs(r.actual_return - r.effective_estimate) for r in rows]
+    eff_maes = [abs(r.actual_return - (r.calibrated_estimate or r.effective_estimate)) for r in rows]
     eff_mae = sum(eff_maes) / len(eff_maes)
     latest = rows[-1]
     band = calculate_error_band(session, fund_code, holding_version.id)

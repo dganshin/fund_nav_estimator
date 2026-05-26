@@ -27,7 +27,7 @@ if __package__ in {None, ""}:
     from src.db import get_session_factory
     from src.estimator import compute_live_fund_estimates
     from src.init_db import init_db
-    from src.models import DailyQuote, EffectiveWeightVersion, Fund, UserFundPosition, UserWatchlistFund
+    from src.models import DailyQuote, EffectiveWeightVersion, Fund, HoldingVersion, UserFundPosition, UserWatchlistFund
     from src.onboarding import ensure_fund_full_onboarded
     from src.web.actions import run_effective_weight_action
     from src.web_services import (
@@ -55,7 +55,7 @@ else:
     from .db import get_session_factory
     from .estimator import compute_live_fund_estimates
     from .init_db import init_db
-    from .models import DailyQuote, EffectiveWeightVersion, Fund, UserFundPosition, UserWatchlistFund
+    from .models import DailyQuote, EffectiveWeightVersion, Fund, HoldingVersion, UserFundPosition, UserWatchlistFund
     from .onboarding import ensure_fund_full_onboarded
     from .web.actions import run_effective_weight_action
     from .web_services import (
@@ -293,7 +293,7 @@ def sort_home_rows(rows: list[dict], sort_key: str) -> list[dict]:
     return rows
 
 
-def build_detail_context(result, is_watchlist: bool = False) -> dict:
+def build_detail_context(result, is_watchlist: bool = False, holding_report_date: date | None = None) -> dict:
     holdings = sorted(result.holdings, key=lambda h: abs(h.contribution_pct or 0.0), reverse=True)
     return {
         "fund_code": result.fund_code,
@@ -307,6 +307,7 @@ def build_detail_context(result, is_watchlist: bool = False) -> dict:
         "confidence_text": result.confidence_text,
         "quote_time": result.quote_time.strftime("%H:%M:%S") if result.quote_time else "--",
         "trade_date": result.trade_date.isoformat(),
+        "holding_report_date": holding_report_date.isoformat() if holding_report_date else "--",
         "latest_real_nav_date": result.latest_real_nav_date.isoformat() if result.latest_real_nav_date else "--",
         "is_realtime": result.quote_time.date() == date.today() if result.quote_time else False,
         "is_watchlist": is_watchlist,
@@ -418,9 +419,16 @@ def fund_detail(request: Request, fund_code: str, debug: int = 0, msg: str = "")
     session_factory = get_cached_session_factory()
     is_watchlist = False
     cal_stats: dict = {}
+    holding_report_date = None
     with session_factory() as session:
         wl_rows = load_watchlist_rows(session)
         is_watchlist = any(str(r["fund_code"]) == fund_code and r.get("is_active") for r in wl_rows)
+        active_holding = session.scalar(
+            select(HoldingVersion)
+            .where(HoldingVersion.fund_code == fund_code, HoldingVersion.is_active.is_(True))
+            .order_by(HoldingVersion.report_date.desc(), HoldingVersion.created_at.desc())
+        )
+        holding_report_date = None if active_holding is None else active_holding.report_date
         try:
             cal_stats = get_calibration_stats(session, fund_code)
         except Exception:
@@ -433,7 +441,7 @@ def fund_detail(request: Request, fund_code: str, debug: int = 0, msg: str = "")
             status_code=404,
         )
     return templates.TemplateResponse(request, "fund_detail.html", {
-        "detail": build_detail_context(result, is_watchlist),
+        "detail": build_detail_context(result, is_watchlist, holding_report_date),
         "status_message": status_message,
         "debug": debug,
         "msg": msg,

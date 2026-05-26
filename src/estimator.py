@@ -873,14 +873,36 @@ def compute_live_fund_estimate(
             for item in effective_version.items
         }
     current_scale_factor = 1.0 if state is None else state.current_scale_factor
+    sample_count_for_model = 0 if state is None else state.sample_count
+    beta_known = 1.0 if state is None else (state.beta_known or 1.0)
+    beta_unknown = 1.0 if state is None else (state.beta_unknown or 1.0)
+    alpha = 0.0 if state is None else (state.alpha or 0.0)
+    if sample_count_for_model >= 15:
+        display_known_factor = beta_known
+        model_mode = "two_factor"
+    elif sample_count_for_model >= 5:
+        display_known_factor = current_scale_factor
+        beta_known = current_scale_factor
+        beta_unknown = current_scale_factor
+        alpha = 0.0
+        model_mode = "single_scale"
+    else:
+        display_known_factor = current_scale_factor
+        beta_known = 1.0
+        beta_unknown = 1.0
+        alpha = 0.0
+        model_mode = "coverage_adjusted"
+    allocation = select_asset_allocation(session, fund_code, trade_date)
+    published_total_weight = sum(item.weight for item in version.items)
+    stock_weight = published_total_weight if allocation is None else allocation.stock_weight
 
     for item in sorted(version.items, key=lambda row: row.weight, reverse=True):
         quote = live_quotes.get(item.asset_code)
         effective_item = effective_weight_map.get(item.asset_code)
         published_weight = item.weight if effective_item is None else effective_item.published_weight
-        effective_weight = published_weight * current_scale_factor
-        adjustment_factor = current_scale_factor
-        contribution_explain = "按当前在线修正因子调整"
+        effective_weight = published_weight * display_known_factor
+        adjustment_factor = display_known_factor
+        contribution_explain = "按因果在线参数修正已知持仓"
         return_pct = None if quote is None else float(quote["return_pct"])
         contribution_pct = None
         if return_pct is not None:
@@ -909,10 +931,15 @@ def compute_live_fund_estimate(
         )
 
     missing_weight = max(version.total_weight - covered_weight, 0.0)
+    known_avg = raw_estimate / covered_weight if covered_weight > 0 else 0.0
+    unknown_weight = max((stock_weight or 0.0) - published_total_weight, 0.0)
+    unknown_estimate = unknown_weight * known_avg
+    base_estimate = raw_estimate + unknown_estimate
+    causal_calibrated_estimate = beta_known * raw_estimate + beta_unknown * unknown_estimate + alpha
     coverage_adjusted_estimate: float | None = None
     coverage_warnings: list[str] = []
     if effective_version is not None:
-        coverage_adjusted_estimate = effective_weight_estimate
+        coverage_adjusted_estimate = base_estimate
     else:
         coverage_adjusted_estimate, coverage_warnings = compute_coverage_adjusted_estimate(
             session=session,
@@ -923,37 +950,11 @@ def compute_live_fund_estimate(
         )
         warnings.extend(coverage_warnings)
 
-    current_base_estimate = effective_weight_estimate if effective_weight_estimate != 0 else raw_estimate
-    if calibration_base == "coverage_adjusted" and coverage_adjusted_estimate is not None:
-        current_base_estimate = coverage_adjusted_estimate
-
-    training_samples = collect_training_samples(
-        session=session,
-        fund_code=fund_code,
-        trade_date=trade_date,
-        window=calibration_window,
-        requested_base=calibration_base,
-    )
-    sample_count = len(training_samples)
-    calibrated_estimate = None
+    sample_count = sample_count_for_model
+    calibrated_estimate = causal_calibrated_estimate
     calibrated_mae: float | None = None
     calibrated_hit_rate: float | None = None
     calibrated_corr: float | None = None
-    if sample_count >= calibration_min_samples:
-        x_values = [sample.base_estimate for sample in training_samples]
-        y_values = [sample.actual_return for sample in training_samples]
-        regression = calculate_linear_regression(x_values, y_values)
-        if regression is not None:
-            alpha, beta = regression
-            calibrated_estimate = alpha + beta * current_base_estimate
-            train_predictions = [alpha + beta * value for value in x_values]
-            train_errors = [actual - predicted for actual, predicted in zip(y_values, train_predictions)]
-            calibrated_mae = sum(abs(error) for error in train_errors) / sample_count
-            calibrated_hit_rate = sum(
-                1 for predicted, actual in zip(train_predictions, y_values)
-                if is_direction_hit(predicted, actual)
-            ) / sample_count
-            calibrated_corr = calculate_correlation(x_values, y_values)
 
     history_rows = _collect_selection_history(
         session=session,
@@ -969,11 +970,11 @@ def compute_live_fund_estimate(
     raw_corr = _calculate_corr_from_error_history(method_errors["raw"])
     coverage_corr = _calculate_corr_from_error_history(method_errors["coverage_adjusted"])
 
-    selected_sample_count = 0 if state is None else state.sample_count
-    best_method = "effective_weight"
-    best_estimate = effective_weight_estimate
+    selected_sample_count = sample_count_for_model
+    best_method = model_mode
+    best_estimate = causal_calibrated_estimate
     best_status = "ok"
-    decision_reason = "首页默认使用修正权重实时估值"
+    decision_reason = "首页使用已知持仓贡献 + 未知仓位代理贡献的因果在线校准"
     best_mae = None if state is None else state.recent_mae
     best_hit_rate = None
     if state is not None and state.warning_json:

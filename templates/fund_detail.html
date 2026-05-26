@@ -48,7 +48,7 @@
   <div class="status-bar" style="margin-bottom:0">
     <span>行情时间 {{ detail.quote_time }}</span>
     <span class="sep">·</span>
-    <span>持仓报告日 {{ detail.trade_date }}</span>
+    <span>持仓报告日 {{ detail.holding_report_date }}</span>
     <span class="sep">·</span>
     <span>最新净值日 {{ detail.latest_real_nav_date }}</span>
     <span class="sep">·</span>
@@ -122,8 +122,9 @@
       <table class="plain-table" id="residual-table">
         <thead>
           <tr>
-            <th>日期</th><th>实际涨跌</th><th>原始估值</th><th>修正估值</th>
-            <th>残差</th><th>|残差|</th><th>scale_used</th><th>obs_scale</th><th>更新</th><th>跳过原因</th>
+            <th>日期</th><th>实际涨跌</th><th>已知贡献</th><th>未知代理</th>
+            <th>基础估值</th><th>修正估值</th><th>残差</th><th>|残差|</th>
+            <th>beta1</th><th>beta2</th><th>alpha</th><th>样本</th><th>更新</th><th>跳过原因</th>
           </tr>
         </thead>
         <tbody id="residual-tbody"></tbody>
@@ -172,13 +173,14 @@
           rows.forEach(function(r) {
             var tr = document.createElement('tr');
             tr.innerHTML = [
-              r.trade_date, r.actual_return, r.raw_estimate, r.effective_estimate,
-              r.residual, r.abs_residual, r.scale_used, r.observed_scale,
+              r.trade_date, r.actual_return, r.known_estimate, r.unknown_estimate,
+              r.base_estimate, r.calibrated_estimate, r.residual, r.abs_residual,
+              r.beta_known, r.beta_unknown, r.alpha, r.sample_count,
               r.is_used, r.skip_reason || ''
             ].map(function(v, i) {
               var cls = '';
-              if (i === 4) { cls = v.startsWith('+') ? ' class="up"' : (v.startsWith('-') ? ' class="down"' : ''); }
-              if (i === 8) { cls = v === '✓' ? ' style="color:#16a34a"' : ' style="color:#94a3b8"'; }
+              if (i === 6) { cls = String(v).startsWith('+') ? ' class="up"' : (String(v).startsWith('-') ? ' class="down"' : ''); }
+              if (i === 12) { cls = v === 'Y' ? ' style="color:#16a34a"' : ' style="color:#94a3b8"'; }
               return '<td' + cls + '>' + v + '</td>';
             }).join('');
             tbody.appendChild(tr);
