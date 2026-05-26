@@ -29,6 +29,7 @@
       <form method="post" action="/fund/{{ detail.fund_code }}/watch" style="margin:0;">
         <button type="submit" class="btn-ghost btn">{% if detail.is_watchlist %}移出自选{% else %}加入自选{% endif %}</button>
       </form>
+      <button type="button" class="btn-secondary btn" title="只处理未校准的最新真实净值日" onclick="runIncrementalCalibration()">手动校准</button>
       <button type="button" class="btn-secondary btn" title="强制清空并重建所有因果校准残差" onclick="forceReplayCalibration()">强制重演校准</button>
     </div>
   </div>
@@ -39,8 +40,21 @@
       <div class="metric-value {{ detail.current_estimate_tone }}">{{ detail.current_estimate_text }}</div>
     </div>
     <div>
+      <div class="metric-label">今日实际收盘</div>
+      <div class="metric-value {{ detail.actual_return_today_tone }}">
+        {% if detail.actual_return_available %}{{ detail.actual_return_today_text }}{% else %}--{% endif %}
+      </div>
+    </div>
+    <div>
+      <div class="metric-label">持有总金额</div>
+      <div style="font-size:18px; font-weight:800; color:#334155;">¥{{ detail.holding_amount }}</div>
+    </div>
+    <div>
       <div class="metric-label">今日估算盈亏</div>
       <div class="metric-value {{ detail.estimated_today_profit_tone }}">{{ detail.estimated_today_profit_text }}</div>
+      <div style="font-size:12px; color:#94a3b8; margin-top:2px;">
+        口径：{{ '实际涨跌' if detail.profit_return_source == 'actual' else '实时估值' }}；参与金额 ¥{{ detail.profit_base_amount_today }}
+      </div>
     </div>
     <div>
       <div class="metric-label">预计误差范围</div>
@@ -53,6 +67,12 @@
     </div>
     {% endif %}
   </div>
+
+  {% if detail.has_pending_today_event %}
+  <div class="status-bar" style="margin-top:10px; margin-bottom:0; color:#1e40af; background:#eff6ff; border-color:#bfdbfe;">
+    今日有手工交易记录：持有总金额已更新，但新增/减少金额从下一交易日开始影响“今日盈亏”。
+  </div>
+  {% endif %}
 
   <div class="status-bar" style="margin-bottom:0">
     <span>行情时间 {{ detail.quote_time }}</span>
@@ -203,6 +223,23 @@
     }
   });
 })();
+
+window.runIncrementalCalibration = function() {
+  fetch('/api/fund/' + {{ detail.fund_code | tojson }} + '/calibrate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ force: false })
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      alert("手动校准完成，新增校准 " + d.calibrated_count + " 天。");
+      window.location.reload();
+    } else {
+      alert("校准失败：" + d.error);
+    }
+  });
+};
 
 window.forceReplayCalibration = function() {
   if (!confirm("确定要清理当前版本的所有残差，并进行因果 Walk-Forward 重演校准吗？")) return;

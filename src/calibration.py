@@ -284,8 +284,9 @@ def _fit_two_factor(rows: list[CalibrationResidual]) -> tuple[float, float, floa
     latest_index = len(rows) - 1
     for idx, row in enumerate(rows):
         w = RIDGE_DECAY ** (latest_index - idx)
-        x = [row.known_estimate, row.unknown_estimate, 1.0]
-        y = row.actual_return
+        # 百分比尺度下做 ridge, 避免小数收益率让 lambda 过强。
+        x = [row.known_estimate * 100.0, row.unknown_estimate * 100.0, 1.0]
+        y = row.actual_return * 100.0
         for i in range(3):
             xty[i] += w * x[i] * y
             for j in range(3):
@@ -299,7 +300,7 @@ def _fit_two_factor(rows: list[CalibrationResidual]) -> tuple[float, float, floa
         return 1.0, 1.0, 0.0
     beta_known = max(0.80, min(1.20, solved[0]))
     beta_unknown = max(0.50, min(1.80, solved[1]))
-    alpha = max(-0.001, min(0.001, solved[2]))
+    alpha = max(-0.001, min(0.001, solved[2] / 100.0))
     return beta_known, beta_unknown, alpha
 
 

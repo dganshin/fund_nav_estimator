@@ -280,27 +280,86 @@
     return f > 0 ? 'up' : (f < 0 ? 'down' : 'muted');
   }
 
-  function renderFundList(rows) {
+  function esc(v) {
+    return String(v === undefined || v === null ? '' : v)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function renderHoldingRow(row) {
+    var pendingNote = row.has_pending_today_event ? ' · 今日交易下个交易日计盈亏' : '';
+    return [
+      '<a class="fund-row fund-row-holding" href="/fund/' + esc(row.fund_code) + '">',
+      '<div class="fund-main">',
+      '<div class="fund-name">' + esc(row.fund_name || row.fund_code) + '</div>',
+      '<div class="fund-sub">' + esc(row.fund_code) + ' · 持有 · ' + esc(row.quote_time || '--') + pendingNote + '</div>',
+      '</div>',
+      '<div class="fund-value ' + esc(row.estimate_tone || 'muted') + '">' + esc(row.current_estimate_text || '--') + '</div>',
+      '<div class="fund-compare ' + esc(row.actual_return_tone || 'muted') + '">' + (row.actual_return_available ? esc(row.actual_return_today_text) : '--') + '</div>',
+      '<div class="fund-amount">¥' + esc(row.holding_amount_text || '--') + '</div>',
+      '<div class="fund-profit ' + esc(row.profit_tone || 'muted') + '">' + esc(row.estimated_today_profit_text || '--') + '</div>',
+      '<div class="fund-error">' + esc(row.error_band_short || row.error_band_label || '样本不足') + '</div>',
+      '</a>',
+    ].join('');
+  }
+
+  function renderWatchRow(row) {
+    return [
+      '<a class="fund-row fund-row-watch" href="/fund/' + esc(row.fund_code) + '">',
+      '<div class="fund-main">',
+      '<div class="fund-name">' + esc(row.fund_name || row.fund_code) + '</div>',
+      '<div class="fund-sub">' + esc(row.fund_code) + ' · 自选 · ' + esc(row.quote_time || '--') + '</div>',
+      '</div>',
+      '<div class="fund-value ' + esc(row.estimate_tone || 'muted') + '">' + esc(row.current_estimate_text || '--') + '</div>',
+      '<div class="fund-compare ' + esc(row.actual_return_tone || 'muted') + '">' + (row.actual_return_available ? esc(row.actual_return_today_text) : '--') + '</div>',
+      '<div class="fund-error">' + esc(row.error_band_short || row.error_band_label || '样本不足') + '</div>',
+      '</a>',
+    ].join('');
+  }
+
+  function renderFundList(data) {
     if (!listContainer) return;
-    if (!rows || rows.length === 0) {
+    var holdingRows = data && data.holding_rows ? data.holding_rows : [];
+    var watchlistRows = data && data.watchlist_rows ? data.watchlist_rows : [];
+    var otherRows = data && data.other_rows ? data.other_rows : [];
+
+    var totalEl = document.getElementById('total-today-profit');
+    if (totalEl && data) {
+      totalEl.textContent = data.total_today_profit_text || '--';
+      totalEl.className = data.total_today_profit_tone || 'muted';
+    }
+
+    if (holdingRows.length === 0 && watchlistRows.length === 0 && otherRows.length === 0) {
       listContainer.innerHTML = '<div class="empty-panel">当前没有可展示的基金估值结果。<br>请在搜索框输入基金代码，加入自选或按金额买入。</div>';
       return;
     }
-    listContainer.innerHTML = rows.map(function (row) {
-      var isWl = row.is_watchlist ? ' · 自选' : '';
-      var isHolding = row.is_holding ? ' · 持有' : ' · 观察';
-      return [
-        '<a class="fund-row" href="/fund/' + row.fund_code + '">',
-        '<div class="fund-main">',
-        '<div class="fund-name">' + (row.fund_name || row.fund_code) + '</div>',
-        '<div class="fund-sub">' + row.fund_code + isWl + isHolding + ' · ' + (row.quote_time || '--') + '</div>',
-        '</div>',
-        '<div class="fund-value ' + (row.estimate_tone || 'muted') + '">' + (row.current_estimate_text || '--') + '</div>',
-        '<div class="fund-profit ' + (row.profit_tone || 'muted') + '">' + (row.estimated_today_profit_text || '--') + '</div>',
-        '<div class="fund-error">' + (row.error_band_label || '样本不足') + '</div>',
-        '</a>',
-      ].join('');
-    }).join('');
+
+    var html = [];
+
+    html.push('<section class="fund-section" data-section="holding">');
+    html.push('<div style="display:flex; justify-content:space-between; align-items:flex-end; margin:10px 4px 6px;"><div style="font-size:15px; font-weight:800; color:#0f172a;">我的持仓</div></div>');
+    html.push('<div class="fund-list-header fund-header-holding"><div class="header-main">基金名称</div><div class="header-col">实时估值</div><div class="header-col">实际收盘</div><div class="header-col">持有金额</div><div class="header-col">今日盈亏</div><div class="header-col">预计误差</div></div>');
+    html.push('<div id="holding-list">');
+    html.push(holdingRows.length ? holdingRows.map(renderHoldingRow).join('') : '<div class="empty-panel">暂无持有基金。搜索基金代码后可以按金额买入。</div>');
+    html.push('</div></section>');
+
+    html.push('<section class="fund-section" data-section="watchlist" style="margin-top:14px;">');
+    html.push('<div style="display:flex; justify-content:space-between; align-items:flex-end; margin:10px 4px 6px;"><div style="font-size:15px; font-weight:800; color:#0f172a;">自选观察</div></div>');
+    html.push('<div class="fund-list-header fund-header-watch"><div class="header-main">基金名称</div><div class="header-col">实时估值</div><div class="header-col">实际收盘</div><div class="header-col">预计误差</div></div>');
+    html.push('<div id="watchlist-list">');
+    html.push(watchlistRows.length ? watchlistRows.map(renderWatchRow).join('') : '<div class="empty-panel">暂无仅自选基金。持有基金会自动加入自选，但只显示在“我的持仓”。</div>');
+    html.push('</div></section>');
+
+    if (otherRows.length) {
+      html.push('<section class="fund-section" data-section="other" style="margin-top:14px;"><div style="font-size:15px; font-weight:800; color:#0f172a; margin:10px 4px 6px;">其他结果</div>');
+      html.push(otherRows.map(renderWatchRow).join(''));
+      html.push('</section>');
+    }
+
+    listContainer.innerHTML = html.join('');
   }
 
   function fetchAndUpdateList() {
@@ -313,7 +372,7 @@
     fetch(url)
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        renderFundList(data.rows);
+        renderFundList(data);
         if (statusMsg) statusMsg.textContent = data.status_message || '';
         if (latestTime) latestTime.textContent = data.latest_time || '--';
         scheduleNext();

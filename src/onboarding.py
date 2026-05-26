@@ -24,11 +24,12 @@ DEFAULT_PLATFORM = "支付宝/蚂蚁财富"
 def _to_pct(value: object) -> float | None:
     if value in {None, ""}:
         return None
+    text = str(value).replace("%", "").strip()
     try:
-        raw = float(str(value).replace("%", "").strip())
+        raw = float(text)
     except ValueError:
         return None
-    return raw if abs(raw) > 1 else raw * 100
+    return raw
 
 
 def _pick(row: dict[str, object], *names: str) -> object | None:
@@ -88,9 +89,16 @@ def _find_target_etf(data_source, fund_name: str, basic_info: dict[str, str]) ->
         return None
     full_name = fund_name if "ETF" in fund_name.upper() else (basic_info.get("基金全称") or fund_name)
     manager = (basic_info.get("基金公司") or "").replace("基金管理有限公司", "").replace("基金", "")
-    theme_match = re.search(r"中证(.+?)ETF", full_name)
-    theme = theme_match.group(1) if theme_match else ""
-    if not theme:
+    theme_candidates: list[str] = []
+    for pattern in (
+        r"中证(.+?)(?:ETF|交易型开放式|指数证券投资基金)",
+        r"(.+?)ETF(?:发起式)?联接",
+        r"(.+?)ETF联接",
+    ):
+        match = re.search(pattern, full_name)
+        if match:
+            theme_candidates.append(match.group(1))
+    if not theme_candidates:
         return None
     try:
         df = ak.fund_etf_spot_em()
@@ -103,12 +111,20 @@ def _find_target_etf(data_source, fund_name: str, basic_info: dict[str, str]) ->
         return None
     name_col = "名称" if "名称" in df.columns else "基金名称"
     code_col = "代码" if "代码" in df.columns else "基金代码"
-    theme_keywords = [theme]
-    for noise in ("主题", "指数", "行业"):
-        theme_keywords.append(theme.replace(noise, ""))
-    if "有色金属" in theme:
+    theme_keywords: list[str] = []
+    for theme in theme_candidates:
+        cleaned = theme
+        for noise in ("主题", "指数", "行业", "材料"):
+            cleaned = cleaned.replace(noise, "")
+        theme_keywords.extend([theme, cleaned])
+        if len(cleaned) >= 4:
+            theme_keywords.append(cleaned[-4:])
+        if len(cleaned) >= 3:
+            theme_keywords.append(cleaned[-3:])
+    if any("有色金属" in theme for theme in theme_candidates):
         theme_keywords.append("有色金属")
         theme_keywords.append("工业有色")
+    theme_keywords = [kw for kw in dict.fromkeys(theme_keywords) if kw]
     candidates = []
     for _, row in df.iterrows():
         name = str(row.get(name_col, "") or "")
@@ -118,10 +134,10 @@ def _find_target_etf(data_source, fund_name: str, basic_info: dict[str, str]) ->
         theme_hit = any(keyword and keyword in name for keyword in theme_keywords)
         manager_hit = bool(manager and manager in name)
         if theme_hit:
-            candidates.append((0 if manager_hit else 1, code, name))
+            candidates.append((0 if manager_hit else 1, -sum(1 for kw in theme_keywords if kw in name), code, name))
     if not candidates:
         return None
-    _, code, name = sorted(candidates)[0]
+    _, _, code, name = sorted(candidates)[0]
     return {
         "asset_code": normalize_asset_code(code),
         "asset_name": name,

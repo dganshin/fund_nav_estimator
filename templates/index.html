@@ -1,6 +1,39 @@
 {% extends "base.html" %}
 {% block title %}基金实时估值榜{% endblock %}
 
+{% macro holding_row(row) %}
+<a class="fund-row fund-row-holding" href="/fund/{{ row.fund_code }}">
+  <div class="fund-main">
+    <div class="fund-name">{{ row.fund_name }}</div>
+    <div class="fund-sub">
+      {{ row.fund_code }} · 持有 · {{ row.quote_time }}
+      {% if row.has_pending_today_event %} · 今日交易下个交易日计盈亏{% endif %}
+    </div>
+  </div>
+  <div class="fund-value {{ row.estimate_tone }}">{{ row.current_estimate_text }}</div>
+  <div class="fund-compare {{ row.actual_return_tone }}">
+    {% if row.actual_return_available %}{{ row.actual_return_today_text }}{% else %}--{% endif %}
+  </div>
+  <div class="fund-amount">¥{{ row.holding_amount_text }}</div>
+  <div class="fund-profit {{ row.profit_tone }}">{{ row.estimated_today_profit_text }}</div>
+  <div class="fund-error">{{ row.error_band_short }}</div>
+</a>
+{% endmacro %}
+
+{% macro watch_row(row) %}
+<a class="fund-row fund-row-watch" href="/fund/{{ row.fund_code }}">
+  <div class="fund-main">
+    <div class="fund-name">{{ row.fund_name }}</div>
+    <div class="fund-sub">{{ row.fund_code }} · 自选 · {{ row.quote_time }}</div>
+  </div>
+  <div class="fund-value {{ row.estimate_tone }}">{{ row.current_estimate_text }}</div>
+  <div class="fund-compare {{ row.actual_return_tone }}">
+    {% if row.actual_return_available %}{{ row.actual_return_today_text }}{% else %}--{% endif %}
+  </div>
+  <div class="fund-error">{{ row.error_band_short }}</div>
+</a>
+{% endmacro %}
+
 {% block content %}
 <div class="status-bar">
   <span>今日 {{ today_label }}</span>
@@ -33,6 +66,14 @@
 </div>
 {% endif %}
 
+<div class="panel" id="home-profit-summary" style="margin-bottom:12px; display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 16px;">
+  <div>
+    <div style="font-size:13px; color:#64748b; font-weight:600;">持有基金当日总盈亏</div>
+    <div style="font-size:12px; color:#94a3b8; margin-top:2px;">有当日实际净值涨跌时用实际，否则用实时估值；今日新增金额下个交易日计入盈亏。</div>
+  </div>
+  <div id="total-today-profit" class="{{ total_today_profit_tone }}" style="font-size:26px; font-weight:900;">{{ total_today_profit_text }}</div>
+</div>
+
 <div class="toolbar" style="display:flex; gap:8px; align-items:center; flex-wrap:nowrap;">
   <input id="search-input" type="text" value="{{ search }}" placeholder="搜索基金名称 / 输入代码…" autocomplete="off" style="flex:1; min-width:160px; max-width:300px;">
   <button id="search-btn" class="btn btn-secondary" style="height:44px; padding:0 16px;">搜索</button>
@@ -56,7 +97,6 @@
   </form>
 </div>
 
-<!-- 搜索到新基金时弹出（JS 控制） -->
 <div id="new-fund-panel" class="panel" style="display:none; border:1.5px solid #3b82f6;">
   <div class="panel-title" style="color:#1d4ed8">发现新基金</div>
   <div id="new-fund-info" style="font-size:14px; color:#334155; margin-bottom:12px;"></div>
@@ -71,34 +111,55 @@
 </div>
 
 <div id="fund-list-container" class="fund-list">
-  <div class="fund-list-header">
-    <div class="header-main">基金名称</div>
-    <div class="header-col">实时估值</div>
-    <div class="header-col">预测</div>
-    <div class="header-col">实际</div>
-    <div class="header-col">今日盈亏</div>
-    <div class="header-col">预计误差</div>
-  </div>
-  {% for row in rows %}
-  <a class="fund-row" href="/fund/{{ row.fund_code }}">
-    <div class="fund-main">
-      <div class="fund-name">{{ row.fund_name }}</div>
-      <div class="fund-sub">
-        {{ row.fund_code }}{% if row.is_watchlist %} · 自选{% endif %}{% if row.is_holding %} · 持有{% else %} · 观察{% endif %} · {{ row.quote_time }}
-      </div>
+  <section class="fund-section" data-section="holding">
+    <div style="display:flex; justify-content:space-between; align-items:flex-end; margin:10px 4px 6px;">
+      <div style="font-size:15px; font-weight:800; color:#0f172a;">我的持仓</div>
     </div>
-    <div class="fund-value {{ row.estimate_tone }}">{{ row.current_estimate_text }}</div>
-    <div class="fund-compare {{ row.compare_predicted_tone }}">
-      {% if row.show_compare %}{{ row.compare_predicted_text }}{% else %}--{% endif %}
+    <div class="fund-list-header fund-header-holding">
+      <div class="header-main">基金名称</div>
+      <div class="header-col">实时估值</div>
+      <div class="header-col">实际收盘</div>
+      <div class="header-col">持有金额</div>
+      <div class="header-col">今日盈亏</div>
+      <div class="header-col">预计误差</div>
     </div>
-    <div class="fund-compare {{ row.compare_actual_tone }}">
-      {% if row.show_compare %}{{ row.compare_actual_text }}{% else %}--{% endif %}
+    <div id="holding-list">
+      {% for row in holding_rows %}
+        {{ holding_row(row) }}
+      {% else %}
+        <div class="empty-panel">暂无持有基金。搜索基金代码后可以按金额买入。</div>
+      {% endfor %}
     </div>
-    <div class="fund-profit {{ row.profit_tone }}">{{ row.estimated_today_profit_text }}</div>
-    <div class="fund-error">{{ row.error_band_label }}</div>
-  </a>
-  {% else %}
-  <div class="empty-panel">当前没有可展示的基金估值结果。<br>请在搜索框输入基金代码，加入自选或按金额买入。</div>
-  {% endfor %}
+  </section>
+
+  <section class="fund-section" data-section="watchlist" style="margin-top:14px;">
+    <div style="display:flex; justify-content:space-between; align-items:flex-end; margin:10px 4px 6px;">
+      <div style="font-size:15px; font-weight:800; color:#0f172a;">自选观察</div>
+    </div>
+    <div class="fund-list-header fund-header-watch">
+      <div class="header-main">基金名称</div>
+      <div class="header-col">实时估值</div>
+      <div class="header-col">实际收盘</div>
+      <div class="header-col">预计误差</div>
+    </div>
+    <div id="watchlist-list">
+      {% for row in watchlist_rows %}
+        {{ watch_row(row) }}
+      {% else %}
+        <div class="empty-panel">暂无仅自选基金。持有基金会自动加入自选，但只显示在“我的持仓”。</div>
+      {% endfor %}
+    </div>
+  </section>
+
+  {% if other_rows %}
+  <section class="fund-section" data-section="other" style="margin-top:14px;">
+    <div style="font-size:15px; font-weight:800; color:#0f172a; margin:10px 4px 6px;">其他结果</div>
+    <div id="other-list">
+      {% for row in other_rows %}
+        {{ watch_row(row) }}
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
 </div>
 {% endblock %}
