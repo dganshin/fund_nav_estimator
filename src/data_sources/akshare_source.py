@@ -278,6 +278,15 @@ class AKShareDataSource:
                         break
         except Exception:
             pass
+        if fund_name == fund_code:
+            try:
+                name_df = self.ak.fund_name_em() if hasattr(self.ak, "fund_name_em") else None
+                if name_df is not None and not name_df.empty and {"基金代码", "基金简称"}.issubset(name_df.columns):
+                    matched = name_df[name_df["基金代码"].astype(str).str.zfill(6) == fund_code]
+                    if not matched.empty:
+                        fund_name = str(matched.iloc[0]["基金简称"] or fund_code).strip() or fund_code
+            except Exception:
+                pass
         return FundProfile(
             fund_code=fund_code,
             fund_name=fund_name,

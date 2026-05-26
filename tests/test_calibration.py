@@ -181,8 +181,8 @@ def test_calibration_state_initializes(tmp_path):
 
     assert result is not None
     assert result.fund_code == "002207"
-    # scale_factor 应该在合理范围
-    assert 0.5 <= result.scale_factor_after <= 2.0
+    # scale_factor 来自股票仓位 / 公开持仓覆盖率, 前十大覆盖低时可大于 2。
+    assert 0.5 <= result.scale_factor_after <= 5.0
     assert result.sample_count >= 1
 
 

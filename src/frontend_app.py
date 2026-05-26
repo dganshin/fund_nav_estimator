@@ -734,6 +734,7 @@ def api_search_fund(code: str = Query(""), fund_code: str = Query("")):
             wl = session.scalar(
                 select(UserWatchlistFund).where(UserWatchlistFund.fund_code == code)
             )
+            has_holdings = bool(load_holding_rows(session, code))
             return JSONResponse({
                 "found": True,
                 "in_db": True,
@@ -743,7 +744,7 @@ def api_search_fund(code: str = Query(""), fund_code: str = Query("")):
                 "has_position": pos is not None,
                 "holding_amount": pos.holding_amount if pos else None,
                 "in_watchlist": bool(wl and wl.is_active),
-                "holdings_status": "可拉取",
+                "holdings_status": "已拉取" if has_holdings else "待拉取",
             })
 
     # 不在库里，尝试拉取基础信息

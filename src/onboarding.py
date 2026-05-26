@@ -4,14 +4,15 @@ import logging
 from datetime import date, timedelta
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .backfill import fetch_and_store_fund_navs, fetch_and_store_stock_quotes
 from .calibration import run_online_calibration
 from .estimator import build_effective_weight_version
 from .import_data import import_asset_allocations_from_rows, import_funds_from_rows, import_holdings_from_rows
-from .models import Fund, FundNav, HoldingVersion, UserFundPosition
+from .models import ActualReturn, CalibrationResidual, Fund, FundNav, HoldingVersion, OnlineCalibrationState
+from .data_sources.code_utils import normalize_asset_code
 from .web_services import save_user_position_rows, save_watchlist_rows
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,19 @@ def _parse_report_date(value: object) -> date | None:
     text = str(value or "").strip()
     if not text:
         return None
+    if "季度" in text:
+        import re
+
+        match = re.search(r"(\d{4})年\s*([1-4])季度", text)
+        if match:
+            year = int(match.group(1))
+            quarter = int(match.group(2))
+            return {
+                1: date(year, 3, 31),
+                2: date(year, 6, 30),
+                3: date(year, 9, 30),
+                4: date(year, 12, 31),
+            }[quarter]
     for sep in ("-", "/", "."):
         try:
             parts = [int(p) for p in text.replace("年", sep).replace("月", sep).replace("日", "").split(sep) if p]
@@ -61,12 +75,12 @@ def _parse_report_date(value: object) -> date | None:
 
 def _normalize_holding_rows(fund_code: str, raw_rows: list[dict[str, object]]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    fallback_date = date.today().replace(month=((date.today().month - 1) // 3) * 3 + 1, day=1)
+    fallback_date = date.today() - timedelta(days=60)
     for raw in raw_rows:
         report_date = _parse_report_date(
             _pick(raw, "report_date", "报告日期", "季度", "公告日期", "持仓日期")
         ) or fallback_date
-        asset_code = str(_pick(raw, "asset_code", "股票代码", "代码", "证券代码") or "").strip()
+        asset_code = normalize_asset_code(str(_pick(raw, "asset_code", "股票代码", "代码", "证券代码") or "").strip())
         asset_name = str(_pick(raw, "asset_name", "股票名称", "名称", "证券名称") or asset_code).strip()
         weight_pct = _to_pct(_pick(raw, "weight_pct", "占净值比例", "持仓占比", "比例", "市值占净值比"))
         if not asset_code or weight_pct is None:
@@ -95,8 +109,11 @@ def _normalize_asset_allocation_rows(
     bond = _to_pct(_pick(first, "bond_weight_pct", "债券占净比", "债券"))
     cash = _to_pct(_pick(first, "cash_weight_pct", "现金占净比", "现金"))
     other = _to_pct(_pick(first, "other_weight_pct", "其他"))
+    if stock is None and any("行业类别" in row or "占净值比例" in row for row in raw_rows):
+        # AKShare 的行业配置可视为股票资产在各行业的净值占比之和。
+        weights = [_to_pct(_pick(row, "占净值比例", "weight_pct")) for row in raw_rows]
+        stock = sum(weight for weight in weights if weight is not None)
     if stock is None:
-        # AKShare 若只返回行业配置, 无法得出股票仓位, 留给 effective_weight 退化处理。
         return []
     return [{
         "fund_code": fund_code,
@@ -117,12 +134,47 @@ def _latest_nav(session: Session, fund_code: str) -> FundNav | None:
     )
 
 
+def _run_causal_calibration_history(
+    session: Session,
+    fund_code: str,
+    holding_version: HoldingVersion,
+    force_rebuild: bool = False,
+) -> int:
+    """从当前公开持仓报告日起逐日写入因果残差。"""
+    if force_rebuild:
+        session.execute(delete(CalibrationResidual).where(
+            CalibrationResidual.fund_code == fund_code,
+            CalibrationResidual.holding_version_id == holding_version.id,
+        ))
+        session.execute(delete(OnlineCalibrationState).where(
+            OnlineCalibrationState.fund_code == fund_code,
+            OnlineCalibrationState.holding_version_id == holding_version.id,
+        ))
+        session.commit()
+
+    dates = session.scalars(
+        select(ActualReturn.trade_date)
+        .where(
+            ActualReturn.fund_code == fund_code,
+            ActualReturn.trade_date >= holding_version.report_date,
+        )
+        .order_by(ActualReturn.trade_date.asc())
+    ).all()
+    count = 0
+    for trade_date in dates:
+        result = run_online_calibration(session, fund_code, calibration_date=trade_date, force=force_rebuild)
+        if result is not None:
+            count += 1
+    return count
+
+
 def ensure_fund_full_onboarded(
     session: Session,
     fund_code: str,
     data_source,
     holding_amount: Optional[float] = None,
     add_watchlist: bool = True,
+    force_rebuild: bool = False,
 ) -> dict[str, object]:
     """基金代码一键收录: 基础信息, 公开持仓, 资产配置, 回填, 修正权重, 在线校准。"""
     fund_code = str(fund_code).strip()
@@ -194,7 +246,14 @@ def ensure_fund_full_onboarded(
         except Exception as exc:
             warnings.append(f"修正权重生成失败: {exc}")
         try:
-            run_online_calibration(session, fund_code)
+            residual_count = _run_causal_calibration_history(
+                session=session,
+                fund_code=fund_code,
+                holding_version=active_holding,
+                force_rebuild=force_rebuild,
+            )
+            if residual_count == 0:
+                warnings.append("暂无可用残差样本")
         except Exception as exc:
             warnings.append(f"在线校准失败: {exc}")
 

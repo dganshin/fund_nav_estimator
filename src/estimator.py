@@ -1044,7 +1044,6 @@ def compute_live_fund_estimates(
     calibration_base: str = "coverage_adjusted",
     calibration_min_samples: int = 5,
 ) -> list[LiveFundEstimateResult]:
-    refresh_online_calibration_states(session=session, fund_code=fund_code)
     stmt = select(Fund).where(Fund.is_active.is_(True)).order_by(Fund.fund_code.asc())
     if fund_code:
         stmt = stmt.where(Fund.fund_code == fund_code)

@@ -28,6 +28,7 @@ from .models import (
     ActualReturn,
     CalibrationResidual,
     DailyQuote,
+    FundAssetAllocation,
     Fund,
     HoldingVersion,
     OnlineCalibrationState,
@@ -132,11 +133,22 @@ def _get_or_init_calibration_state(
     return state
 
 
-def _compute_base_scale(holding_version: HoldingVersion) -> float:
+def _compute_base_scale(session: Session, holding_version: HoldingVersion) -> float:
     """根据资产配置和持仓权重计算基准 scale_factor。"""
-    # 如果 holding_version 关联了 effective_weight_version，用那个 scale
-    # 否则用 1.0（保守默认）
-    return 1.0
+    covered_weight = sum(item.weight for item in holding_version.items)
+    if covered_weight <= 0:
+        return 1.0
+    allocation = session.scalar(
+        select(FundAssetAllocation)
+        .where(
+            FundAssetAllocation.fund_code == holding_version.fund_code,
+            FundAssetAllocation.report_date <= holding_version.report_date,
+        )
+        .order_by(FundAssetAllocation.report_date.desc(), FundAssetAllocation.created_at.desc())
+    )
+    if allocation is None or allocation.stock_weight <= 0:
+        return 1.0
+    return allocation.stock_weight / covered_weight
 
 
 def _compute_raw_estimate_from_daily_quotes(
@@ -212,7 +224,7 @@ def run_online_calibration(
     actual_return_val = actual_return_obj.actual_return
 
     # 3. 获取/初始化 calibration state
-    base_scale = _compute_base_scale(holding_version)
+    base_scale = _compute_base_scale(session, holding_version)
     state = _get_or_init_calibration_state(session, fund_code, holding_version, base_scale)
 
     # 4. 幂等检查：如果已经校准过同一天且 force=False，则跳过更新但仍记录
