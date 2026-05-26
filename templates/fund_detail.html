@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}基金详情{% endblock %}
+
+{% block content %}
+{% if detail %}
+<section class="detail-top">
+  <div class="detail-title">{{ detail.fund_name }}</div>
+  <div class="detail-sub">{{ detail.fund_code }}</div>
+  <div class="detail-metrics">
+    <div>
+      <div class="metric-label">当前估值</div>
+      <div class="metric-value {{ detail.current_estimate_tone }}">{{ detail.current_estimate_text }}</div>
+    </div>
+    <div>
+      <div class="metric-label">今日估算盈亏</div>
+      <div class="metric-value {{ detail.estimated_today_profit_tone }}">{{ detail.estimated_today_profit_text }}</div>
+    </div>
+    <div>
+      <div class="metric-label">置信度</div>
+      <div class="metric-badge badge-{{ detail.confidence_level|lower }}">{{ detail.confidence_level }}</div>
+    </div>
+  </div>
+  <div class="status-row">
+    <span>行情时间 {{ detail.quote_time }}</span>
+    <span>持仓报告日 {{ detail.trade_date }}</span>
+    <span>最新真实净值日 {{ detail.latest_real_nav_date }}</span>
+  </div>
+  <div class="status-message">{{ status_message }}</div>
+</section>
+
+<section class="list-head detail-grid-head">
+  <div>股票</div>
+  <div class="align-right">公开权重</div>
+  <div class="align-right">修正权重</div>
+  <div class="align-right">涨跌幅</div>
+  <div class="align-right">贡献</div>
+</section>
+
+<section class="holding-list">
+  {% for row in detail.holdings %}
+  <div class="holding-row">
+    <div class="holding-main">
+      <div class="holding-name">{{ row.asset_name }}</div>
+      <div class="holding-sub">{{ row.asset_code }}</div>
+    </div>
+    <div class="align-right">{{ row.published_weight }}</div>
+    <div class="align-right">{{ row.effective_weight }}</div>
+    <div class="align-right {{ row.return_tone }}">{{ row.live_return }}</div>
+    <div class="align-right {{ row.contribution_tone }}">{{ row.contribution }}</div>
+  </div>
+  {% endfor %}
+</section>
+
+<details class="advanced-box" {% if debug == 1 %}open{% endif %}>
+  <summary>高级调试信息</summary>
+  <div class="advanced-grid">
+    {% for label, value in detail.advanced_rows %}
+    <div class="advanced-item">
+      <div class="advanced-label">{{ label }}</div>
+      <div class="advanced-value">{{ value }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</details>
+{% else %}
+<section class="empty-panel">当前没有该基金的估值详情。</section>
+{% endif %}
+{% endblock %}

@@ -1,6 +1,6 @@
 # fund_nav_estimator
 
-个人使用的基金盘中涨跌预计修正系统, 当前已完成阶段 5.1, 并提供本地 Streamlit Web Dashboard。
+个人使用的基金盘中涨跌预计修正系统。当前主入口已经切到 FastAPI 前台, 用于日常看实时估值榜和持仓贡献。Streamlit 仅保留为后台调试页。
 
 ## 当前能力
 
@@ -86,7 +86,32 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## 启动本地 Web
+## 启动前台
+
+日常使用入口:
+
+```bash
+cd /Users/jiangxing/Documents/repo/fund_nav_estimator
+source .venv/bin/activate
+uvicorn src.frontend_app:app --reload --host 127.0.0.1 --port 8502
+```
+
+打开:
+
+```text
+http://127.0.0.1:8502/
+```
+
+前台页面:
+
+- `/` 基金实时估值榜
+- `/fund/{fund_code}` 单基金股票贡献详情
+- `/portfolio` 我的持仓金额
+- `/manage` 基金池/持仓/资产配置维护
+
+## 启动 Streamlit 后台
+
+仅用于调试:
 
 ```bash
 cd /Users/jiangxing/Documents/repo/fund_nav_estimator

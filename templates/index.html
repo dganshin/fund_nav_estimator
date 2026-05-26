@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% block title %}基金实时估值榜{% endblock %}
+
+{% block content %}
+<section class="status-panel">
+  <div class="status-row">
+    <span>更新时间 {{ latest_time }}</span>
+    <span>今日估值日期 {{ estimate_date }}</span>
+    <span>仅供参考</span>
+  </div>
+  <div class="status-message">{{ status_message }}</div>
+</section>
+
+<section class="toolbar-inline">
+  <form method="get" action="/" class="toolbar-form">
+    <input type="text" name="search" value="{{ search }}" placeholder="搜索基金名称或代码">
+    <select name="sort">
+      {% for key, label in sort_options.items() %}
+      <option value="{{ key }}" {% if sort == key %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <select name="refresh">
+      <option value="off" {% if refresh == 'off' %}selected{% endif %}>自动刷新关闭</option>
+      <option value="5" {% if refresh == '5' %}selected{% endif %}>5秒</option>
+      <option value="10" {% if refresh == '10' %}selected{% endif %}>10秒</option>
+      <option value="30" {% if refresh == '30' %}selected{% endif %}>30秒</option>
+    </select>
+    <button type="submit">刷新</button>
+  </form>
+</section>
+
+<section class="list-head">
+  <div>基金</div>
+  <div class="align-right">当前估值</div>
+  <div class="align-right">今日盈亏</div>
+  <div class="align-center">置信</div>
+</section>
+
+<section class="fund-list">
+  {% for row in rows %}
+  <a class="fund-row" href="/fund/{{ row.fund_code }}">
+    <div class="fund-main">
+      <div class="fund-name">{{ row.fund_name }}</div>
+      <div class="fund-sub">{{ row.fund_code }} · {{ '持有' if row.is_holding else '观察' }} · {{ row.quote_time }}</div>
+    </div>
+    <div class="fund-value {{ row.estimate_tone }}">{{ row.current_estimate_text }}</div>
+    <div class="fund-profit {{ row.profit_tone }}">{{ row.estimated_today_profit_text }}</div>
+    <div class="fund-badge badge-{{ row.confidence_level|lower }}">{{ row.confidence_level }}</div>
+  </a>
+  {% else %}
+  <div class="empty-panel">当前没有可展示的基金估值结果。</div>
+  {% endfor %}
+</section>
+{% endblock %}

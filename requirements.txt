@@ -7,3 +7,7 @@ requests>=2.31,<3.0
 streamlit>=1.45,<2.0
 streamlit-autorefresh>=1.0,<2.0
 plotly>=5.24,<7.0
+fastapi>=0.116,<1.0
+uvicorn>=0.35,<1.0
+jinja2>=3.1,<4.0
+httpx>=0.28,<1.0

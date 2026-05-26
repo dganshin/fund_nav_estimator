@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block title %}管理{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>管理</h2>
+  <p class="panel-note">管理页只保留基金池、持仓、资产配置和修正权重更新。</p>
+  {% if message %}
+  <div class="status-message ok">{{ message }}</div>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h3>生成或更新修正权重</h3>
+  <form method="post" action="/manage/effective-weights" class="form-grid compact-form">
+    <input type="text" name="fund_code" placeholder="基金代码, 例如 002207" required>
+    <input type="date" name="trade_date" required>
+    <button type="submit">生成修正权重</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h3>基金管理</h3>
+  <p class="panel-note">粘贴 CSV 文本, 表头: fund_code,fund_name,fund_type,market,is_active</p>
+  <form method="post" action="/manage/funds">
+    <textarea name="csv_text" rows="6" placeholder="fund_code,fund_name,fund_type,market,is_active"></textarea>
+    <button type="submit">保存基金</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h3>持仓管理</h3>
+  <p class="panel-note">粘贴 CSV 文本, 表头: fund_code,report_date,source,asset_code,asset_name,asset_type,weight_pct</p>
+  <form method="post" action="/manage/holdings">
+    <textarea name="csv_text" rows="8" placeholder="fund_code,report_date,source,asset_code,asset_name,asset_type,weight_pct"></textarea>
+    <button type="submit">保存持仓</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h3>资产配置管理</h3>
+  <p class="panel-note">粘贴 CSV 文本, 表头: fund_code,report_date,source,stock_weight_pct,bond_weight_pct,cash_weight_pct,other_weight_pct</p>
+  <form method="post" action="/manage/assets">
+    <textarea name="csv_text" rows="6" placeholder="fund_code,report_date,source,stock_weight_pct,bond_weight_pct,cash_weight_pct,other_weight_pct"></textarea>
+    <button type="submit">保存资产配置</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h3>行业配置管理</h3>
+  <p class="panel-note">粘贴 CSV 文本, 表头: fund_code,report_date,source,industry_name,industry_code,weight_pct</p>
+  <form method="post" action="/manage/industries">
+    <textarea name="csv_text" rows="6" placeholder="fund_code,report_date,source,industry_name,industry_code,weight_pct"></textarea>
+    <button type="submit">保存行业配置</button>
+  </form>
+</section>
+{% endblock %}
