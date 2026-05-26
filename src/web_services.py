@@ -11,7 +11,7 @@ from .import_data import (
     import_holdings_from_rows,
     import_industry_allocations_from_rows,
 )
-from .models import Fund, FundAssetAllocation, FundIndustryAllocation, HoldingVersion
+from .models import Fund, FundAssetAllocation, FundIndustryAllocation, HoldingVersion, UserFundPosition
 
 
 def list_fund_options(session: Session) -> list[tuple[str, str]]:
@@ -102,6 +102,21 @@ def load_industry_allocation_rows(session: Session, fund_code: str | None = None
     ]
 
 
+def load_user_position_rows(session: Session) -> list[dict[str, object]]:
+    rows = session.scalars(select(UserFundPosition).order_by(UserFundPosition.fund_code.asc())).all()
+    return [
+        {
+            "fund_code": row.fund_code,
+            "holding_amount": row.holding_amount,
+            "holding_share": row.holding_share,
+            "cost_nav": row.cost_nav,
+            "platform": row.platform or "",
+            "is_active": row.is_active,
+        }
+        for row in rows
+    ]
+
+
 def save_fund_rows(session: Session, rows: list[dict[str, object]]) -> int:
     return import_funds_from_rows(session, rows)
 
@@ -116,6 +131,26 @@ def save_asset_allocation_rows(session: Session, rows: list[dict[str, object]]) 
 
 def save_industry_allocation_rows(session: Session, rows: list[dict[str, object]]) -> int:
     return import_industry_allocations_from_rows(session, rows)
+
+
+def save_user_position_rows(session: Session, rows: list[dict[str, object]]) -> int:
+    count = 0
+    for row in rows:
+        fund_code = str(row.get("fund_code") or "").strip()
+        if not fund_code:
+            continue
+        position = session.scalar(select(UserFundPosition).where(UserFundPosition.fund_code == fund_code))
+        if position is None:
+            position = UserFundPosition(fund_code=fund_code)
+            session.add(position)
+        position.holding_amount = None if row.get("holding_amount") in {"", None} else float(row["holding_amount"])
+        position.holding_share = None if row.get("holding_share") in {"", None} else float(row["holding_share"])
+        position.cost_nav = None if row.get("cost_nav") in {"", None} else float(row["cost_nav"])
+        position.platform = None if row.get("platform") in {"", None} else str(row["platform"]).strip()
+        position.is_active = bool(row.get("is_active", True))
+        count += 1
+    session.commit()
+    return count
 
 
 def default_date_range() -> tuple[date, date]:

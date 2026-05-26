@@ -14,6 +14,8 @@ from src.estimator import (
     build_estimate_history,
     build_reconcile_history,
     compute_live_fund_estimates,
+    get_online_calibration_state,
+    refresh_online_calibration_states,
 )
 from src.import_data import (
     import_asset_allocations_from_rows,
@@ -34,6 +36,8 @@ from src.web_services import (
     load_fund_rows,
     load_holding_rows,
     load_industry_allocation_rows,
+    load_user_position_rows,
+    save_user_position_rows,
 )
 from tests.test_stage4 import make_mock_source, seed_fund_holdings_and_allocations
 
@@ -325,7 +329,7 @@ def test_compute_live_fund_estimates_uses_live_quotes(tmp_path):
     assert results[0].holdings
     assert results[0].holdings[0].published_weight_pct > 0
     assert results[0].holdings[0].effective_weight_pct > results[0].holdings[0].published_weight_pct
-    assert results[0].final_method in {"raw", "coverage_adjusted", "calibrated"}
+    assert results[0].effective_method == "修正权重"
 
 
 def test_effective_weight_versions_scale_to_stock_weight(tmp_path):
@@ -369,3 +373,141 @@ def test_live_effective_weight_estimate_matches_scaled_contribution(tmp_path):
     assert result.effective_weight_estimate is not None
     assert round(result.effective_weight_estimate, 8) == round(expected_effective, 8)
     assert round(result.coverage_adjusted_estimate or 0.0, 8) == round(expected_effective, 8)
+
+
+def test_user_position_today_profit_equals_amount_times_estimate(tmp_path):
+    session_factory = create_session_factory(tmp_path)
+    with session_factory() as session:
+        seed_fund_holdings_and_allocations(tmp_path, session)
+        save_user_position_rows(
+            session,
+            [
+                {
+                    "fund_code": "002207",
+                    "holding_amount": 3000.0,
+                    "holding_share": None,
+                    "cost_nav": None,
+                    "platform": "支付宝",
+                    "is_active": True,
+                }
+            ],
+        )
+        results = compute_live_fund_estimates(
+            session=session,
+            live_quotes={
+                "600988.SH": {"return_pct": 0.03},
+                "000975.SZ": {"return_pct": 0.01},
+            },
+            trade_date=date.fromisoformat("2026-05-22"),
+            fund_code="002207",
+        )
+
+    result = results[0]
+    assert result.holding_amount == 3000.0
+    assert result.estimated_today_profit is not None
+    assert abs(result.estimated_today_profit - (3000.0 * result.current_estimate)) < 0.001
+
+
+def test_online_calibration_state_initializes_from_stock_weight(tmp_path):
+    session_factory = create_session_factory(tmp_path)
+    with session_factory() as session:
+        seed_fund_holdings_and_allocations(tmp_path, session)
+        state = get_online_calibration_state(session, "002207", date.fromisoformat("2026-05-22"))
+        assert state is not None
+        assert round(state.base_scale_factor, 8) == round(0.9 / 0.35, 8)
+        assert round(state.current_scale_factor, 8) == round(0.9 / 0.35, 8)
+
+
+def test_online_calibration_state_updates_and_clips_scale(tmp_path):
+    session_factory = create_session_factory(tmp_path)
+    data_source = make_mock_source()
+    with session_factory() as session:
+        seed_fund_holdings_and_allocations(tmp_path, session)
+        fetch_and_store_stock_quotes(
+            session,
+            data_source,
+            date.fromisoformat("2026-05-20"),
+            date.fromisoformat("2026-05-22"),
+            ["600988.SH", "000975.SZ"],
+        )
+        fetch_and_store_fund_navs(
+            session,
+            data_source,
+            "002207",
+            date.fromisoformat("2026-05-20"),
+            date.fromisoformat("2026-05-22"),
+        )
+        build_estimate_history(
+            session,
+            start_date=date.fromisoformat("2026-05-20"),
+            end_date=date.fromisoformat("2026-05-22"),
+            fund_code="002207",
+        )
+        build_reconcile_history(
+            session,
+            start_date=date.fromisoformat("2026-05-20"),
+            end_date=date.fromisoformat("2026-05-22"),
+            fund_code="002207",
+        )
+        states = refresh_online_calibration_states(session, fund_code="002207")
+
+    assert states
+    state = states[0]
+    assert state.current_scale_factor >= state.min_scale_factor
+    assert state.current_scale_factor <= state.max_scale_factor
+    assert state.sample_count >= 1
+
+
+def test_new_holding_version_resets_online_calibration_state(tmp_path):
+    session_factory = create_session_factory(tmp_path)
+    with session_factory() as session:
+        seed_fund_holdings_and_allocations(tmp_path, session)
+        old_state = get_online_calibration_state(session, "002207", date.fromisoformat("2026-05-22"))
+        assert old_state is not None
+        old_holding_version_id = old_state.holding_version_id
+        import_holdings_from_rows(
+            session,
+            [
+                {
+                    "fund_code": "002207",
+                    "report_date": "2026-04-30",
+                    "source": "new_report",
+                    "asset_code": "600988.SH",
+                    "asset_name": "赤峰黄金",
+                    "asset_type": "stock",
+                    "weight_pct": 18.0,
+                },
+                {
+                    "fund_code": "002207",
+                    "report_date": "2026-04-30",
+                    "source": "new_report",
+                    "asset_code": "000975.SZ",
+                    "asset_name": "银泰黄金",
+                    "asset_type": "stock",
+                    "weight_pct": 12.0,
+                },
+            ],
+        )
+        new_state = get_online_calibration_state(session, "002207", date.fromisoformat("2026-05-22"))
+        assert new_state is not None
+        assert old_holding_version_id != new_state.holding_version_id
+        assert new_state.sample_count == 0
+
+
+def test_detail_contribution_sum_matches_current_estimate(tmp_path):
+    session_factory = create_session_factory(tmp_path)
+    with session_factory() as session:
+        seed_fund_holdings_and_allocations(tmp_path, session)
+        results = compute_live_fund_estimates(
+            session=session,
+            live_quotes={
+                "600988.SH": {"return_pct": 0.03},
+                "000975.SZ": {"return_pct": 0.01},
+            },
+            trade_date=date.fromisoformat("2026-05-22"),
+            fund_code="002207",
+        )
+
+    result = results[0]
+    contribution_sum = sum(item.contribution_pct or 0.0 for item in result.holdings) / 100.0
+    assert abs(contribution_sum - result.current_estimate) < 0.00001

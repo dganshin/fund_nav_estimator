@@ -30,6 +30,8 @@ class Fund(Base):
     asset_allocations: Mapped[list["FundAssetAllocation"]] = relationship(back_populates="fund")
     industry_allocations: Mapped[list["FundIndustryAllocation"]] = relationship(back_populates="fund")
     effective_weight_versions: Mapped[list["EffectiveWeightVersion"]] = relationship(back_populates="fund")
+    user_positions: Mapped[list["UserFundPosition"]] = relationship(back_populates="fund")
+    online_calibration_states: Mapped[list["OnlineCalibrationState"]] = relationship(back_populates="fund")
     calibrated_estimates: Mapped[list["CalibratedEstimate"]] = relationship(back_populates="fund")
     selected_estimates: Mapped[list["SelectedEstimate"]] = relationship(back_populates="fund")
 
@@ -234,6 +236,50 @@ class EffectiveWeightItem(Base):
     )
 
     version: Mapped["EffectiveWeightVersion"] = relationship(back_populates="items")
+
+
+class UserFundPosition(Base):
+    __tablename__ = "user_fund_positions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False, index=True)
+    holding_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    holding_share: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost_nav: Mapped[float | None] = mapped_column(Float, nullable=True)
+    platform: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("fund_code", name="uq_user_fund_position"),
+    )
+
+    fund: Mapped["Fund"] = relationship(back_populates="user_positions")
+
+
+class OnlineCalibrationState(Base):
+    __tablename__ = "online_calibration_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False, index=True)
+    holding_version_id: Mapped[int] = mapped_column(ForeignKey("holding_versions.id"), nullable=False, index=True)
+    base_scale_factor: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    current_scale_factor: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    min_scale_factor: Mapped[float] = mapped_column(Float, nullable=False, default=0.8)
+    max_scale_factor: Mapped[float] = mapped_column(Float, nullable=False, default=1.2)
+    ewma_error: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recent_mae: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_update_trade_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    confidence_level: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    warning_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("fund_code", "holding_version_id", name="uq_online_calibration_state"),
+    )
+
+    fund: Mapped["Fund"] = relationship(back_populates="online_calibration_states")
 
 
 class EstimateError(Base):

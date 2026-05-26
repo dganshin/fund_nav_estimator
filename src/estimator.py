@@ -19,7 +19,9 @@ from .models import (
     FundAssetAllocation,
     FundEstimate,
     HoldingVersion,
+    OnlineCalibrationState,
     SelectedEstimate,
+    UserFundPosition,
 )
 
 
@@ -149,13 +151,20 @@ class LiveFundEstimateResult:
     fund_name: str
     trade_date: date
     quote_time: datetime | None
+    current_estimate: float
+    effective_method: str
+    confidence_level: str | None
+    holding_amount: float | None
+    estimated_today_profit: float | None
+    latest_real_nav_date: date | None
+    current_scale_factor: float
+    data_warning: str | None
     raw_estimate: float
     effective_weight_estimate: float | None
     coverage_adjusted_estimate: float | None
     calibrated_estimate: float | None
     final_estimate: float
     final_method: str
-    confidence_level: str | None
     covered_weight: float
     missing_weight: float
     latest_mae: float | None
@@ -178,6 +187,22 @@ class EffectiveWeightResult:
     scale_factor: float
     total_effective_weight: float
     warnings: list[str]
+
+
+@dataclass
+class OnlineCalibrationStateResult:
+    fund_code: str
+    holding_version_id: int
+    base_scale_factor: float
+    current_scale_factor: float
+    min_scale_factor: float
+    max_scale_factor: float
+    ewma_error: float | None
+    recent_mae: float | None
+    sample_count: int
+    last_update_trade_date: date | None
+    confidence_level: str | None
+    warning_json: list[str]
 
 
 @dataclass
@@ -542,6 +567,192 @@ def build_effective_weight_versions(
     return results
 
 
+def determine_realtime_confidence(
+    sample_count: int,
+    recent_mae: float | None,
+    warning_count: int = 0,
+) -> str:
+    if sample_count >= 20 and recent_mae is not None and recent_mae <= 0.003 and warning_count == 0:
+        return "A"
+    if sample_count >= 10 and recent_mae is not None and recent_mae <= 0.006:
+        return "B"
+    if sample_count >= 5:
+        return "C"
+    return "D"
+
+
+def upsert_online_calibration_state(
+    session: Session,
+    fund_code: str,
+    holding_version_id: int,
+    trade_date: date,
+) -> OnlineCalibrationState:
+    state = session.scalar(
+        select(OnlineCalibrationState).where(
+            OnlineCalibrationState.fund_code == fund_code,
+            OnlineCalibrationState.holding_version_id == holding_version_id,
+        )
+    )
+    holding_version = session.get(HoldingVersion, holding_version_id)
+    if holding_version is None:
+        raise ValueError(f"Missing holding version {holding_version_id} for {fund_code}.")
+    allocation = select_asset_allocation(session, fund_code, trade_date)
+    covered_weight = sum(item.weight for item in holding_version.items)
+    stock_weight = None if allocation is None else allocation.stock_weight
+    base_scale_factor = calculate_weight_scale_factor(covered_weight, stock_weight)
+    min_scale_factor = base_scale_factor * 0.80
+    max_scale_factor = base_scale_factor * 1.20
+    if state is None:
+        state = OnlineCalibrationState(
+            fund_code=fund_code,
+            holding_version_id=holding_version_id,
+        )
+        session.add(state)
+    state.base_scale_factor = base_scale_factor
+    state.current_scale_factor = base_scale_factor
+    state.min_scale_factor = min_scale_factor
+    state.max_scale_factor = max_scale_factor
+    state.ewma_error = None
+    state.recent_mae = None
+    state.sample_count = 0
+    state.last_update_trade_date = None
+    state.confidence_level = "D"
+    state.warning_json = "[]"
+    session.flush()
+    return state
+
+
+def refresh_online_calibration_states(
+    session: Session,
+    fund_code: str | None = None,
+    learning_rate: float = 0.10,
+    min_abs_raw_estimate: float = 0.001,
+    max_single_day_error: float = 0.02,
+) -> list[OnlineCalibrationStateResult]:
+    fund_stmt = select(Fund).where(Fund.is_active.is_(True))
+    if fund_code is not None:
+        fund_stmt = fund_stmt.where(Fund.fund_code == fund_code)
+    funds = session.scalars(fund_stmt.order_by(Fund.fund_code.asc())).all()
+
+    state_map: dict[tuple[str, int], OnlineCalibrationState] = {}
+    for fund in funds:
+        versions = session.scalars(
+            select(HoldingVersion)
+            .where(HoldingVersion.fund_code == fund.fund_code)
+            .order_by(HoldingVersion.report_date.asc(), HoldingVersion.created_at.asc())
+        ).all()
+        for version in versions:
+            state = upsert_online_calibration_state(
+                session=session,
+                fund_code=fund.fund_code,
+                holding_version_id=version.id,
+                trade_date=max(date.today(), version.report_date),
+            )
+            state_map[(fund.fund_code, version.id)] = state
+
+    stmt = (
+        select(FundEstimate, ActualReturn)
+        .join(
+            ActualReturn,
+            and_(
+                ActualReturn.trade_date == FundEstimate.trade_date,
+                ActualReturn.fund_code == FundEstimate.fund_code,
+            ),
+        )
+        .order_by(FundEstimate.fund_code.asc(), FundEstimate.trade_date.asc())
+    )
+    if fund_code is not None:
+        stmt = stmt.where(FundEstimate.fund_code == fund_code)
+
+    for estimate, actual in session.execute(stmt).all():
+        state = state_map.get((estimate.fund_code, estimate.holding_version_id))
+        if state is None:
+            state = upsert_online_calibration_state(
+                session=session,
+                fund_code=estimate.fund_code,
+                holding_version_id=estimate.holding_version_id,
+                trade_date=estimate.trade_date,
+            )
+            state_map[(estimate.fund_code, estimate.holding_version_id)] = state
+
+        current_estimated = estimate.raw_estimate * state.current_scale_factor
+        error_value = abs(actual.actual_return - current_estimated)
+        if state.ewma_error is None:
+            state.ewma_error = error_value
+        else:
+            state.ewma_error = (1.0 - learning_rate) * state.ewma_error + learning_rate * error_value
+        state.recent_mae = state.ewma_error
+
+        warnings: list[str] = []
+        should_update = True
+        if abs(estimate.raw_estimate) < min_abs_raw_estimate:
+            should_update = False
+            warnings.append("原始估值过小, 跳过缩放更新")
+        if error_value > max_single_day_error:
+            should_update = False
+            warnings.append("单日误差过大, 跳过缩放更新")
+
+        if should_update:
+            observed_scale = actual.actual_return / estimate.raw_estimate
+            observed_scale = min(max(observed_scale, state.min_scale_factor), state.max_scale_factor)
+            state.current_scale_factor = (
+                (1.0 - learning_rate) * state.current_scale_factor
+                + learning_rate * observed_scale
+            )
+            state.sample_count += 1
+        state.last_update_trade_date = estimate.trade_date
+        state.warning_json = json.dumps(warnings, ensure_ascii=False)
+        state.confidence_level = determine_realtime_confidence(
+            sample_count=state.sample_count,
+            recent_mae=state.recent_mae,
+            warning_count=len(warnings),
+        )
+
+    session.commit()
+    return [
+        OnlineCalibrationStateResult(
+            fund_code=state.fund_code,
+            holding_version_id=state.holding_version_id,
+            base_scale_factor=state.base_scale_factor,
+            current_scale_factor=state.current_scale_factor,
+            min_scale_factor=state.min_scale_factor,
+            max_scale_factor=state.max_scale_factor,
+            ewma_error=state.ewma_error,
+            recent_mae=state.recent_mae,
+            sample_count=state.sample_count,
+            last_update_trade_date=state.last_update_trade_date,
+            confidence_level=state.confidence_level,
+            warning_json=json.loads(state.warning_json or "[]"),
+        )
+        for state in sorted(state_map.values(), key=lambda item: (item.fund_code, item.holding_version_id))
+    ]
+
+
+def get_online_calibration_state(
+    session: Session,
+    fund_code: str,
+    trade_date: date,
+) -> OnlineCalibrationState | None:
+    holding_version = select_holding_version(session, fund_code, trade_date)
+    if holding_version is None:
+        return None
+    state = session.scalar(
+        select(OnlineCalibrationState).where(
+            OnlineCalibrationState.fund_code == fund_code,
+            OnlineCalibrationState.holding_version_id == holding_version.id,
+        )
+    )
+    if state is None:
+        state = upsert_online_calibration_state(
+            session=session,
+            fund_code=fund_code,
+            holding_version_id=holding_version.id,
+            trade_date=trade_date,
+        )
+        session.flush()
+    return state
+
+
 def get_effective_weight_version(
     session: Session,
     fund_code: str,
@@ -595,6 +806,19 @@ def compute_live_fund_estimate(
     version = select_holding_version(session, fund_code, trade_date)
     if version is None:
         return None
+    state = get_online_calibration_state(session, fund_code, trade_date)
+    position = session.scalar(
+        select(UserFundPosition).where(
+            UserFundPosition.fund_code == fund_code,
+            UserFundPosition.is_active.is_(True),
+        )
+    )
+    latest_real_nav_date = session.scalar(
+        select(ActualReturn.trade_date)
+        .where(ActualReturn.fund_code == fund_code)
+        .order_by(ActualReturn.trade_date.desc())
+        .limit(1)
+    )
 
     warnings: list[str] = []
     raw_estimate = 0.0
@@ -608,15 +832,15 @@ def compute_live_fund_estimate(
             item.asset_code: item
             for item in effective_version.items
         }
+    current_scale_factor = 1.0 if state is None else state.current_scale_factor
 
     for item in sorted(version.items, key=lambda row: row.weight, reverse=True):
         quote = live_quotes.get(item.asset_code)
         effective_item = effective_weight_map.get(item.asset_code)
-        effective_weight = item.weight if effective_item is None else effective_item.effective_weight
-        adjustment_factor = 1.0 if effective_item is None else effective_item.adjustment_factor
-        contribution_explain = "使用公开权重"
-        if effective_item is not None:
-            contribution_explain = effective_item.contribution_explain
+        published_weight = item.weight if effective_item is None else effective_item.published_weight
+        effective_weight = published_weight * current_scale_factor
+        adjustment_factor = current_scale_factor
+        contribution_explain = "按当前在线修正因子调整"
         return_pct = None if quote is None else float(quote["return_pct"])
         contribution_pct = None
         if return_pct is not None:
@@ -635,7 +859,7 @@ def compute_live_fund_estimate(
                 asset_code=item.asset_code,
                 asset_name=item.asset_name,
                 asset_type=item.asset_type,
-                published_weight_pct=round(item.weight * 100, 4),
+                published_weight_pct=round(published_weight * 100, 4),
                 effective_weight_pct=round(effective_weight * 100, 4),
                 adjustment_factor=round(adjustment_factor, 6),
                 return_pct=None if return_pct is None else round(return_pct * 100, 4),
@@ -659,7 +883,7 @@ def compute_live_fund_estimate(
         )
         warnings.extend(coverage_warnings)
 
-    current_base_estimate = raw_estimate
+    current_base_estimate = effective_weight_estimate if effective_weight_estimate != 0 else raw_estimate
     if calibration_base == "coverage_adjusted" and coverage_adjusted_estimate is not None:
         current_base_estimate = coverage_adjusted_estimate
 
@@ -705,64 +929,44 @@ def compute_live_fund_estimate(
     raw_corr = _calculate_corr_from_error_history(method_errors["raw"])
     coverage_corr = _calculate_corr_from_error_history(method_errors["coverage_adjusted"])
 
-    selected_sample_count = len(history_rows)
-    best_method, best_estimate, best_status, decision_reason = _select_best_method_for_policy(
-        selection_policy=selection_policy,
-        raw_estimate=raw_estimate,
-        coverage_adjusted_estimate=coverage_adjusted_estimate,
-        calibrated_estimate=calibrated_estimate,
-        sample_count=selected_sample_count,
-        min_samples=min_samples,
-        improvement_threshold=min_improvement_bps / 10000.0,
-        min_improvement_bps=min_improvement_bps,
-        raw_mae=raw_mae,
-        coverage_mae=coverage_mae,
-        calibrated_mae=calibrated_mae,
-        raw_hit_rate=raw_hit_rate,
-        coverage_hit_rate=coverage_hit_rate,
-        calibrated_hit_rate=calibrated_hit_rate,
-        raw_corr=raw_corr,
-        coverage_corr=coverage_corr,
-        calibrated_corr=calibrated_corr,
-        method_errors=method_errors,
-        warnings=warnings,
-    )
-    best_mae = {
-        "raw": raw_mae,
-        "coverage_adjusted": coverage_mae,
-        "calibrated": calibrated_mae,
-    }.get(best_method)
-    best_hit_rate = {
-        "raw": raw_hit_rate,
-        "coverage_adjusted": coverage_hit_rate,
-        "calibrated": calibrated_hit_rate,
-    }.get(best_method)
-    best_corr = {
-        "raw": raw_corr,
-        "coverage_adjusted": coverage_corr,
-        "calibrated": calibrated_corr,
-    }.get(best_method)
-    _, confidence_level = determine_selected_confidence(
-        sample_count=selected_sample_count,
-        min_samples=min_samples,
-        mean_abs_error=best_mae,
-        direction_hit_rate=best_hit_rate,
-        corr=best_corr,
-        best_status=best_status,
-    )
+    selected_sample_count = 0 if state is None else state.sample_count
+    best_method = "effective_weight"
+    best_estimate = effective_weight_estimate
+    best_status = "ok"
+    decision_reason = "首页默认使用修正权重实时估值"
+    best_mae = None if state is None else state.recent_mae
+    best_hit_rate = None
+    if state is not None and state.warning_json:
+        warnings.extend(json.loads(state.warning_json))
+    confidence_level = "D" if state is None else state.confidence_level
+
+    estimated_today_profit = None
+    holding_amount = None if position is None else position.holding_amount
+    if holding_amount is not None:
+        estimated_today_profit = holding_amount * best_estimate
+    data_warning = None
+    if quote_time is None:
+        data_warning = "缺少实时行情"
 
     return LiveFundEstimateResult(
         fund_code=fund_code,
         fund_name=fund_name or (fund.fund_name if fund is not None else fund_code),
         trade_date=trade_date,
         quote_time=quote_time,
+        current_estimate=round(best_estimate, 8),
+        effective_method="修正权重",
+        confidence_level=confidence_level,
+        holding_amount=holding_amount,
+        estimated_today_profit=None if estimated_today_profit is None else round(estimated_today_profit, 8),
+        latest_real_nav_date=latest_real_nav_date,
+        current_scale_factor=round(current_scale_factor, 8),
+        data_warning=data_warning,
         raw_estimate=round(raw_estimate, 8),
         effective_weight_estimate=None if coverage_adjusted_estimate is None else round(effective_weight_estimate, 8),
         coverage_adjusted_estimate=None if coverage_adjusted_estimate is None else round(coverage_adjusted_estimate, 8),
         calibrated_estimate=None if calibrated_estimate is None else round(calibrated_estimate, 8),
         final_estimate=round(best_estimate, 8),
         final_method=best_method,
-        confidence_level=confidence_level,
         covered_weight=round(covered_weight, 8),
         missing_weight=round(missing_weight, 8),
         latest_mae=best_mae,
@@ -789,6 +993,7 @@ def compute_live_fund_estimates(
     calibration_base: str = "coverage_adjusted",
     calibration_min_samples: int = 5,
 ) -> list[LiveFundEstimateResult]:
+    refresh_online_calibration_states(session=session, fund_code=fund_code)
     stmt = select(Fund).where(Fund.is_active.is_(True)).order_by(Fund.fund_code.asc())
     if fund_code:
         stmt = stmt.where(Fund.fund_code == fund_code)
