@@ -7,9 +7,12 @@
 <section class="detail-top">
   <div class="detail-title">{{ detail.fund_name }}</div>
   <div class="detail-sub">{{ detail.fund_code }}</div>
+  <form method="post" action="/fund/{{ detail.fund_code }}/watch" class="inline-action">
+    <button type="submit">加入或移出自选</button>
+  </form>
   <div class="detail-metrics">
     <div>
-      <div class="metric-label">当前估值</div>
+      <div class="metric-label">实际估值</div>
       <div class="metric-value {{ detail.current_estimate_tone }}">{{ detail.current_estimate_text }}</div>
     </div>
     <div>
@@ -25,6 +28,7 @@
     <span>行情时间 {{ detail.quote_time }}</span>
     <span>持仓报告日 {{ detail.trade_date }}</span>
     <span>最新真实净值日 {{ detail.latest_real_nav_date }}</span>
+    <span>{{ '今天实时' if detail.is_realtime else '回退缓存' }}</span>
   </div>
   <div class="status-message">{{ status_message }}</div>
 </section>

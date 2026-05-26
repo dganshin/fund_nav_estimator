@@ -1,8 +1,8 @@
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", sans-serif;
-  background: #111318;
-  color: #f2f4f8;
+  background: #f5f8fc;
+  color: #1f2a44;
 }
 
 a {
@@ -11,9 +11,9 @@ a {
 }
 
 .app-shell {
-  max-width: 820px;
+  max-width: 860px;
   margin: 0 auto;
-  padding: 18px 16px 40px;
+  padding: 20px 16px 36px;
 }
 
 .topbar {
@@ -21,62 +21,66 @@ a {
   justify-content: space-between;
   align-items: flex-end;
   gap: 16px;
-  margin-bottom: 16px;
+  margin-bottom: 14px;
 }
 
 .app-title {
   margin: 0;
-  font-size: 30px;
+  font-size: 34px;
   font-weight: 800;
+  color: #2c5ff6;
 }
 
 .app-subtitle {
-  color: #8993a5;
+  color: #6f7e99;
   margin-top: 6px;
   font-size: 14px;
 }
 
 .topnav {
   display: flex;
-  gap: 14px;
+  gap: 16px;
   flex-wrap: wrap;
 }
 
 .topnav a {
-  color: #8e97a8;
-  font-size: 14px;
+  color: #6f7e99;
+  font-size: 15px;
+  font-weight: 600;
 }
 
 .topnav a.active {
-  color: #f7f9fd;
+  color: #2c5ff6;
 }
 
 .status-panel,
 .panel,
-.advanced-box {
-  background: #1a1f28;
-  border: 1px solid #2b3340;
-  border-radius: 12px;
+.advanced-box,
+.detail-top {
+  background: #ffffff;
+  border: 1px solid #e2e8f3;
+  border-radius: 16px;
   padding: 14px 16px;
   margin-bottom: 14px;
+  box-shadow: 0 8px 24px rgba(73, 96, 140, 0.08);
 }
 
 .status-row {
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
-  color: #95a0b2;
+  color: #6e7e98;
   font-size: 13px;
 }
 
 .status-message {
   margin-top: 8px;
-  color: #d4dbe8;
+  color: #556581;
   font-size: 14px;
 }
 
 .status-message.ok {
-  color: #b8d4ff;
+  color: #2c5ff6;
 }
 
 .toolbar-inline {
@@ -85,7 +89,7 @@ a {
 
 .toolbar-form {
   display: grid;
-  grid-template-columns: 1.6fr 1fr 1fr 88px;
+  grid-template-columns: 0.9fr 1.3fr 1fr 1fr 112px;
   gap: 10px;
 }
 
@@ -101,10 +105,10 @@ select,
 textarea {
   width: 100%;
   box-sizing: border-box;
-  border: 1px solid #2b3340;
-  border-radius: 10px;
-  background: #151922;
-  color: #f2f4f8;
+  border: 1px solid #d8e2f0;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #22314d;
   padding: 11px 12px;
 }
 
@@ -114,28 +118,37 @@ textarea {
 }
 
 button {
-  border: 1px solid #3b4556;
-  border-radius: 10px;
-  background: #202733;
-  color: #f2f4f8;
+  border: none;
+  border-radius: 12px;
+  background: #2c5ff6;
+  color: #ffffff;
   padding: 11px 12px;
   cursor: pointer;
+  font-weight: 700;
+}
+
+.inline-action {
+  margin-top: 10px;
 }
 
 .list-head {
   display: grid;
   grid-template-columns: 1.8fr 1fr 1fr 64px;
   gap: 12px;
-  color: #7d889c;
+  color: #6f7e99;
   font-size: 13px;
   padding: 0 8px 8px;
+}
+
+.detail-grid-head {
+  grid-template-columns: 1.7fr 0.9fr 0.9fr 0.9fr 0.9fr;
 }
 
 .fund-list,
 .holding-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .fund-row,
@@ -144,10 +157,11 @@ button {
   grid-template-columns: 1.8fr 1fr 1fr 64px;
   gap: 12px;
   align-items: center;
-  background: #1a1f28;
-  border: 1px solid #2b3340;
-  border-radius: 10px;
-  padding: 12px 14px;
+  background: #ffffff;
+  border: 1px solid #e2e8f3;
+  border-radius: 16px;
+  padding: 14px 16px;
+  box-shadow: 0 8px 24px rgba(73, 96, 140, 0.08);
 }
 
 .holding-row {
@@ -157,9 +171,9 @@ button {
 .fund-name,
 .holding-name,
 .detail-title {
-  font-size: 17px;
-  font-weight: 700;
-  color: #f6f8fc;
+  font-size: 20px;
+  font-weight: 800;
+  color: #1f2a44;
 }
 
 .fund-sub,
@@ -167,7 +181,7 @@ button {
 .detail-sub,
 .panel-note {
   margin-top: 4px;
-  color: #8a94a6;
+  color: #7c8ca8;
   font-size: 13px;
 }
 
@@ -175,7 +189,7 @@ button {
 .fund-profit,
 .metric-value {
   text-align: right;
-  font-size: 23px;
+  font-size: 26px;
   font-weight: 800;
 }
 
@@ -188,15 +202,24 @@ button {
 }
 
 .up {
-  color: #ff5a5f;
+  color: #f05555;
 }
 
 .down {
-  color: #4cc97a;
+  color: #16a36c;
 }
 
 .muted {
-  color: #8892a4;
+  color: #93a0b8;
+}
+
+.stale,
+.delay {
+  color: #d48b20;
+}
+
+.live {
+  color: #2c5ff6;
 }
 
 .fund-badge,
@@ -212,31 +235,23 @@ button {
 }
 
 .badge-a {
-  background: #24489b;
-  color: #d9e5ff;
+  background: #dfe9ff;
+  color: #2c5ff6;
 }
 
 .badge-b {
-  background: #25354e;
-  color: #c3d7ff;
+  background: #e9effa;
+  color: #536b9d;
 }
 
 .badge-c {
-  background: #493d20;
-  color: #ffd78c;
+  background: #fff1d7;
+  color: #b27b00;
 }
 
 .badge-d {
-  background: #353c49;
-  color: #c0c7d3;
-}
-
-.detail-top {
-  background: #1a1f28;
-  border: 1px solid #2b3340;
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 14px;
+  background: #edf0f5;
+  color: #77839a;
 }
 
 .detail-metrics {
@@ -248,7 +263,7 @@ button {
 
 .metric-label,
 .advanced-label {
-  color: #8d98aa;
+  color: #6f7e99;
   font-size: 13px;
   margin-bottom: 4px;
 }
@@ -261,8 +276,17 @@ button {
 }
 
 .advanced-value {
-  font-size: 16px;
+  color: #243352;
+  font-size: 15px;
   font-weight: 700;
+}
+
+.empty-panel {
+  background: #ffffff;
+  border: 1px dashed #d7dfeb;
+  border-radius: 16px;
+  padding: 20px 16px;
+  color: #7b8aa5;
 }
 
 .form-grid {
@@ -272,7 +296,7 @@ button {
 }
 
 .compact-form {
-  grid-template-columns: 1fr 1fr 120px;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) 140px;
 }
 
 .table-wrap {
@@ -287,22 +311,9 @@ button {
 .plain-table th,
 .plain-table td {
   padding: 10px 8px;
-  border-bottom: 1px solid #2b3340;
+  border-bottom: 1px solid #edf1f7;
   text-align: left;
-  font-size: 14px;
-}
-
-.plain-table th {
-  color: #8d98aa;
-  font-weight: 600;
-}
-
-.empty-panel {
-  background: #1a1f28;
-  border: 1px solid #2b3340;
-  border-radius: 10px;
-  padding: 18px;
-  color: #a1adbf;
+  color: #33415e;
 }
 
 @media (max-width: 760px) {
@@ -311,26 +322,24 @@ button {
     align-items: flex-start;
   }
 
-  .toolbar-form,
+  .toolbar-form {
+    grid-template-columns: 1fr;
+  }
+
+  .list-head,
+  .fund-row {
+    grid-template-columns: 1.6fr 1fr 0.8fr 52px;
+  }
+
+  .detail-grid-head,
+  .holding-row {
+    grid-template-columns: 1.5fr 0.8fr 0.8fr 0.8fr 0.8fr;
+  }
+
   .detail-metrics,
   .form-grid,
-  .compact-form {
+  .compact-form,
+  .advanced-grid {
     grid-template-columns: 1fr;
-  }
-
-  .list-head {
-    display: none;
-  }
-
-  .fund-row,
-  .holding-row {
-    grid-template-columns: 1fr;
-  }
-
-  .fund-value,
-  .fund-profit,
-  .metric-value,
-  .align-right {
-    text-align: left;
   }
 }

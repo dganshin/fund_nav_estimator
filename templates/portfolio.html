@@ -28,6 +28,22 @@
 </section>
 
 <section class="panel">
+  <h2>我的自选</h2>
+  <form method="post" action="/portfolio/watchlist" class="form-grid">
+    <select name="fund_code" required>
+      {% for fund in funds %}
+      <option value="{{ fund.fund_code }}">{{ fund.fund_code }} | {{ fund.fund_name }}</option>
+      {% endfor %}
+    </select>
+    <select name="is_active">
+      <option value="1">加入自选</option>
+      <option value="0">移出自选</option>
+    </select>
+    <button type="submit">保存自选</button>
+  </form>
+</section>
+
+<section class="panel">
   <h2>当前持仓列表</h2>
   <div class="table-wrap">
     <table class="plain-table">
@@ -53,6 +69,30 @@
         </tr>
         {% else %}
         <tr><td colspan="6">当前还没有录入持仓。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>当前自选列表</h2>
+  <div class="table-wrap">
+    <table class="plain-table">
+      <thead>
+        <tr>
+          <th>基金代码</th>
+          <th>是否启用</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in watchlist_rows %}
+        <tr>
+          <td>{{ row.fund_code }}</td>
+          <td>{{ '是' if row.is_active else '否' }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="2">当前还没有录入自选。</td></tr>
         {% endfor %}
       </tbody>
     </table>

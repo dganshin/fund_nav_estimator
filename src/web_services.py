@@ -11,7 +11,7 @@ from .import_data import (
     import_holdings_from_rows,
     import_industry_allocations_from_rows,
 )
-from .models import Fund, FundAssetAllocation, FundIndustryAllocation, HoldingVersion, UserFundPosition
+from .models import Fund, FundAssetAllocation, FundIndustryAllocation, HoldingVersion, UserFundPosition, UserWatchlistFund
 
 
 def list_fund_options(session: Session) -> list[tuple[str, str]]:
@@ -117,6 +117,17 @@ def load_user_position_rows(session: Session) -> list[dict[str, object]]:
     ]
 
 
+def load_watchlist_rows(session: Session) -> list[dict[str, object]]:
+    rows = session.scalars(select(UserWatchlistFund).order_by(UserWatchlistFund.fund_code.asc())).all()
+    return [
+        {
+            "fund_code": row.fund_code,
+            "is_active": row.is_active,
+        }
+        for row in rows
+    ]
+
+
 def save_fund_rows(session: Session, rows: list[dict[str, object]]) -> int:
     return import_funds_from_rows(session, rows)
 
@@ -151,6 +162,37 @@ def save_user_position_rows(session: Session, rows: list[dict[str, object]]) -> 
         count += 1
     session.commit()
     return count
+
+
+def save_watchlist_rows(session: Session, rows: list[dict[str, object]]) -> int:
+    count = 0
+    for row in rows:
+        fund_code = str(row.get("fund_code") or "").strip()
+        if not fund_code:
+            continue
+        item = session.scalar(select(UserWatchlistFund).where(UserWatchlistFund.fund_code == fund_code))
+        if item is None:
+            item = UserWatchlistFund(fund_code=fund_code)
+            session.add(item)
+        item.is_active = bool(row.get("is_active", True))
+        count += 1
+    session.commit()
+    return count
+
+
+def toggle_watchlist_fund(session: Session, fund_code: str) -> bool:
+    normalized = str(fund_code).strip()
+    fund = session.get(Fund, normalized)
+    if fund is None:
+        return False
+    item = session.scalar(select(UserWatchlistFund).where(UserWatchlistFund.fund_code == normalized))
+    if item is None:
+        item = UserWatchlistFund(fund_code=normalized, is_active=True)
+        session.add(item)
+    else:
+        item.is_active = not item.is_active
+    session.commit()
+    return True
 
 
 def deactivate_fund(session: Session, fund_code: str) -> bool:

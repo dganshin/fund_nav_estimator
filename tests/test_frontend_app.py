@@ -12,7 +12,7 @@ from src.frontend_app import app, build_home_rows, load_live_estimate_bundle
 from src.init_db import init_db
 from src.db import get_session_factory
 from src.import_data import import_funds_from_rows
-from src.web_services import load_fund_rows
+from src.web_services import load_fund_rows, save_watchlist_rows
 from src.backfill import fetch_and_store_stock_quotes
 from tests.test_stage4 import make_mock_source, seed_fund_holdings_and_allocations
 
@@ -88,6 +88,31 @@ def test_frontend_homepage_lists_funds(tmp_path, monkeypatch):
     assert "基金实时估值" in response.text
     assert "测试真实基金" in response.text
     assert "2026-05-22" in response.text
+
+
+def test_frontend_homepage_can_filter_watchlist(tmp_path, monkeypatch):
+    session_factory = create_session_factory(tmp_path)
+    data_source = make_mock_source()
+    with session_factory() as session:
+        seed_fund_holdings_and_allocations(tmp_path, session)
+        save_watchlist_rows(session, [{"fund_code": "002207", "is_active": True}])
+        fetch_and_store_stock_quotes(
+            session,
+            data_source,
+            date.fromisoformat("2026-05-22"),
+            date.fromisoformat("2026-05-22"),
+            ["600988.SH", "000975.SZ"],
+        )
+
+    monkeypatch.setattr("src.frontend_app.get_cached_session_factory", lambda: session_factory)
+    monkeypatch.setattr("src.frontend_app.get_cached_data_source", lambda: EmptyLiveDataSource())
+
+    client = TestClient(app)
+    response = client.get("/?view=watchlist")
+
+    assert response.status_code == 200
+    assert "自选" in response.text
+    assert "测试真实基金" in response.text
 
 
 def test_build_home_rows_formats_profit_and_estimate(tmp_path):

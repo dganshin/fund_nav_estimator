@@ -31,6 +31,7 @@ class Fund(Base):
     industry_allocations: Mapped[list["FundIndustryAllocation"]] = relationship(back_populates="fund")
     effective_weight_versions: Mapped[list["EffectiveWeightVersion"]] = relationship(back_populates="fund")
     user_positions: Mapped[list["UserFundPosition"]] = relationship(back_populates="fund")
+    user_watchlist_entries: Mapped[list["UserWatchlistFund"]] = relationship(back_populates="fund")
     online_calibration_states: Mapped[list["OnlineCalibrationState"]] = relationship(back_populates="fund")
     calibrated_estimates: Mapped[list["CalibratedEstimate"]] = relationship(back_populates="fund")
     selected_estimates: Mapped[list["SelectedEstimate"]] = relationship(back_populates="fund")
@@ -255,6 +256,21 @@ class UserFundPosition(Base):
     )
 
     fund: Mapped["Fund"] = relationship(back_populates="user_positions")
+
+
+class UserWatchlistFund(Base):
+    __tablename__ = "user_watchlist_funds"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("fund_code", name="uq_user_watchlist_fund"),
+    )
+
+    fund: Mapped["Fund"] = relationship(back_populates="user_watchlist_entries")
 
 
 class OnlineCalibrationState(Base):

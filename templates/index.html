@@ -5,8 +5,9 @@
 {% block content %}
 <section class="status-panel">
   <div class="status-row">
-    <span>更新时间 {{ latest_time }}</span>
-    <span>今日估值日期 {{ estimate_date }}</span>
+    <span>本地今天 {{ today_label }}</span>
+    <span>行情时间 {{ latest_time }}</span>
+    <span>估值基于 {{ estimate_date }}</span>
     <span>数据来源 {{ data_mode }}</span>
     <span>仅供参考</span>
   </div>
@@ -15,6 +16,11 @@
 
 <section class="toolbar-inline">
   <form method="get" action="/" class="toolbar-form">
+    <select name="view">
+      {% for key, label in view_options.items() %}
+      <option value="{{ key }}" {% if view == key %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
     <input type="text" name="search" value="{{ search }}" placeholder="搜索基金名称或代码">
     <select name="sort">
       {% for key, label in sort_options.items() %}
@@ -34,7 +40,7 @@
 
 <section class="list-head">
   <div>基金</div>
-  <div class="align-right">当前估值</div>
+  <div class="align-right">实际估值</div>
   <div class="align-right">今日盈亏</div>
   <div class="align-center">置信</div>
 </section>
@@ -44,7 +50,12 @@
   <a class="fund-row" href="/fund/{{ row.fund_code }}">
     <div class="fund-main">
       <div class="fund-name">{{ row.fund_name }}</div>
-      <div class="fund-sub">{{ row.fund_code }} · {{ '持有' if row.is_holding else '观察' }} · {{ row.quote_time }}</div>
+      <div class="fund-sub">
+        {{ row.fund_code }}
+        {% if row.is_watchlist %} · 自选{% endif %}
+        {% if row.is_holding %} · 持有{% else %} · 观察{% endif %}
+        · {{ row.quote_time }}
+      </div>
     </div>
     <div class="fund-value {{ row.estimate_tone }}">{{ row.current_estimate_text }}</div>
     <div class="fund-profit {{ row.profit_tone }}">{{ row.estimated_today_profit_text }}</div>

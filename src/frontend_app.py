@@ -28,12 +28,15 @@ if __package__ in {None, ""}:
         load_holding_rows,
         load_industry_allocation_rows,
         load_user_position_rows,
+        load_watchlist_rows,
         deactivate_fund,
         save_asset_allocation_rows,
         save_fund_rows,
         save_holding_rows,
         save_industry_allocation_rows,
         save_user_position_rows,
+        save_watchlist_rows,
+        toggle_watchlist_fund,
     )
 else:
     from .data_sources import AKShareDataSource
@@ -49,11 +52,14 @@ else:
         load_holding_rows,
         load_industry_allocation_rows,
         load_user_position_rows,
+        load_watchlist_rows,
         save_asset_allocation_rows,
         save_fund_rows,
         save_holding_rows,
         save_industry_allocation_rows,
         save_user_position_rows,
+        save_watchlist_rows,
+        toggle_watchlist_fund,
     )
 
 
@@ -71,6 +77,11 @@ SORT_OPTIONS = {
     "profit_desc": "按盈亏排序",
     "confidence_desc": "按置信度排序",
     "name_asc": "按基金名称排序",
+}
+VIEW_OPTIONS = {
+    "watchlist": "自选",
+    "holding": "持有",
+    "all": "全部",
 }
 
 CONFIDENCE_RANK = {"A": 4, "B": 3, "C": 2, "D": 1, None: 0}
@@ -170,8 +181,10 @@ def load_live_estimate_bundle(fund_code: str | None = None, force_refresh: bool 
         target_fund_code = fund_code
         if target_fund_code is None:
             position_rows = [row for row in load_user_position_rows(session) if row.get("is_active")]
-            if position_rows:
-                active_codes = {str(row["fund_code"]) for row in position_rows}
+            watchlist_rows = [row for row in load_watchlist_rows(session) if row.get("is_active")]
+            active_codes = {str(row["fund_code"]) for row in position_rows}
+            active_codes.update(str(row["fund_code"]) for row in watchlist_rows)
+            if active_codes:
                 holding_rows = [row for row in load_holding_rows(session) if row["fund_code"] in active_codes]
             else:
                 holding_rows = load_holding_rows(session, None)
@@ -261,6 +274,7 @@ def build_home_rows(results: list) -> list[dict[str, object]]:
                 "latest_real_nav_date": item.latest_real_nav_date.isoformat() if item.latest_real_nav_date else "--",
                 "effective_method": item.effective_method,
                 "is_holding": item.holding_amount is not None,
+                "is_watchlist": False,
             }
         )
     return rows
@@ -309,6 +323,7 @@ def build_detail_context(result) -> dict[str, object]:
         "quote_time": result.quote_time.strftime("%H:%M:%S") if result.quote_time else "--",
         "trade_date": result.trade_date.isoformat(),
         "latest_real_nav_date": result.latest_real_nav_date.isoformat() if result.latest_real_nav_date else "--",
+        "is_realtime": result.quote_time.date() == date.today() if result.quote_time else False,
         "holdings": holdings,
         "advanced_rows": [
             ("公开权重合计", f"{result.covered_weight * 100:.2f}%"),
@@ -326,10 +341,28 @@ def index(
     search: str = Query("", description="搜索基金"),
     sort: str = Query("estimate_desc", description="排序"),
     refresh: str = Query("off", description="自动刷新"),
+    view: str = Query("watchlist", description="首页视图"),
     force: int = Query(0, description="强制刷新"),
 ):
     results, status_message, used_fallback = load_live_estimate_bundle(force_refresh=bool(force))
     rows = build_home_rows(results)
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        watchlist_codes = {
+            str(row["fund_code"])
+            for row in load_watchlist_rows(session)
+            if row.get("is_active")
+        }
+    for row in rows:
+        row["is_watchlist"] = row["fund_code"] in watchlist_codes
+    if view == "watchlist":
+        watchlist_rows = [row for row in rows if row["is_watchlist"]]
+        if watchlist_rows:
+            rows = watchlist_rows
+    elif view == "holding":
+        holding_rows = [row for row in rows if row["is_holding"]]
+        if holding_rows:
+            rows = holding_rows
     if search.strip():
         keyword = search.strip().lower()
         rows = [
@@ -357,10 +390,13 @@ def index(
             "sort": sort,
             "sort_options": SORT_OPTIONS,
             "refresh": refresh,
+            "view": view,
+            "view_options": VIEW_OPTIONS,
             "force": force,
             "latest_time": latest_time,
             "estimate_date": estimate_date,
             "data_mode": data_mode,
+            "today_label": date.today().isoformat(),
         },
     )
 
@@ -399,12 +435,14 @@ def portfolio(request: Request, saved: int = 0):
     with session_factory() as session:
         positions = load_user_position_rows(session)
         funds = load_fund_rows(session)
+        watchlist_rows = load_watchlist_rows(session)
     return templates.TemplateResponse(
         request,
         "portfolio.html",
         {
             "positions": positions,
             "funds": funds,
+            "watchlist_rows": watchlist_rows,
             "saved": saved,
         },
     )
@@ -435,6 +473,33 @@ def save_portfolio(
             ],
         )
     return RedirectResponse(url="/portfolio?saved=1", status_code=303)
+
+
+@app.post("/portfolio/watchlist")
+def save_watchlist(
+    fund_code: str = Form(...),
+    is_active: str = Form("1"),
+):
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        save_watchlist_rows(
+            session,
+            [
+                {
+                    "fund_code": fund_code,
+                    "is_active": is_active == "1",
+                }
+            ],
+        )
+    return RedirectResponse(url="/portfolio?saved=1", status_code=303)
+
+
+@app.post("/fund/{fund_code}/watch")
+def toggle_watch(fund_code: str):
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        toggle_watchlist_fund(session, fund_code)
+    return RedirectResponse(url=f"/fund/{fund_code}", status_code=303)
 
 
 @app.get("/manage")
