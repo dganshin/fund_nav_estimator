@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from time import monotonic
 
-from fastapi import FastAPI, Form, Query, Request
+from fastapi import BackgroundTasks, FastAPI, Form, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -27,8 +27,9 @@ if __package__ in {None, ""}:
     from src.db import get_session_factory
     from src.estimator import compute_live_fund_estimates
     from src.init_db import init_db
-    from src.models import DailyQuote, EffectiveWeightVersion, Fund, HoldingVersion, UserFundPosition, UserWatchlistFund
+    from src.models import DailyQuote, EffectiveWeightVersion, Fund, HoldingVersion, UserFundPosition, UserWatchlistFund, TaskRun, CalibrationResidual
     from src.onboarding import ensure_fund_full_onboarded
+    from src.tasks import async_onboard_new_fund, sync_daily_all_funds
     from src.web.actions import run_effective_weight_action
     from src.web_services import (
         deactivate_fund,
@@ -55,8 +56,9 @@ else:
     from .db import get_session_factory
     from .estimator import compute_live_fund_estimates
     from .init_db import init_db
-    from .models import DailyQuote, EffectiveWeightVersion, Fund, HoldingVersion, UserFundPosition, UserWatchlistFund
+    from .models import DailyQuote, EffectiveWeightVersion, Fund, HoldingVersion, UserFundPosition, UserWatchlistFund, TaskRun, CalibrationResidual
     from .onboarding import ensure_fund_full_onboarded
+    from .tasks import async_onboard_new_fund, sync_daily_all_funds
     from .web.actions import run_effective_weight_action
     from .web_services import (
         deactivate_fund,
@@ -246,7 +248,32 @@ def load_live_estimate_bundle(fund_code: str | None = None, force_refresh: bool 
     return payload
 
 
-def build_home_rows(results: list) -> list[dict]:
+def get_compare_residuals(session, fund_codes: list[str]) -> dict:
+    if not fund_codes:
+        return {}
+    from sqlalchemy import func
+    
+    subq = (
+        session.query(
+            CalibrationResidual.fund_code,
+            func.max(CalibrationResidual.trade_date).label("max_date")
+        )
+        .filter(CalibrationResidual.fund_code.in_(fund_codes))
+        .group_by(CalibrationResidual.fund_code)
+        .subquery()
+    )
+    residuals = (
+        session.query(CalibrationResidual)
+        .join(subq, (CalibrationResidual.fund_code == subq.c.fund_code) & (CalibrationResidual.trade_date == subq.c.max_date))
+        .all()
+    )
+    return {r.fund_code: r for r in residuals}
+
+def build_home_rows(results: list, residuals_map: dict | None = None) -> list[dict]:
+    residuals_map = residuals_map or {}
+    now = datetime.now()
+    is_market_open = now.time() >= time(9, 30)
+    today_date = now.date()
     rows = []
     for item in results:
         if item.fund_code in ("000001", "000002") or "示例" in (item.fund_name or ""):
@@ -259,6 +286,26 @@ def build_home_rows(results: list) -> list[dict]:
         elif item.best_status == "missing_quotes":
             current_estimate_text = "行情缺失"
             status_text = "不可估"
+        res = residuals_map.get(item.fund_code)
+        compare_actual_text = None
+        compare_predicted_text = None
+        compare_actual_tone = "muted"
+        compare_predicted_tone = "muted"
+        show_compare = False
+        
+        if res:
+            if is_market_open:
+                if res.trade_date == today_date:
+                    show_compare = True
+            else:
+                show_compare = True
+                
+        if show_compare:
+            compare_actual_text = format_percent(res.actual_return)
+            compare_predicted_text = format_percent(res.calibrated_estimate)
+            compare_actual_tone = get_tone(res.actual_return)
+            compare_predicted_tone = get_tone(res.calibrated_estimate)
+
         rows.append({
             "fund_code": item.fund_code,
             "fund_name": item.fund_name,
@@ -274,9 +321,15 @@ def build_home_rows(results: list) -> list[dict]:
             "error_band_label": status_text,
             "confidence_text": item.confidence_text,
             "best_status": item.best_status,
-            "quote_time": item.quote_time.strftime("%H:%M:%S") if item.quote_time else "--",
+            "quote_time": item.quote_time.strftime("%H:%M:%S") if (item.quote_time and item.quote_time.date() == date.today()) else (item.quote_time.strftime("%m-%d %H:%M") if item.quote_time else "--"),
+            "raw_quote_time": item.quote_time,
             "is_holding": item.holding_amount is not None,
             "is_watchlist": False,
+            "show_compare": show_compare,
+            "compare_actual_text": compare_actual_text,
+            "compare_predicted_text": compare_predicted_text,
+            "compare_actual_tone": compare_actual_tone,
+            "compare_predicted_tone": compare_predicted_tone,
         })
     return rows
 
@@ -303,9 +356,9 @@ def build_detail_context(result, is_watchlist: bool = False, holding_report_date
         "estimated_today_profit_text": format_amount(result.estimated_today_profit),
         "estimated_today_profit_tone": get_tone(result.estimated_today_profit),
         "confidence_level": result.confidence_level or "D",
-        "error_band_label": result.error_band_label,
+        "error_band_label": result.error_band_label or "样本不足",
         "confidence_text": result.confidence_text,
-        "quote_time": result.quote_time.strftime("%H:%M:%S") if result.quote_time else "--",
+        "quote_time": result.quote_time.strftime("%H:%M:%S") if (result.quote_time and result.quote_time.date() == date.today()) else (result.quote_time.strftime("%m-%d %H:%M") if result.quote_time else "--"),
         "trade_date": result.trade_date.isoformat(),
         "holding_report_date": holding_report_date.isoformat() if holding_report_date else "--",
         "latest_real_nav_date": result.latest_real_nav_date.isoformat() if result.latest_real_nav_date else "--",
@@ -345,11 +398,31 @@ def index(
     force: int = Query(0),
 ):
     results, status_message, used_fallback = load_live_estimate_bundle(force_refresh=bool(force))
-    rows = build_home_rows(results)
+
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        fund_codes = [r.fund_code for r in results]
+        residuals_map = get_compare_residuals(session, fund_codes)
+    
+    rows = build_home_rows(results, residuals_map)
 
     session_factory = get_cached_session_factory()
     with session_factory() as session:
         watchlist_codes = {str(r["fund_code"]) for r in load_watchlist_rows(session) if r.get("is_active")}
+        
+        # 获取所有运行中或等待中的任务
+        tasks_query = session.execute(
+            select(TaskRun).where(TaskRun.status.in_(["pending", "running"]))
+        ).scalars().all()
+        active_tasks = [
+            {
+                "task_type": t.task_type,
+                "fund_code": t.fund_code,
+                "status": t.status,
+                "progress_text": t.progress_text,
+            }
+            for t in tasks_query
+        ]
 
     for row in rows:
         row["is_watchlist"] = row["fund_code"] in watchlist_codes
@@ -359,21 +432,27 @@ def index(
         rows = [r for r in rows if kw in r["fund_name"].lower() or kw in r["fund_code"].lower()]
 
     rows = sort_home_rows(rows, sort)
-    latest_time = max((r["quote_time"] for r in rows), default="--")
+    raw_times = [r.pop("raw_quote_time") for r in rows if "raw_quote_time" in r]
+    if raw_times:
+        latest_dt = max(raw_times)
+        latest_time = latest_dt.strftime("%H:%M:%S") if latest_dt.date() == date.today() else latest_dt.strftime("%m-%d %H:%M")
+    else:
+        latest_time = "--"
     data_mode = "最近收盘缓存" if used_fallback else "实时行情"
     quote_dates = [res.quote_time.date().isoformat() for res in results if res.quote_time]
     estimate_date = max(quote_dates) if quote_dates else "--"
 
     return templates.TemplateResponse(request, "index.html", {
         "rows": rows,
-        "status_message": status_message,
         "search": search,
         "sort": sort,
         "sort_options": SORT_OPTIONS,
         "refresh": refresh,
+        "status_message": status_message,
         "latest_time": latest_time,
-        "estimate_date": estimate_date,
         "data_mode": data_mode,
+        "estimate_date": estimate_date,
+        "active_tasks": active_tasks,
         "today_label": date.today().isoformat(),
     })
 
@@ -389,7 +468,12 @@ def api_live_estimates(
         logger.error("api_live_estimates error: %s", exc)
         return JSONResponse({"rows": [], "status_message": "行情获取失败", "latest_time": "--"})
 
-    rows = build_home_rows(results)
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        fund_codes = [r.fund_code for r in results]
+        residuals_map = get_compare_residuals(session, fund_codes)
+
+    rows = build_home_rows(results, residuals_map)
     session_factory = get_cached_session_factory()
     with session_factory() as session:
         watchlist_codes = {str(r["fund_code"]) for r in load_watchlist_rows(session) if r.get("is_active")}
@@ -401,7 +485,12 @@ def api_live_estimates(
         rows = [r for r in rows if kw in r["fund_name"].lower() or kw in r["fund_code"].lower()]
 
     rows = sort_home_rows(rows, sort)
-    latest_time = max((r["quote_time"] for r in rows), default="--")
+    raw_times = [r.pop("raw_quote_time") for r in rows if "raw_quote_time" in r]
+    if raw_times:
+        latest_dt = max(raw_times)
+        latest_time = latest_dt.strftime("%H:%M:%S") if latest_dt.date() == date.today() else latest_dt.strftime("%m-%d %H:%M")
+    else:
+        latest_time = "--"
     data_mode = "最近收盘缓存" if used_fallback else "实时行情"
 
     return JSONResponse({
@@ -773,8 +862,8 @@ def api_search_fund(code: str = Query(""), fund_code: str = Query("")):
 
 
 @app.post("/api/quick-add")
-async def api_quick_add(request: Request):
-    """快速加入自选：只需 fund_code，自动拉取基金名称。"""
+async def api_quick_add(request: Request, background_tasks: BackgroundTasks):
+    """快速加入自选：只需 fund_code，后台进行完整建档。"""
     body = await request.json()
     fund_code = str(body.get("fund_code", "")).strip()
     if not fund_code:
@@ -783,20 +872,38 @@ async def api_quick_add(request: Request):
     session_factory = get_cached_session_factory()
     data_source = get_cached_data_source()
     with session_factory() as session:
-        result = ensure_fund_full_onboarded(session, fund_code, data_source, add_watchlist=True)
+        # 先保存自选，让前端立刻可见
+        save_watchlist_rows(session, [{"fund_code": fund_code, "is_active": True}])
+        
+        # 获取基础信息
+        profile = ensure_fund_by_code(session, fund_code, data_source)
+        
+        # 创建 TaskRun 记录
+        task = TaskRun(
+            task_type="onboard_fund",
+            fund_code=fund_code,
+            status="pending",
+            progress_text="等待建档任务启动...",
+        )
+        session.add(task)
+        session.commit()
+        task_id = task.id
+
+    # 启动后台任务
+    background_tasks.add_task(async_onboard_new_fund, fund_code, task_id)
 
     return JSONResponse({
         "ok": True,
-        "fund_code": result["fund_code"],
-        "fund_name": result["fund_name"],
-        "created": result.get("created", False),
-        "status": result.get("status"),
+        "fund_code": profile["fund_code"],
+        "fund_name": profile["fund_name"],
+        "created": profile.get("created", False),
+        "status": "onboarding",
     })
 
 
 @app.post("/api/quick-buy")
-async def api_quick_buy(request: Request):
-    """快速买入：fund_code + holding_amount，自动创建基金和持仓。"""
+async def api_quick_buy(request: Request, background_tasks: BackgroundTasks):
+    """快速买入：fund_code + holding_amount，后台进行建档。"""
     body = await request.json()
     fund_code = str(body.get("fund_code", "")).strip()
     holding_amount_raw = body.get("holding_amount")
@@ -811,36 +918,136 @@ async def api_quick_buy(request: Request):
     session_factory = get_cached_session_factory()
     data_source = get_cached_data_source()
     with session_factory() as session:
-        fund_info = ensure_fund_full_onboarded(
-            session, fund_code, data_source, holding_amount=holding_amount, add_watchlist=True
-        )
+        # 先保存持仓
+        profile = ensure_fund_by_code(session, fund_code, data_source)
+        save_user_position_rows(session, [{
+            "fund_code": fund_code,
+            "holding_amount": holding_amount,
+            "holding_share": (holding_amount / profile.get("latest_unit_nav")) if profile.get("latest_unit_nav") else None,
+            "platform": "支付宝/蚂蚁财富",
+            "is_active": True,
+        }])
+        save_watchlist_rows(session, [{"fund_code": fund_code, "is_active": True}])
+        
         pos = session.scalar(select(UserFundPosition).where(UserFundPosition.fund_code == fund_code))
+
+        # 创建 TaskRun 记录
+        task = TaskRun(
+            task_type="onboard_fund",
+            fund_code=fund_code,
+            status="pending",
+            progress_text="等待建档任务启动...",
+        )
+        session.add(task)
+        session.commit()
+        task_id = task.id
+        
+        estimated_share = pos.holding_share if pos else None
+
+    background_tasks.add_task(async_onboard_new_fund, fund_code, task_id)
 
     return JSONResponse({
         "ok": True,
-        "fund_code": fund_info["fund_code"],
-        "fund_name": fund_info["fund_name"],
+        "fund_code": profile["fund_code"],
+        "fund_name": profile["fund_name"],
         "holding_amount": holding_amount,
-        "estimated_share": None if pos is None else pos.holding_share,
-        "status": fund_info.get("status"),
+        "estimated_share": estimated_share,
+        "status": "onboarding",
     })
 
 
 @app.post("/api/fund/{fund_code}/calibrate")
-def api_fund_calibrate(fund_code: str):
+async def api_fund_calibrate(fund_code: str, request: Request):
+    """
+    增量校准或强制重跑全部校准。
+    body: {"force": true/false}
+    """
+    body = await request.json() if request.method == "POST" else {}
+    force = body.get("force", False)
+    
     session_factory = get_cached_session_factory()
     with session_factory() as session:
-        result = run_online_calibration(session, fund_code, force=True)
-    if result is None:
-        return JSONResponse({"ok": False, "error": "暂无可校准数据"})
+        if force:
+            from .calibration import force_replay_calibration
+            count = force_replay_calibration(session, fund_code)
+        else:
+            from .calibration import run_incremental_calibration
+            count = run_incremental_calibration(session, fund_code)
+            
     return JSONResponse({
         "ok": True,
         "fund_code": fund_code,
-        "calibration_date": result.calibration_date.isoformat(),
-        "is_updated": result.is_updated,
-        "residual": result.residual,
-        "scale_factor_after": result.scale_factor_after,
+        "calibrated_count": count,
     })
+
+@app.post("/api/position/set-amount")
+async def api_position_set_amount(request: Request):
+    body = await request.json()
+    fund_code = body.get("fund_code", "").strip()
+    amount = float(body.get("amount", 0))
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        save_user_position_rows(session, [{"fund_code": fund_code, "holding_amount": amount, "is_active": True}])
+    return JSONResponse({"ok": True})
+
+@app.post("/api/position/buy")
+async def api_position_buy(request: Request):
+    body = await request.json()
+    fund_code = body.get("fund_code", "").strip()
+    amount = float(body.get("amount", 0))
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        pos = session.scalar(select(UserFundPosition).where(UserFundPosition.fund_code == fund_code))
+        current = pos.holding_amount if pos else 0.0
+        save_user_position_rows(session, [{"fund_code": fund_code, "holding_amount": current + amount, "is_active": True}])
+    return JSONResponse({"ok": True})
+
+@app.post("/api/position/sell")
+async def api_position_sell(request: Request):
+    body = await request.json()
+    fund_code = body.get("fund_code", "").strip()
+    amount = float(body.get("amount", 0))
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        pos = session.scalar(select(UserFundPosition).where(UserFundPosition.fund_code == fund_code))
+        current = pos.holding_amount if pos else 0.0
+        new_amount = max(0.0, current - amount)
+        save_user_position_rows(session, [{"fund_code": fund_code, "holding_amount": new_amount, "is_active": True}])
+    return JSONResponse({"ok": True})
+
+@app.post("/api/position/clear")
+async def api_position_clear(request: Request):
+    body = await request.json()
+    fund_code = body.get("fund_code", "").strip()
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        save_user_position_rows(session, [{"fund_code": fund_code, "holding_amount": 0.0, "is_active": False}])
+    return JSONResponse({"ok": True})
+
+@app.post("/api/position-events/import-text")
+async def api_position_import_text(request: Request):
+    return JSONResponse({"ok": False, "error": "待解析"})
+
+@app.post("/api/position-events/import-image")
+async def api_position_import_image(request: Request):
+    return JSONResponse({"ok": False, "error": "not_implemented"})
+
+@app.post("/api/sync-daily")
+async def api_sync_daily(background_tasks: BackgroundTasks):
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        task = TaskRun(
+            task_type="sync_daily",
+            fund_code="ALL",
+            status="pending",
+            progress_text="等待同步任务启动...",
+        )
+        session.add(task)
+        session.commit()
+        task_id = task.id
+    
+    background_tasks.add_task(sync_daily_all_funds, task_id)
+    return JSONResponse({"ok": True, "task_id": task_id})
 
 
 # ── Calibration Routes ─────────────────────────────────────────────────────

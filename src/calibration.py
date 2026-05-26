@@ -433,6 +433,8 @@ def run_online_calibration(
             state.confidence_level = "D"
         state.warning_json = f'["{model_mode}"]'
 
+    params_fitted_until = training[0].trade_date if training else None
+
     # 8. 写入 calibration_residuals（幂等 upsert）
     existing_residual = session.scalar(
         select(CalibrationResidual).where(
@@ -455,13 +457,17 @@ def run_online_calibration(
             effective_estimate=effective_estimate,
             residual=residual,
             abs_residual=abs_residual,
-            scale_factor_used=scale_for_row,
+            scale_used_before_update=scale_before,
             beta_known=beta_known,
             beta_unknown=beta_unknown,
             alpha=alpha,
             sample_count=sample_count,
+            params_fitted_until=params_fitted_until,
+            model_version=model_mode,
+            calibration_mode="online_scale",
+            is_out_of_sample=True,
             observed_scale=observed_scale,
-            updated_scale_factor=new_scale if is_updated else None,
+            scale_after_update=new_scale if is_updated else None,
             is_used_for_update=is_updated,
             skip_reason=skip_reason,
         )
@@ -476,13 +482,17 @@ def run_online_calibration(
         existing_residual.effective_estimate = effective_estimate
         existing_residual.residual = residual
         existing_residual.abs_residual = abs_residual
-        existing_residual.scale_factor_used = scale_for_row
+        existing_residual.scale_used_before_update = scale_before
         existing_residual.beta_known = beta_known
         existing_residual.beta_unknown = beta_unknown
         existing_residual.alpha = alpha
         existing_residual.sample_count = sample_count
+        existing_residual.params_fitted_until = params_fitted_until
+        existing_residual.model_version = model_mode
+        existing_residual.calibration_mode = "online_scale"
+        existing_residual.is_out_of_sample = True
         existing_residual.observed_scale = observed_scale
-        existing_residual.updated_scale_factor = new_scale if is_updated else None
+        existing_residual.scale_after_update = new_scale if is_updated else None
         existing_residual.is_used_for_update = is_updated
         existing_residual.skip_reason = skip_reason
 
@@ -542,13 +552,16 @@ def load_calibration_residuals(
             "effective_estimate": f"{r.effective_estimate:+.4%}",
             "residual": f"{r.residual:+.4%}",
             "abs_residual": f"{r.abs_residual:.4%}",
-            "scale_used": f"{r.scale_factor_used:.4f}",
+            "scale_used": f"{r.scale_used_before_update:.4f}",
             "beta_known": f"{r.beta_known:.4f}",
             "beta_unknown": f"{r.beta_unknown:.4f}",
             "alpha": f"{r.alpha:+.4%}",
             "sample_count": r.sample_count,
+            "params_fitted_until": r.params_fitted_until.isoformat() if r.params_fitted_until else "--",
+            "model_version": r.model_version,
+            "is_out_of_sample": "Y" if r.is_out_of_sample else "N",
             "observed_scale": f"{r.observed_scale:.4f}" if r.observed_scale is not None else "--",
-            "updated_scale": f"{r.updated_scale_factor:.4f}" if r.updated_scale_factor is not None else "--",
+            "updated_scale": f"{r.scale_after_update:.4f}" if r.scale_after_update is not None else "--",
             "is_used": "Y" if r.is_used_for_update else "N",
             "skip_reason": r.skip_reason or "",
         }
@@ -672,12 +685,78 @@ def ensure_fund_by_code(
     session.commit()
 
     return {
-        "fund_code": fund_code,
-        "fund_name": fund_name,
-        "fund_type": fund_type,
-        "market": market,
-        "is_active": True,
+        "fund_code": new_fund.fund_code,
+        "fund_name": new_fund.fund_name,
+        "fund_type": new_fund.fund_type,
+        "market": new_fund.market,
+        "is_active": new_fund.is_active,
         "created": True,
         "latest_unit_nav": latest_unit_nav,
         "latest_nav_date": latest_nav_date.isoformat() if latest_nav_date else None,
     }
+
+
+def run_incremental_calibration(session: Session, fund_code: str) -> int:
+    """找出尚未生成 residual 的 actual_return 日期并逐日进行 run_online_calibration。"""
+    from .models import ActualReturn, CalibrationResidual, HoldingVersion
+
+    # 先找到 active holding_version
+    stmt = select(HoldingVersion).where(HoldingVersion.fund_code == fund_code, HoldingVersion.is_active.is_(True))
+    holding_version = session.scalar(stmt)
+    if not holding_version:
+        return 0
+
+    # 找到所有 actual_return
+    stmt = select(ActualReturn.trade_date).where(ActualReturn.fund_code == fund_code).order_by(ActualReturn.trade_date.asc())
+    all_dates = session.scalars(stmt).all()
+
+    # 找到已有的 residual
+    stmt = select(CalibrationResidual.trade_date).where(
+        CalibrationResidual.fund_code == fund_code,
+        CalibrationResidual.holding_version_id == holding_version.id
+    )
+    existing_dates = set(session.scalars(stmt).all())
+
+    calibrated_count = 0
+    for d in all_dates:
+        if d >= holding_version.report_date and d not in existing_dates:
+            run_online_calibration(session, fund_code, calibration_date=d, force=False)
+            calibrated_count += 1
+            session.commit()
+    return calibrated_count
+
+
+def force_replay_calibration(session: Session, fund_code: str) -> int:
+    """清理当前 holding_version 下的全部 residual，重置状态并从头 replay 一遍。"""
+    from .models import ActualReturn, CalibrationResidual, HoldingVersion, OnlineCalibrationState
+    from sqlalchemy import delete
+
+    # 找到 active holding_version
+    stmt = select(HoldingVersion).where(HoldingVersion.fund_code == fund_code, HoldingVersion.is_active.is_(True))
+    holding_version = session.scalar(stmt)
+    if not holding_version:
+        return 0
+
+    # 1. 清理
+    session.execute(delete(CalibrationResidual).where(
+        CalibrationResidual.fund_code == fund_code,
+        CalibrationResidual.holding_version_id == holding_version.id
+    ))
+    session.execute(delete(OnlineCalibrationState).where(
+        OnlineCalibrationState.fund_code == fund_code,
+        OnlineCalibrationState.holding_version_id == holding_version.id
+    ))
+    session.commit()
+
+    # 2. 找到所有 actual_return
+    stmt = select(ActualReturn.trade_date).where(ActualReturn.fund_code == fund_code).order_by(ActualReturn.trade_date.asc())
+    all_dates = session.scalars(stmt).all()
+
+    # 3. 按 trade_date 升序逐日走 walk-forward 流程
+    calibrated_count = 0
+    for d in all_dates:
+        if d >= holding_version.report_date:
+            run_online_calibration(session, fund_code, calibration_date=d, force=True)
+            calibrated_count += 1
+            session.commit()
+    return calibrated_count

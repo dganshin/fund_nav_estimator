@@ -91,6 +91,61 @@ class AKShareDataSource:
             )
         return sorted(records, key=lambda item: item.trade_date)
 
+    def fetch_latest_fund_navs_bulk(self) -> list[FundNavRecord]:
+        """批量拉取当天和昨天所有的场外、场内基金最新净值。"""
+        records: list[FundNavRecord] = []
+        df_list = []
+        try:
+            open_df = self.ak.fund_open_fund_daily_em()
+            if open_df is not None and not open_df.empty:
+                df_list.append(open_df)
+        except Exception as exc:
+            self.last_warnings.append(f"ak.fund_open_fund_daily_em error: {exc}")
+            
+        try:
+            etf_df = self.ak.fund_etf_fund_daily_em()
+            if etf_df is not None and not etf_df.empty:
+                df_list.append(etf_df)
+        except Exception as exc:
+            self.last_warnings.append(f"ak.fund_etf_fund_daily_em error: {exc}")
+            
+        for df in df_list:
+            date1_col, date2_col = None, None
+            for col in df.columns:
+                if str(col).endswith("-单位净值"):
+                    if date1_col is None:
+                        date1_col = col
+                    elif date2_col is None:
+                        date2_col = col
+                        
+            for d_col in filter(None, [date1_col, date2_col]):
+                d_str = d_col.split("-单位净值")[0]
+                try:
+                    d = date.fromisoformat(d_str)
+                except Exception:
+                    continue
+                acc_col = f"{d_str}-累计净值"
+                for _, row in df.iterrows():
+                    code = str(row["基金代码"]).zfill(6)
+                    val = row.get(d_col)
+                    if pd.notna(val) and val != "":
+                        try:
+                            v = float(val)
+                            acc_val = row.get(acc_col) if acc_col in df.columns else None
+                            acc_v = float(acc_val) if pd.notna(acc_val) and acc_val != "" else None
+                            records.append(
+                                FundNavRecord(
+                                    trade_date=d,
+                                    fund_code=code,
+                                    unit_nav=v,
+                                    accumulated_nav=acc_v,
+                                    source="akshare:daily_em_bulk",
+                                )
+                            )
+                        except ValueError:
+                            pass
+        return records
+
     def fetch_stock_daily_quotes(
         self,
         asset_codes: list[str],
@@ -188,7 +243,15 @@ class AKShareDataSource:
     ) -> list[LiveStockQuoteRecord]:
         if not asset_codes:
             return []
-        symbols = [to_prefixed_symbol(asset_code) for asset_code in asset_codes]
+        symbols = []
+        for asset_code in asset_codes:
+            try:
+                symbols.append(to_prefixed_symbol(asset_code))
+            except ValueError as e:
+                self.last_warnings.append(f"Warning: skip tencent fetch for unsupported code: {asset_code}")
+                continue
+        if not symbols:
+            return []
         records: list[LiveStockQuoteRecord] = []
         for start in range(0, len(symbols), 50):
             chunk = symbols[start:start + 50]

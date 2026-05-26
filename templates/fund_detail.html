@@ -13,14 +13,23 @@
       <div class="detail-title">{{ detail.fund_name }}</div>
       <div class="detail-sub">{{ detail.fund_code }}</div>
     </div>
-    <div style="display:flex; gap:8px; flex-wrap:wrap;">
-      <form method="post" action="/fund/{{ detail.fund_code }}/watch">
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      {% if detail.has_position %}
+        <span style="font-size:13px; color:#1e40af; background:#eff6ff; padding:2px 8px; border-radius:12px; font-weight:600;">
+          已持有: {{ detail.holding_amount }} 元
+        </span>
+        <button type="button" class="btn-ghost btn" onclick="handlePosition('buy')">加仓</button>
+        <button type="button" class="btn-ghost btn" onclick="handlePosition('sell')">减仓</button>
+        <button type="button" class="btn-ghost btn" onclick="handlePosition('set')">修改</button>
+        <button type="button" class="btn-ghost btn" style="color:#ef4444;" onclick="handlePosition('clear')">清仓</button>
+      {% else %}
+        <button type="button" class="btn-primary btn" onclick="handlePosition('set')">添加持仓</button>
+      {% endif %}
+      
+      <form method="post" action="/fund/{{ detail.fund_code }}/watch" style="margin:0;">
         <button type="submit" class="btn-ghost btn">{% if detail.is_watchlist %}移出自选{% else %}加入自选{% endif %}</button>
       </form>
-      <form method="post" action="/manage/calibration/run">
-        <input type="hidden" name="fund_code" value="{{ detail.fund_code }}">
-        <button type="submit" class="btn-secondary btn" title="使用最新已公布真实净值更新校准参数">手动校准</button>
-      </form>
+      <button type="button" class="btn-secondary btn" title="强制清空并重建所有因果校准残差" onclick="forceReplayCalibration()">强制重演校准</button>
     </div>
   </div>
 
@@ -124,7 +133,8 @@
           <tr>
             <th>日期</th><th>实际涨跌</th><th>已知贡献</th><th>未知代理</th>
             <th>基础估值</th><th>修正估值</th><th>残差</th><th>|残差|</th>
-            <th>beta1</th><th>beta2</th><th>alpha</th><th>样本</th><th>更新</th><th>跳过原因</th>
+            <th>beta1</th><th>beta2</th><th>alpha</th><th>样本</th>
+            <th>训练截止日</th><th>样本外</th><th>更新</th><th>跳过原因</th>
           </tr>
         </thead>
         <tbody id="residual-tbody"></tbody>
@@ -176,11 +186,11 @@
               r.trade_date, r.actual_return, r.known_estimate, r.unknown_estimate,
               r.base_estimate, r.calibrated_estimate, r.residual, r.abs_residual,
               r.beta_known, r.beta_unknown, r.alpha, r.sample_count,
-              r.is_used, r.skip_reason || ''
+              r.params_fitted_until, r.is_out_of_sample, r.is_used, r.skip_reason || ''
             ].map(function(v, i) {
               var cls = '';
               if (i === 6) { cls = String(v).startsWith('+') ? ' class="up"' : (String(v).startsWith('-') ? ' class="down"' : ''); }
-              if (i === 12) { cls = v === 'Y' ? ' style="color:#16a34a"' : ' style="color:#94a3b8"'; }
+              if (i === 14) { cls = v === 'Y' ? ' style="color:#16a34a"' : ' style="color:#94a3b8"'; }
               return '<td' + cls + '>' + v + '</td>';
             }).join('');
             tbody.appendChild(tr);
@@ -193,6 +203,60 @@
     }
   });
 })();
+
+window.forceReplayCalibration = function() {
+  if (!confirm("确定要清理当前版本的所有残差，并进行因果 Walk-Forward 重演校准吗？")) return;
+  fetch('/api/fund/' + {{ detail.fund_code | tojson }} + '/calibrate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ force: true })
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      alert("强制校准重演完成，共校准 " + d.calibrated_count + " 天。");
+      window.location.reload();
+    } else {
+      alert("校准失败：" + d.error);
+    }
+  });
+};
+
+window.handlePosition = function(action) {
+  var fundCode = {{ detail.fund_code | tojson }};
+  var endpoint = '';
+  var amount = 0;
+  
+  if (action === 'clear') {
+    if (!confirm("确定要清仓吗？")) return;
+    endpoint = '/api/position/clear';
+  } else {
+    var promptMsg = action === 'buy' ? "输入加仓金额 (元)：" : 
+                    action === 'sell' ? "输入减仓金额 (元)：" : "输入当前持仓总金额 (元)：";
+    var val = prompt(promptMsg);
+    if (val === null) return;
+    amount = parseFloat(val);
+    if (isNaN(amount) || amount <= 0) {
+      alert("请输入有效的正数金额");
+      return;
+    }
+    endpoint = '/api/position/' + (action === 'buy' ? 'buy' : action === 'sell' ? 'sell' : 'set-amount');
+  }
+  
+  fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fund_code: fundCode, amount: amount })
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      window.location.reload();
+    } else {
+      alert("操作失败：" + d.error);
+    }
+  });
+};
 </script>
 
 {% else %}

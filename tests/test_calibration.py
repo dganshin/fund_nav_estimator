@@ -384,9 +384,12 @@ def test_error_band_uses_recent_residuals(tmp_path):
                 effective_estimate=0.01,
                 residual=0.001 * i,
                 abs_residual=0.001 * i,
-                scale_factor_used=1.0,
+                scale_used_before_update=1.0,
                 is_used_for_update=True,
                 skip_reason="",
+                params_fitted_until=date(2026, 4, 30),
+                model_version=1,
+                is_out_of_sample=True,
             ))
         session.commit()
         band = calculate_error_band(session, "002207", hv.id)

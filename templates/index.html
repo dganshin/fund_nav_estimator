@@ -12,6 +12,27 @@
   <span id="status-message">{{ status_message }}</span>
 </div>
 
+{% if active_tasks %}
+<div class="panel" style="margin-bottom: 12px; background: #eff6ff; border-color: #bfdbfe; padding: 12px;">
+  <div style="font-size:14px; font-weight:600; color:#1e40af; margin-bottom:4px;">后台任务进行中</div>
+  {% for t in active_tasks %}
+  <div style="font-size:13px; color:#1e3a8a; display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
+    <span style="font-weight:500;">
+      {% if t.task_type == "sync_daily" %}
+        全局数据维护
+      {% elif t.task_type == "onboard_fund" %}
+        基金 {{ t.fund_code }} 自动建档
+      {% else %}
+        {{ t.task_type }}
+      {% endif %}
+      ({{ t.status }})
+    </span>
+    <span>{{ t.progress_text }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 <div class="toolbar" style="display:flex; gap:8px; align-items:center; flex-wrap:nowrap;">
   <input id="search-input" type="text" value="{{ search }}" placeholder="搜索基金名称 / 输入代码…" autocomplete="off" style="flex:1; min-width:160px; max-width:300px;">
   <button id="search-btn" class="btn btn-secondary" style="height:44px; padding:0 16px;">搜索</button>
@@ -50,6 +71,14 @@
 </div>
 
 <div id="fund-list-container" class="fund-list">
+  <div class="fund-list-header">
+    <div class="header-main">基金名称</div>
+    <div class="header-col">实时估值</div>
+    <div class="header-col">预测</div>
+    <div class="header-col">实际</div>
+    <div class="header-col">今日盈亏</div>
+    <div class="header-col">预计误差</div>
+  </div>
   {% for row in rows %}
   <a class="fund-row" href="/fund/{{ row.fund_code }}">
     <div class="fund-main">
@@ -59,6 +88,12 @@
       </div>
     </div>
     <div class="fund-value {{ row.estimate_tone }}">{{ row.current_estimate_text }}</div>
+    <div class="fund-compare {{ row.compare_predicted_tone }}">
+      {% if row.show_compare %}{{ row.compare_predicted_text }}{% else %}--{% endif %}
+    </div>
+    <div class="fund-compare {{ row.compare_actual_tone }}">
+      {% if row.show_compare %}{{ row.compare_actual_text }}{% else %}--{% endif %}
+    </div>
     <div class="fund-profit {{ row.profit_tone }}">{{ row.estimated_today_profit_text }}</div>
     <div class="fund-error">{{ row.error_band_label }}</div>
   </a>

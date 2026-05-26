@@ -74,6 +74,31 @@ def fetch_and_store_fund_navs(
     report.warnings = warnings + report.warnings
     return report
 
+def fetch_and_store_bulk_navs(
+    session: Session,
+    data_source: DataSource,
+    active_fund_codes: set[str],
+) -> ImportReport:
+    if hasattr(data_source, "last_warnings"):
+        data_source.last_warnings = []  # type: ignore[attr-defined]
+    
+    if not hasattr(data_source, "fetch_latest_fund_navs_bulk"):
+        return ImportReport(imported_count=0, warnings=["Bulk fetch not supported."])
+        
+    records = data_source.fetch_latest_fund_navs_bulk()  # type: ignore[attr-defined]
+    warnings = list(getattr(data_source, "last_warnings", []))
+    if not records:
+        warnings.append("Warning: no bulk fund navs fetched.")
+        return ImportReport(imported_count=0, warnings=warnings)
+        
+    filtered_records = [r for r in records if r.fund_code in active_fund_codes]
+    if not filtered_records:
+        warnings.append("Warning: no bulk navs matched active funds.")
+        return ImportReport(imported_count=0, warnings=warnings)
+        
+    report = import_nav_records(session, filtered_records)
+    report.warnings = warnings + report.warnings
+    return report
 
 def fetch_and_store_stock_quotes(
     session: Session,

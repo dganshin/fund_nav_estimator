@@ -13,6 +13,17 @@
   <button class="tab-btn" data-tab="tab-weight" onclick="switchTab('tab-weight')">修正权重</button>
 </div>
 
+<!-- ══ 全局操作 ══ -->
+<div class="panel" style="margin-bottom: 20px; background: #fff8f1; border-color: #ffedd5;">
+  <div style="display:flex; justify-content:space-between; align-items:center;">
+    <div>
+      <h3 style="margin:0 0 4px 0; font-size:16px; color:#c2410c;">每日数据维护</h3>
+      <p style="margin:0; font-size:13px; color:#9a3412;">增量同步所有 Active 基金的最新净值、日 K 线，并生成因果校准残差。每天盘后或次日早晨点击一次即可。</p>
+    </div>
+    <button class="btn btn-primary" onclick="runDailySync(this)" style="background:#ea580c; border-color:#ea580c;">一键同步并校准</button>
+  </div>
+</div>
+
 <!-- ══ 基金管理 ══ -->
 <div id="tab-fund" class="tab-panel">
   <div class="panel">
@@ -336,5 +347,28 @@ document.addEventListener("DOMContentLoaded", function() {
     });
   }
 });
+
+function runDailySync(btn) {
+  if (!confirm("即将后台开始全量增量同步，并在首页显示进度。确认继续吗？")) return;
+  btn.disabled = true;
+  btn.textContent = "启动中...";
+  fetch("/api/sync-daily", { method: "POST" })
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok) {
+        alert("同步任务已在后台启动！请返回首页查看进度。");
+        window.location.href = "/";
+      } else {
+        alert("启动失败：" + data.error);
+        btn.disabled = false;
+        btn.textContent = "一键同步并校准";
+      }
+    })
+    .catch(err => {
+      alert("请求失败：" + err.message);
+      btn.disabled = false;
+      btn.textContent = "一键同步并校准";
+    });
+}
 </script>
 {% endblock %}

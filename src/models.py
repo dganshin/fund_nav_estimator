@@ -319,16 +319,21 @@ class CalibrationResidual(Base):
     effective_estimate: Mapped[float] = mapped_column(Float, nullable=False)
     residual: Mapped[float] = mapped_column(Float, nullable=False)
     abs_residual: Mapped[float] = mapped_column(Float, nullable=False)
-    scale_factor_used: Mapped[float] = mapped_column(Float, nullable=False)
+    scale_used_before_update: Mapped[float] = mapped_column(Float, nullable=False)
     beta_known: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     beta_unknown: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     alpha: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    params_fitted_until: Mapped[date | None] = mapped_column(Date, nullable=True)
+    model_version: Mapped[str] = mapped_column(String(32), nullable=False, default="two_factor")
+    calibration_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="online_scale")
+    is_out_of_sample: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     observed_scale: Mapped[float | None] = mapped_column(Float, nullable=True)
-    updated_scale_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
+    scale_after_update: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_used_for_update: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     skip_reason: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
     __table_args__ = (
         UniqueConstraint("fund_code", "holding_version_id", "trade_date", name="uq_calibration_residual"),
@@ -435,3 +440,38 @@ class SelectedEstimate(Base):
     )
 
     fund: Mapped["Fund"] = relationship(back_populates="selected_estimates")
+
+
+class TaskRun(Base):
+    __tablename__ = "task_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    progress_text: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    error_message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    fund: Mapped["Fund"] = relationship()
+
+
+class UserFundPositionEvent(Base):
+    __tablename__ = "user_fund_position_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    amount_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    share_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    nav: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trade_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    raw_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    image_path: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    note: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    fund: Mapped["Fund"] = relationship()
