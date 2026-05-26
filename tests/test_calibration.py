@@ -21,17 +21,20 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.calibration import (
     CalibrationResidual,
+    calculate_error_band,
     ensure_fund_by_code,
     get_calibration_stats,
     load_calibration_residuals,
     run_online_calibration,
 )
-from src.data_sources.base import FundProfile
+from src.data_sources.base import FundNavRecord, FundProfile, StockQuoteRecord
+from src.onboarding import ensure_fund_full_onboarded
 from src.frontend_app import app
 from src.init_db import init_db
 from src.db import get_session_factory
@@ -293,3 +296,99 @@ def test_calibration_stats_fields(tmp_path):
     assert "current_scale" in stats
     assert "confidence_level" in stats
     assert "last_calibration_date" in stats
+
+
+class FullOnboardSource:
+    def __init__(self):
+        self.calls = []
+
+    def fetch_fund_profile(self, fund_code):
+        self.calls.append("profile")
+        return FundProfile(
+            fund_code=fund_code,
+            fund_name="自动基金",
+            fund_type="equity",
+            market="CN",
+            latest_unit_nav=2.0,
+            latest_nav_date=date(2026, 5, 22),
+            accumulated_nav=None,
+            source="mock",
+        )
+
+    def fetch_fund_public_holdings(self, fund_code):
+        self.calls.append("holdings")
+        return [
+            {"report_date": "2026-03-31", "asset_code": "600988.SH", "asset_name": "赤峰黄金", "weight_pct": 10.0},
+            {"report_date": "2026-03-31", "asset_code": "000975.SZ", "asset_name": "山金国际", "weight_pct": 8.0},
+        ]
+
+    def fetch_fund_asset_allocation(self, fund_code, report_date=None):
+        self.calls.append("asset_allocation")
+        return [{"report_date": "2026-03-31", "stock_weight_pct": 90.0}]
+
+    def fetch_fund_navs(self, fund_code, start_date, end_date):
+        self.calls.append("navs")
+        return [
+            FundNavRecord(date(2026, 5, 21), fund_code, 1.0, None, "mock"),
+            FundNavRecord(date(2026, 5, 22), fund_code, 1.01, None, "mock"),
+        ]
+
+    def fetch_stock_daily_quotes(self, asset_codes, start_date, end_date, sleep_seconds=0.0):
+        self.calls.append("quotes")
+        return [
+            StockQuoteRecord(date(2026, 5, 22), code, code, 0.01, "mock")
+            for code in asset_codes
+        ]
+
+
+def test_ensure_fund_full_onboarded_fetches_public_data(tmp_path):
+    sf = make_db(tmp_path)
+    source = FullOnboardSource()
+    with sf() as session:
+        result = ensure_fund_full_onboarded(session, "001467", source, holding_amount=2000)
+
+    assert result["fund_name"] == "自动基金"
+    assert result["status"] == "ready"
+    assert source.calls[:3] == ["profile", "holdings", "asset_allocation"]
+    assert "navs" in source.calls
+    assert "quotes" in source.calls
+
+
+def test_missing_holdings_home_row_shows_status_not_zero(tmp_path):
+    sf = make_db(tmp_path)
+    with sf() as session:
+        session.add(Fund(fund_code="017193", fund_name="缺持仓基金", fund_type="equity", market="CN", is_active=True))
+        session.commit()
+        from src.estimator import compute_live_fund_estimates
+        from src.frontend_app import build_home_rows
+
+        results = compute_live_fund_estimates(session, {}, date(2026, 5, 22), fund_code="017193")
+        rows = build_home_rows(results)
+
+    assert rows[0]["current_estimate_text"] == "缺持仓"
+    assert rows[0]["error_band_label"] == "缺持仓"
+
+
+def test_error_band_uses_recent_residuals(tmp_path):
+    sf = make_db(tmp_path)
+    with sf() as session:
+        seed_with_actual_return(tmp_path, session)
+        hv = session.scalar(select(HoldingVersion).where(HoldingVersion.fund_code == "002207"))
+        for i in range(10):
+            session.add(CalibrationResidual(
+                fund_code="002207",
+                holding_version_id=hv.id,
+                trade_date=date(2026, 5, 1 + i),
+                actual_return=0.01,
+                raw_estimate=0.01,
+                effective_estimate=0.01,
+                residual=0.001 * i,
+                abs_residual=0.001 * i,
+                scale_factor_used=1.0,
+                is_used_for_update=True,
+                skip_reason="",
+            ))
+        session.commit()
+        band = calculate_error_band(session, "002207", hv.id)
+
+    assert band["error_band_label"].startswith("预计误差≤±")

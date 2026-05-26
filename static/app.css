@@ -174,7 +174,7 @@ button:active, .btn:active { transform: scale(.97); }
 
 .fund-row {
   display: grid;
-  grid-template-columns: 1fr auto auto 44px;
+  grid-template-columns: 1fr auto auto minmax(96px, auto);
   gap: 12px;
   align-items: center;
   background: #fff;
@@ -235,6 +235,14 @@ button:active, .btn:active { transform: scale(.97); }
   border-radius: 6px;
   font-size: 12px;
   font-weight: 700;
+}
+
+.fund-error {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: right;
+  white-space: nowrap;
 }
 
 /* ── 颜色语义 ── */

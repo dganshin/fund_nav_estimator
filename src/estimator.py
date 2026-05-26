@@ -174,6 +174,9 @@ class LiveFundEstimateResult:
     decision_reason: str
     warnings: list[str]
     holdings: list[LiveHoldingContribution]
+    error_band_pct: float | None = None
+    error_band_label: str = "样本不足"
+    confidence_text: str = "样本不足"
 
 
 @dataclass
@@ -804,8 +807,45 @@ def compute_live_fund_estimate(
 ) -> LiveFundEstimateResult | None:
     fund = session.get(Fund, fund_code)
     version = select_holding_version(session, fund_code, trade_date)
+    position = session.scalar(
+        select(UserFundPosition).where(
+            UserFundPosition.fund_code == fund_code,
+            UserFundPosition.is_active.is_(True),
+        )
+    )
     if version is None:
-        return None
+        return LiveFundEstimateResult(
+            fund_code=fund_code,
+            fund_name=fund_name or (fund.fund_name if fund else fund_code),
+            trade_date=trade_date,
+            quote_time=quote_time,
+            current_estimate=None,
+            effective_method="未拉取",
+            confidence_level=None,
+            holding_amount=position.holding_amount if position else None,
+            estimated_today_profit=None,
+            latest_real_nav_date=None,
+            current_scale_factor=1.0,
+            data_warning="无持仓数据",
+            raw_estimate=0.0,
+            effective_weight_estimate=None,
+            coverage_adjusted_estimate=None,
+            calibrated_estimate=None,
+            final_estimate=None,
+            final_method="无数据",
+            covered_weight=0.0,
+            missing_weight=0.0,
+            latest_mae=None,
+            direction_hit_rate=None,
+            holding_version_id=None,
+            best_status="no_data",
+            decision_reason="缺少持仓配置",
+            warnings=["当前基金尚未拉取或配置任何持仓数据"],
+            holdings=[],
+            error_band_pct=None,
+            error_band_label="缺持仓",
+            confidence_text="缺持仓",
+        )
     state = get_online_calibration_state(session, fund_code, trade_date)
     position = session.scalar(
         select(UserFundPosition).where(
@@ -939,13 +979,21 @@ def compute_live_fund_estimate(
     if state is not None and state.warning_json:
         warnings.extend(json.loads(state.warning_json))
     confidence_level = "D" if state is None else state.confidence_level
+    from .calibration import calculate_error_band
+    error_band = calculate_error_band(session, fund_code, version.id)
 
     estimated_today_profit = None
     holding_amount = None if position is None else position.holding_amount
     if holding_amount is not None:
         estimated_today_profit = holding_amount * best_estimate
     data_warning = None
-    if quote_time is None:
+    if covered_weight <= 0:
+        data_warning = "行情缺失"
+        best_status = "missing_quotes"
+        best_estimate = None
+        estimated_today_profit = None
+        error_band = {"error_band_pct": None, "error_band_label": "不可估", "confidence_text": "不可估"}
+    elif quote_time is None:
         data_warning = "缺少实时行情"
 
     return LiveFundEstimateResult(
@@ -953,7 +1001,7 @@ def compute_live_fund_estimate(
         fund_name=fund_name or (fund.fund_name if fund is not None else fund_code),
         trade_date=trade_date,
         quote_time=quote_time,
-        current_estimate=round(best_estimate, 8),
+        current_estimate=None if best_estimate is None else round(best_estimate, 8),
         effective_method="修正权重",
         confidence_level=confidence_level,
         holding_amount=holding_amount,
@@ -965,7 +1013,7 @@ def compute_live_fund_estimate(
         effective_weight_estimate=None if coverage_adjusted_estimate is None else round(effective_weight_estimate, 8),
         coverage_adjusted_estimate=None if coverage_adjusted_estimate is None else round(coverage_adjusted_estimate, 8),
         calibrated_estimate=None if calibrated_estimate is None else round(calibrated_estimate, 8),
-        final_estimate=round(best_estimate, 8),
+        final_estimate=None if best_estimate is None else round(best_estimate, 8),
         final_method=best_method,
         covered_weight=round(covered_weight, 8),
         missing_weight=round(missing_weight, 8),
@@ -976,6 +1024,9 @@ def compute_live_fund_estimate(
         decision_reason=decision_reason,
         warnings=warnings,
         holdings=holdings,
+        error_band_pct=error_band["error_band_pct"],
+        error_band_label=str(error_band["error_band_label"]),
+        confidence_text=str(error_band["confidence_text"]),
     )
 
 

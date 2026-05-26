@@ -12,8 +12,8 @@
   <span id="status-message">{{ status_message }}</span>
 </div>
 
-<div class="toolbar" style="display:flex; gap:8px; align-items:center;">
-  <input id="search-input" type="text" value="{{ search }}" placeholder="搜索基金名称 / 输入代码…" autocomplete="off" style="flex:1;">
+<div class="toolbar" style="display:flex; gap:8px; align-items:center; flex-wrap:nowrap;">
+  <input id="search-input" type="text" value="{{ search }}" placeholder="搜索基金名称 / 输入代码…" autocomplete="off" style="flex:1; min-width:160px; max-width:300px;">
   <button id="search-btn" class="btn btn-secondary" style="height:44px; padding:0 16px;">搜索</button>
   <select id="sort-select">
     {% for key, label in sort_options.items() %}
@@ -60,7 +60,7 @@
     </div>
     <div class="fund-value {{ row.estimate_tone }}">{{ row.current_estimate_text }}</div>
     <div class="fund-profit {{ row.profit_tone }}">{{ row.estimated_today_profit_text }}</div>
-    <div class="fund-badge badge-{{ row.confidence_level|lower }}">{{ row.confidence_level }}</div>
+    <div class="fund-error">{{ row.error_band_label }}</div>
   </a>
   {% else %}
   <div class="empty-panel">当前没有可展示的基金估值结果。<br>请在搜索框输入基金代码，加入自选或按金额买入。</div>

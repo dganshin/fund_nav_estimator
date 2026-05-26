@@ -34,8 +34,8 @@
       <div class="metric-value {{ detail.estimated_today_profit_tone }}">{{ detail.estimated_today_profit_text }}</div>
     </div>
     <div>
-      <div class="metric-label">置信度</div>
-      <div class="metric-badge badge-{{ detail.confidence_level|lower }}" style="font-size:20px; width:44px; height:44px; border-radius:10px;">{{ detail.confidence_level }}</div>
+      <div class="metric-label">预计误差范围</div>
+      <div style="font-size:18px; font-weight:800; color:#334155;">{{ detail.error_band_label }}</div>
     </div>
     {% if cal_stats and cal_stats.current_scale %}
     <div>
@@ -92,6 +92,15 @@
     {% endif %}
     {% if cal_stats.raw_mae is defined %}
     <div><div class="advanced-label">原始 MAE</div><div class="advanced-value">{{ cal_stats.raw_mae }}</div></div>
+    {% endif %}
+    {% if cal_stats.error_band_label is defined %}
+    <div><div class="advanced-label">误差口径</div><div class="advanced-value">{{ cal_stats.error_band_label }}</div></div>
+    {% endif %}
+    {% if cal_stats.p80_abs_error is defined %}
+    <div><div class="advanced-label">80%误差分位</div><div class="advanced-value">{{ cal_stats.p80_abs_error }}</div></div>
+    {% endif %}
+    {% if cal_stats.max_abs_error is defined %}
+    <div><div class="advanced-label">最大误差</div><div class="advanced-value">{{ cal_stats.max_abs_error }}</div></div>
     {% endif %}
     {% if cal_stats.effective_mae is defined %}
     <div><div class="advanced-label">修正后 MAE</div><div class="advanced-value">{{ cal_stats.effective_mae }}</div></div>

@@ -269,7 +269,7 @@ class AKShareDataSource:
             pass
         # 尝试拉基金名称
         try:
-            info_df = self.ak.fund_open_fund_info_em(fund=fund_code, indicator="基本概况") if hasattr(self.ak, "fund_open_fund_info_em") else None
+            info_df = self.ak.fund_open_fund_info_em(symbol=fund_code, indicator="基本概况") if hasattr(self.ak, "fund_open_fund_info_em") else None
             if info_df is not None and not info_df.empty:
                 for _, r in info_df.iterrows():
                     item_val = str(r.get("item", "") or "")
@@ -304,6 +304,19 @@ class AKShareDataSource:
             return []
         self._cache_dataframe(df, f"fund_holdings_{fund_code}_{year}.csv")
         return df.to_dict(orient="records")
+
+    def fetch_fund_public_holdings(self, fund_code: str) -> list[dict[str, object]]:
+        """拉最新公开持仓, 只代表季报/公开前十大, 不是实时持仓。"""
+        years = [date.today().year, date.today().year - 1]
+        rows: list[dict[str, object]] = []
+        for year in years:
+            try:
+                rows.extend(self.fetch_fund_holdings(fund_code, year=year))
+            except Exception:
+                continue
+            if rows:
+                break
+        return rows
 
     def fetch_fund_asset_allocation(
         self,

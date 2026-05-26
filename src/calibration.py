@@ -41,6 +41,52 @@ MAX_ABS_RESIDUAL = 0.02   # 超过此残差不更新 scale（异常日）
 MIN_RAW_ESTIMATE = 0.001  # raw_estimate 太小时不更新 scale
 
 
+def calculate_error_band(
+    session: Session,
+    fund_code: str,
+    holding_version_id: int | None = None,
+    window: int = 20,
+) -> dict[str, object]:
+    """用当前 holding_version 的校准残差生成用户可读误差口径。"""
+    if holding_version_id is None:
+        holding_version = session.scalar(
+            select(HoldingVersion)
+            .where(HoldingVersion.fund_code == fund_code, HoldingVersion.is_active.is_(True))
+            .order_by(HoldingVersion.report_date.desc())
+        )
+        holding_version_id = None if holding_version is None else holding_version.id
+    if holding_version_id is None:
+        return {"error_band_pct": None, "error_band_label": "不可估", "confidence_text": "不可估"}
+
+    rows = session.scalars(
+        select(CalibrationResidual)
+        .where(
+            CalibrationResidual.fund_code == fund_code,
+            CalibrationResidual.holding_version_id == holding_version_id,
+        )
+        .order_by(CalibrationResidual.trade_date.desc())
+        .limit(window)
+    ).all()
+    values = sorted([row.abs_residual for row in rows if row.abs_residual is not None])
+    sample_count = len(values)
+    if sample_count >= 10:
+        idx = min(sample_count - 1, int((sample_count - 1) * 0.8))
+        band = values[idx]
+        label = f"预计误差≤±{band:.2%}"
+    elif sample_count >= 5:
+        band = sum(values) / sample_count
+        label = f"参考误差±{band:.2%}"
+    else:
+        band = None
+        label = "样本不足"
+    return {
+        "error_band_pct": None if band is None else band,
+        "error_band_label": label,
+        "confidence_text": label,
+        "sample_count": sample_count,
+    }
+
+
 class CalibrationResult(NamedTuple):
     fund_code: str
     holding_version_id: int
@@ -353,10 +399,12 @@ def get_calibration_stats(
     ).all()
 
     if not rows:
+        band = calculate_error_band(session, fund_code, holding_version.id)
         return {
             "sample_count": 0,
             "current_scale": f"{state.current_scale_factor:.4f}" if state else "--",
             "confidence_level": state.confidence_level if state else "D",
+            "error_band_label": band["error_band_label"],
             "last_calibration_date": state.last_update_trade_date.isoformat() if state and state.last_update_trade_date else "--",
         }
 
@@ -365,11 +413,18 @@ def get_calibration_stats(
     eff_maes = [abs(r.actual_return - r.effective_estimate) for r in rows]
     eff_mae = sum(eff_maes) / len(eff_maes)
     latest = rows[-1]
+    band = calculate_error_band(session, fund_code, holding_version.id)
+    sorted_abs = sorted(raw_maes)
+    idx80 = min(len(sorted_abs) - 1, int((len(sorted_abs) - 1) * 0.8))
 
     return {
         "sample_count": len(rows),
         "raw_mae": f"{raw_mae:.4%}",
         "effective_mae": f"{eff_mae:.4%}",
+        "mean_abs_error_20": f"{sum(raw_maes[-20:]) / min(len(raw_maes), 20):.4%}",
+        "p80_abs_error": f"{sorted_abs[idx80]:.4%}",
+        "max_abs_error": f"{max(raw_maes):.4%}",
+        "error_band_label": band["error_band_label"],
         "improvement": f"{(raw_mae - eff_mae) / raw_mae:.1%}" if raw_mae > 0 else "--",
         "latest_residual": f"{latest.residual:+.4%}",
         "current_scale": f"{state.current_scale_factor:.4f}" if state else "--",

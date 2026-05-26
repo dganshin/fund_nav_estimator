@@ -289,7 +289,6 @@
     listContainer.innerHTML = rows.map(function (row) {
       var isWl = row.is_watchlist ? ' · 自选' : '';
       var isHolding = row.is_holding ? ' · 持有' : ' · 观察';
-      var badgeCls = 'badge-' + (row.confidence_level || 'd').toLowerCase();
       return [
         '<a class="fund-row" href="/fund/' + row.fund_code + '">',
         '<div class="fund-main">',
@@ -298,7 +297,7 @@
         '</div>',
         '<div class="fund-value ' + (row.estimate_tone || 'muted') + '">' + (row.current_estimate_text || '--') + '</div>',
         '<div class="fund-profit ' + (row.profit_tone || 'muted') + '">' + (row.estimated_today_profit_text || '--') + '</div>',
-        '<div class="fund-badge ' + badgeCls + '">' + (row.confidence_level || 'D') + '</div>',
+        '<div class="fund-error">' + (row.error_band_label || '样本不足') + '</div>',
         '</a>',
       ].join('');
     }).join('');

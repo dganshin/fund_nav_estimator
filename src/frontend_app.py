@@ -28,6 +28,7 @@ if __package__ in {None, ""}:
     from src.estimator import compute_live_fund_estimates
     from src.init_db import init_db
     from src.models import DailyQuote, EffectiveWeightVersion, Fund, UserFundPosition, UserWatchlistFund
+    from src.onboarding import ensure_fund_full_onboarded
     from src.web.actions import run_effective_weight_action
     from src.web_services import (
         deactivate_fund,
@@ -55,6 +56,7 @@ else:
     from .estimator import compute_live_fund_estimates
     from .init_db import init_db
     from .models import DailyQuote, EffectiveWeightVersion, Fund, UserFundPosition, UserWatchlistFund
+    from .onboarding import ensure_fund_full_onboarded
     from .web.actions import run_effective_weight_action
     from .web_services import (
         deactivate_fund,
@@ -85,7 +87,7 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 SORT_OPTIONS = {
     "estimate_desc": "估值排序",
     "profit_desc": "盈亏排序",
-    "confidence_desc": "置信度排序",
+    "error_asc": "误差排序",
     "name_asc": "名称排序",
 }
 CONFIDENCE_RANK = {"A": 4, "B": 3, "C": 2, "D": 1, None: 0}
@@ -169,7 +171,17 @@ def load_live_estimate_bundle(fund_code: str | None = None, force_refresh: bool 
 
     asset_codes = list(dict.fromkeys(str(r["asset_code"]) for r in holding_rows))
     if not asset_codes:
-        return [], "当前没有可用持仓", False
+        with session_factory() as session:
+            results = compute_live_fund_estimates(
+                session=session,
+                live_quotes={},
+                trade_date=date.today(),
+                quote_time=None,
+                fund_code=fund_code,
+            )
+        payload = (results, "当前没有可用持仓", False)
+        LIVE_BUNDLE_CACHE[cache_key] = (monotonic(), payload)
+        return payload
 
     try:
         if hasattr(data_source, "last_warnings"):
@@ -239,17 +251,29 @@ def build_home_rows(results: list) -> list[dict]:
     for item in results:
         if item.fund_code in ("000001", "000002") or "示例" in (item.fund_name or ""):
             continue
+        status_text = item.error_band_label or "样本不足"
+        current_estimate_text = format_percent(item.current_estimate)
+        if item.best_status == "no_data":
+            current_estimate_text = "缺持仓"
+            status_text = "缺持仓"
+        elif item.best_status == "missing_quotes":
+            current_estimate_text = "行情缺失"
+            status_text = "不可估"
         rows.append({
             "fund_code": item.fund_code,
             "fund_name": item.fund_name,
             "current_estimate": item.current_estimate,
-            "current_estimate_text": format_percent(item.current_estimate),
+            "current_estimate_text": current_estimate_text,
             "estimate_tone": get_tone(item.current_estimate),
             "holding_amount": item.holding_amount,
             "estimated_today_profit": item.estimated_today_profit,
             "estimated_today_profit_text": format_amount(item.estimated_today_profit),
             "profit_tone": get_tone(item.estimated_today_profit),
             "confidence_level": item.confidence_level or "D",
+            "error_band_pct": item.error_band_pct,
+            "error_band_label": status_text,
+            "confidence_text": item.confidence_text,
+            "best_status": item.best_status,
             "quote_time": item.quote_time.strftime("%H:%M:%S") if item.quote_time else "--",
             "is_holding": item.holding_amount is not None,
             "is_watchlist": False,
@@ -260,8 +284,8 @@ def build_home_rows(results: list) -> list[dict]:
 def sort_home_rows(rows: list[dict], sort_key: str) -> list[dict]:
     if sort_key == "profit_desc":
         rows.sort(key=lambda r: r["estimated_today_profit"] if r["estimated_today_profit"] is not None else -999999, reverse=True)
-    elif sort_key == "confidence_desc":
-        rows.sort(key=lambda r: CONFIDENCE_RANK.get(r["confidence_level"], 0), reverse=True)
+    elif sort_key == "error_asc":
+        rows.sort(key=lambda r: r["error_band_pct"] if r["error_band_pct"] is not None else 999999)
     elif sort_key == "name_asc":
         rows.sort(key=lambda r: (r["fund_name"], r["fund_code"]))
     else:
@@ -279,6 +303,8 @@ def build_detail_context(result, is_watchlist: bool = False) -> dict:
         "estimated_today_profit_text": format_amount(result.estimated_today_profit),
         "estimated_today_profit_tone": get_tone(result.estimated_today_profit),
         "confidence_level": result.confidence_level or "D",
+        "error_band_label": result.error_band_label,
+        "confidence_text": result.confidence_text,
         "quote_time": result.quote_time.strftime("%H:%M:%S") if result.quote_time else "--",
         "trade_date": result.trade_date.isoformat(),
         "latest_real_nav_date": result.latest_real_nav_date.isoformat() if result.latest_real_nav_date else "--",
@@ -458,13 +484,17 @@ def save_portfolio(
     session_factory = get_cached_session_factory()
     data_source = get_cached_data_source()
     with session_factory() as session:
-        fund_info = ensure_fund_by_code(session, fund_code, data_source)
-        
         amt = None if not holding_amount.strip() else float(holding_amount)
         share = None if not holding_share.strip() else float(holding_share)
-        
-        if amt and not share and fund_info.get("latest_unit_nav"):
-            share = amt / fund_info["latest_unit_nav"]
+        fund_info = ensure_fund_full_onboarded(
+            session,
+            fund_code,
+            data_source,
+            holding_amount=amt,
+            add_watchlist=True,
+        )
+        if amt is not None and share is None and fund_info.get("latest_unit_nav"):
+            share = amt / float(fund_info["latest_unit_nav"])
 
         save_user_position_rows(session, [{
             "fund_code": fund_code,
@@ -685,9 +715,9 @@ def manage_effective_weights(fund_code: str = Form(...), trade_date: str = Form(
 # ── Fund Search API ────────────────────────────────────────────────────────
 
 @app.get("/api/search-fund")
-def api_search_fund(code: str = Query("")):
+def api_search_fund(code: str = Query(""), fund_code: str = Query("")):
     """搜索基金：先查本地库，如果没有则尝试拉取基础信息（不创建记录）。"""
-    code = code.strip()
+    code = (fund_code or code).strip()
     if not code:
         return JSONResponse({"found": False, "in_db": False})
 
@@ -713,6 +743,7 @@ def api_search_fund(code: str = Query("")):
                 "has_position": pos is not None,
                 "holding_amount": pos.holding_amount if pos else None,
                 "in_watchlist": bool(wl and wl.is_active),
+                "holdings_status": "可拉取",
             })
 
     # 不在库里，尝试拉取基础信息
@@ -725,6 +756,7 @@ def api_search_fund(code: str = Query("")):
             "fund_name": profile.fund_name,
             "latest_unit_nav": profile.latest_unit_nav,
             "latest_nav_date": profile.latest_nav_date.isoformat() if profile.latest_nav_date else None,
+            "holdings_status": "待拉取",
         })
     except Exception as exc:
         logger.warning("search_fund fetch_fund_profile failed for %s: %s", code, exc)
@@ -742,15 +774,14 @@ async def api_quick_add(request: Request):
     session_factory = get_cached_session_factory()
     data_source = get_cached_data_source()
     with session_factory() as session:
-        result = ensure_fund_by_code(session, fund_code, data_source)
-        # 加入自选
-        save_watchlist_rows(session, [{"fund_code": fund_code, "is_active": True}])
+        result = ensure_fund_full_onboarded(session, fund_code, data_source, add_watchlist=True)
 
     return JSONResponse({
         "ok": True,
         "fund_code": result["fund_code"],
         "fund_name": result["fund_name"],
         "created": result.get("created", False),
+        "status": result.get("status"),
     })
 
 
@@ -771,24 +802,35 @@ async def api_quick_buy(request: Request):
     session_factory = get_cached_session_factory()
     data_source = get_cached_data_source()
     with session_factory() as session:
-        fund_info = ensure_fund_by_code(session, fund_code, data_source)
-        # 估算 holding_share
-        nav = fund_info.get("latest_unit_nav")
-        holding_share = (holding_amount / nav) if nav and nav > 0 else None
-        save_user_position_rows(session, [{
-            "fund_code": fund_code,
-            "holding_amount": holding_amount,
-            "holding_share": holding_share,
-            "platform": "支付宝/蚂蚁财富",
-            "is_active": True,
-        }])
+        fund_info = ensure_fund_full_onboarded(
+            session, fund_code, data_source, holding_amount=holding_amount, add_watchlist=True
+        )
+        pos = session.scalar(select(UserFundPosition).where(UserFundPosition.fund_code == fund_code))
 
     return JSONResponse({
         "ok": True,
         "fund_code": fund_info["fund_code"],
         "fund_name": fund_info["fund_name"],
         "holding_amount": holding_amount,
-        "estimated_share": holding_share,
+        "estimated_share": None if pos is None else pos.holding_share,
+        "status": fund_info.get("status"),
+    })
+
+
+@app.post("/api/fund/{fund_code}/calibrate")
+def api_fund_calibrate(fund_code: str):
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        result = run_online_calibration(session, fund_code, force=True)
+    if result is None:
+        return JSONResponse({"ok": False, "error": "暂无可校准数据"})
+    return JSONResponse({
+        "ok": True,
+        "fund_code": fund_code,
+        "calibration_date": result.calibration_date.isoformat(),
+        "is_updated": result.is_updated,
+        "residual": result.residual,
+        "scale_factor_after": result.scale_factor_after,
     })
 
 
