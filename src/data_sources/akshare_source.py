@@ -498,7 +498,7 @@ class AKShareDataSource:
         df["净值日期"] = pd.to_datetime(df["净值日期"]).dt.date
         records: list[StockQuoteRecord] = []
         for _, row in df.iterrows():
-            if pd.isna(row["日增长率"]):
+            if pd.isna(row["净值日期"]) or pd.isna(row["日增长率"]):
                 continue
             records.append(
                 StockQuoteRecord(

@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import pandas as pd
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -352,6 +353,58 @@ def test_ensure_fund_full_onboarded_fetches_public_data(tmp_path):
     assert source.calls[:3] == ["profile", "holdings", "asset_allocation"]
     assert "navs" in source.calls
     assert "quotes" in source.calls
+
+
+class EtfFeederOnboardSource(FullOnboardSource):
+    def __init__(self):
+        super().__init__()
+        self.ak = self
+
+    def fetch_fund_profile(self, fund_code):
+        self.calls.append("profile")
+        return FundProfile(
+            fund_code=fund_code,
+            fund_name="广发半导体设备ETF联接C",
+            fund_type="股票型-标准指数",
+            market="CN",
+            latest_unit_nav=2.0,
+            latest_nav_date=date(2026, 5, 22),
+            accumulated_nav=None,
+            source="mock",
+        )
+
+    def fund_individual_basic_info_xq(self, symbol):
+        return pd.DataFrame([
+            {"项目": "基金名称", "值": "广发中证半导体材料设备ETF发起式联接C"},
+            {"项目": "基金全称", "值": "广发中证半导体材料设备主题交易型开放式指数证券投资基金发起式联接基金"},
+            {"项目": "基金类型", "值": "股票型-标准指数"},
+            {"项目": "基金公司", "值": "广发基金管理有限公司"},
+            {"项目": "投资策略", "值": "本基金为ETF联接基金，主要通过投资于目标ETF实现跟踪。"},
+            {"项目": "业绩比较基准", "值": "中证半导体材料设备主题指数收益率×95%+银行活期存款利率×5%"},
+        ])
+
+    def fund_etf_spot_em(self):
+        return pd.DataFrame([
+            {"代码": "560780", "名称": "半导体设备ETF广发"},
+            {"代码": "512480", "名称": "半导体ETF国联安"},
+        ])
+
+
+def test_etf_feeder_prefers_target_etf_over_public_stock_holdings(tmp_path):
+    sf = make_db(tmp_path)
+    source = EtfFeederOnboardSource()
+    with sf() as session:
+        result = ensure_fund_full_onboarded(session, "020640", source, holding_amount=100)
+        hv = session.scalar(select(HoldingVersion).where(HoldingVersion.fund_code == "020640"))
+        item = session.scalar(select(HoldingItem).where(HoldingItem.holding_version_id == hv.id))
+        fund = session.get(Fund, "020640")
+
+    assert result["status"] == "ready"
+    assert fund.fund_type == "etf_feeder"
+    assert hv.source == "akshare:target_etf"
+    assert item.asset_code == "560780.SH"
+    assert item.asset_type == "etf"
+    assert round(item.weight, 4) == 0.95
 
 
 def test_missing_holdings_home_row_shows_status_not_zero(tmp_path):

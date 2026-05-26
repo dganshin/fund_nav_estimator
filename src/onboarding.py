@@ -318,6 +318,9 @@ def ensure_fund_full_onboarded(
                 f"[onboard] etf feeder target: code={target_etf['asset_code']}, "
                 f"name={target_etf['asset_name']}, weight={target_etf['weight_pct']}"
             )
+        elif is_etf_feeder:
+            warnings.append("ETF联接基金未识别目标ETF, 不使用公开股票明细估值")
+            holdings_rows = []
         else:
             if hasattr(data_source, "fetch_fund_public_holdings"):
                 raw_holdings = data_source.fetch_fund_public_holdings(fund_code)
@@ -431,3 +434,32 @@ def ensure_fund_full_onboarded(
         "status": status,
         "warnings": warnings,
     }
+
+
+def repair_all_etf_feeders(
+    session: Session,
+    data_source,
+    force_rebuild: bool = True,
+) -> list[dict[str, object]]:
+    """批量重建 ETF 联接基金, 统一切到目标 ETF 建模。"""
+    funds = session.scalars(
+        select(Fund)
+        .where(
+            (Fund.fund_type == "etf_feeder")
+            | (Fund.fund_name.like("%ETF%联接%"))
+            | (Fund.fund_name.like("%ETF发起式联接%"))
+        )
+        .order_by(Fund.fund_code.asc())
+    ).all()
+    results: list[dict[str, object]] = []
+    for fund in funds:
+        results.append(
+            ensure_fund_full_onboarded(
+                session=session,
+                fund_code=fund.fund_code,
+                data_source=data_source,
+                add_watchlist=False,
+                force_rebuild=force_rebuild,
+            )
+        )
+    return results

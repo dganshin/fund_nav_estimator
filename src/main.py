@@ -50,7 +50,7 @@ if __package__ in {None, ""}:
     )
     from src.init_db import init_db
     from src.models import ActualReturn, DailyQuote, FundNav
-    from src.onboarding import ensure_fund_full_onboarded
+    from src.onboarding import ensure_fund_full_onboarded, repair_all_etf_feeders
 else:
     from .backfill import (
         backfill_history,
@@ -93,7 +93,7 @@ else:
     )
     from .init_db import init_db
     from .models import ActualReturn, DailyQuote, FundNav
-    from .onboarding import ensure_fund_full_onboarded
+    from .onboarding import ensure_fund_full_onboarded, repair_all_etf_feeders
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -269,6 +269,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser_onboard.add_argument("--fund-code", required=True)
     parser_onboard.add_argument("--holding-amount", type=float)
     parser_onboard.add_argument("--force-rebuild", action="store_true")
+
+    parser_repair_etf = subparsers.add_parser("repair-etf-feeders", help="Rebuild ETF feeder funds with target ETF holdings")
+    parser_repair_etf.add_argument("--force-rebuild", action="store_true", default=True)
 
     parser_demo = subparsers.add_parser("demo-run", help="Run the full example flow")
     parser_demo.add_argument("--trade-date", required=True)
@@ -926,6 +929,17 @@ def main() -> None:
                 print(f"Onboarded fund: {result['fund_code']} {result['fund_name']}")
                 print(f"Status: {result['status']}")
                 print_warnings(list(result.get("warnings") or []))
+            elif args.command == "repair-etf-feeders":
+                data_source = AKShareDataSource()
+                results = repair_all_etf_feeders(
+                    session=session,
+                    data_source=data_source,
+                    force_rebuild=args.force_rebuild,
+                )
+                print(f"Rebuilt ETF feeder funds: {len(results)}")
+                for result in results:
+                    print(f"{result['fund_code']} {result['fund_name']} {result['status']}")
+                    print_warnings(list(result.get("warnings") or []))
     except (DataImportError, DataSourceError) as exc:
         print(f"Import error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
