@@ -12,6 +12,7 @@ from src.frontend_app import app, build_home_rows, load_live_estimate_bundle
 from src.init_db import init_db
 from src.db import get_session_factory
 from src.import_data import import_funds_from_rows
+from src.web_services import load_fund_rows
 from src.backfill import fetch_and_store_stock_quotes
 from tests.test_stage4 import make_mock_source, seed_fund_holdings_and_allocations
 
@@ -86,6 +87,7 @@ def test_frontend_homepage_lists_funds(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert "基金实时估值" in response.text
     assert "测试真实基金" in response.text
+    assert "2026-05-22" in response.text
 
 
 def test_build_home_rows_formats_profit_and_estimate(tmp_path):
@@ -108,3 +110,23 @@ def test_build_home_rows_formats_profit_and_estimate(tmp_path):
     rows = build_home_rows(results)
     assert rows
     assert rows[0]["current_estimate_text"].startswith("+")
+
+
+def test_frontend_manage_can_deactivate_fund(tmp_path, monkeypatch):
+    session_factory = create_session_factory(tmp_path)
+    with session_factory() as session:
+        seed_fund_holdings_and_allocations(tmp_path, session)
+
+    monkeypatch.setattr("src.frontend_app.get_cached_session_factory", lambda: session_factory)
+    client = TestClient(app)
+    response = client.post(
+        "/manage/funds/deactivate",
+        data={"fund_code": "002207"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with session_factory() as session:
+        funds = load_fund_rows(session)
+    row = next(item for item in funds if item["fund_code"] == "002207")
+    assert row["is_active"] is False

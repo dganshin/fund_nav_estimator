@@ -7,6 +7,7 @@
   <div class="status-row">
     <span>更新时间 {{ latest_time }}</span>
     <span>今日估值日期 {{ estimate_date }}</span>
+    <span>数据来源 {{ data_mode }}</span>
     <span>仅供参考</span>
   </div>
   <div class="status-message">{{ status_message }}</div>
@@ -26,7 +27,8 @@
       <option value="10" {% if refresh == '10' %}selected{% endif %}>10秒</option>
       <option value="30" {% if refresh == '30' %}selected{% endif %}>30秒</option>
     </select>
-    <button type="submit">刷新</button>
+    <input type="hidden" name="force" value="1">
+    <button type="submit">强制刷新</button>
   </form>
 </section>
 

@@ -27,6 +27,12 @@
     <textarea name="csv_text" rows="6" placeholder="fund_code,fund_name,fund_type,market,is_active"></textarea>
     <button type="submit">保存基金</button>
   </form>
+  <form method="post" action="/manage/funds/deactivate" class="form-grid compact-form" style="margin-top:12px;">
+    <input type="text" name="fund_code" placeholder="输入要删除或停用的基金代码" required>
+    <div></div>
+    <button type="submit">删除基金</button>
+  </form>
+  <p class="panel-note">删除基金当前按软删除处理, 即停用并从首页隐藏, 不会清空历史数据。</p>
 </section>
 
 <section class="panel">

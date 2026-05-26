@@ -6,6 +6,7 @@ import sys
 from datetime import date, datetime, time
 from functools import lru_cache
 from pathlib import Path
+from time import monotonic
 
 from fastapi import FastAPI, Form, Query, Request
 from fastapi.responses import RedirectResponse
@@ -27,6 +28,7 @@ if __package__ in {None, ""}:
         load_holding_rows,
         load_industry_allocation_rows,
         load_user_position_rows,
+        deactivate_fund,
         save_asset_allocation_rows,
         save_fund_rows,
         save_holding_rows,
@@ -41,6 +43,7 @@ else:
     from .models import DailyQuote, Fund, UserFundPosition
     from .web.actions import run_effective_weight_action
     from .web_services import (
+        deactivate_fund,
         load_asset_allocation_rows,
         load_fund_rows,
         load_holding_rows,
@@ -71,6 +74,8 @@ SORT_OPTIONS = {
 }
 
 CONFIDENCE_RANK = {"A": 4, "B": 3, "C": 2, "D": 1, None: 0}
+LIVE_BUNDLE_CACHE: dict[str, tuple[float, tuple[list, str, bool]]] = {}
+LIVE_BUNDLE_TTL_SECONDS = 12.0
 
 
 @lru_cache(maxsize=1)
@@ -153,7 +158,11 @@ def load_latest_daily_quote_map(session, asset_codes: list[str]) -> tuple[dict[s
     return quote_map, bool(quote_map)
 
 
-def load_live_estimate_bundle(fund_code: str | None = None) -> tuple[list, str, bool]:
+def load_live_estimate_bundle(fund_code: str | None = None, force_refresh: bool = False) -> tuple[list, str, bool]:
+    cache_key = fund_code or "__all__"
+    cached = LIVE_BUNDLE_CACHE.get(cache_key)
+    if not force_refresh and cached and monotonic() - cached[0] <= LIVE_BUNDLE_TTL_SECONDS:
+        return cached[1]
     session_factory = get_cached_session_factory()
     data_source = get_cached_data_source()
 
@@ -225,7 +234,9 @@ def load_live_estimate_bundle(fund_code: str | None = None) -> tuple[list, str, 
             calibration_base="coverage_adjusted",
             calibration_min_samples=5,
         )
-    return results, summarize_runtime_status(warnings, used_fallback), used_fallback
+    payload = (results, summarize_runtime_status(warnings, used_fallback), used_fallback)
+    LIVE_BUNDLE_CACHE[cache_key] = (monotonic(), payload)
+    return payload
 
 
 def build_home_rows(results: list) -> list[dict[str, object]]:
@@ -315,8 +326,9 @@ def index(
     search: str = Query("", description="搜索基金"),
     sort: str = Query("estimate_desc", description="排序"),
     refresh: str = Query("off", description="自动刷新"),
+    force: int = Query(0, description="强制刷新"),
 ):
-    results, status_message, used_fallback = load_live_estimate_bundle()
+    results, status_message, used_fallback = load_live_estimate_bundle(force_refresh=bool(force))
     rows = build_home_rows(results)
     if search.strip():
         keyword = search.strip().lower()
@@ -326,6 +338,14 @@ def index(
         ]
     rows = sort_home_rows(rows, sort)
     latest_time = max((row["quote_time"] for row in rows), default="--")
+    estimate_date = "--"
+    data_mode = "实时行情"
+    if rows:
+        quote_dates = [result.quote_time.date().isoformat() for result in results if result.quote_time is not None]
+        if quote_dates:
+            estimate_date = max(quote_dates)
+    if used_fallback:
+        data_mode = "最近收盘缓存"
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -337,8 +357,10 @@ def index(
             "sort": sort,
             "sort_options": SORT_OPTIONS,
             "refresh": refresh,
+            "force": force,
             "latest_time": latest_time,
-            "estimate_date": date.today().isoformat(),
+            "estimate_date": estimate_date,
+            "data_mode": data_mode,
         },
     )
 
@@ -434,6 +456,16 @@ def manage(request: Request, message: str = ""):
             "industries": industries[:20],
         },
     )
+
+
+@app.post("/manage/funds/deactivate")
+def manage_fund_deactivate(fund_code: str = Form(...)):
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        ok = deactivate_fund(session, fund_code)
+    if ok:
+        return RedirectResponse(url=f"/manage?message=已停用基金 {fund_code}", status_code=303)
+    return RedirectResponse(url="/manage?message=未找到该基金", status_code=303)
 
 
 @app.post("/manage/funds")

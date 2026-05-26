@@ -153,6 +153,18 @@ def save_user_position_rows(session: Session, rows: list[dict[str, object]]) -> 
     return count
 
 
+def deactivate_fund(session: Session, fund_code: str) -> bool:
+    fund = session.get(Fund, str(fund_code).strip())
+    if fund is None:
+        return False
+    fund.is_active = False
+    position = session.scalar(select(UserFundPosition).where(UserFundPosition.fund_code == fund.fund_code))
+    if position is not None:
+        position.is_active = False
+    session.commit()
+    return True
+
+
 def default_date_range() -> tuple[date, date]:
     today = date.today()
     return today.replace(day=1), today
