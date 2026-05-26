@@ -237,6 +237,8 @@ def load_live_estimate_bundle(fund_code: str | None = None, force_refresh: bool 
 def build_home_rows(results: list) -> list[dict]:
     rows = []
     for item in results:
+        if item.fund_code in ("000001", "000002") or "示例" in (item.fund_name or ""):
+            continue
         rows.append({
             "fund_code": item.fund_code,
             "fund_name": item.fund_name,
@@ -449,17 +451,27 @@ def save_portfolio(
     holding_amount: str = Form(""),
     holding_share: str = Form(""),
     cost_nav: str = Form(""),
-    platform: str = Form(""),
+    platform: str = Form("支付宝/蚂蚁财富"),
     is_active: str = Form("1"),
 ):
+    fund_code = fund_code.strip()
     session_factory = get_cached_session_factory()
+    data_source = get_cached_data_source()
     with session_factory() as session:
+        fund_info = ensure_fund_by_code(session, fund_code, data_source)
+        
+        amt = None if not holding_amount.strip() else float(holding_amount)
+        share = None if not holding_share.strip() else float(holding_share)
+        
+        if amt and not share and fund_info.get("latest_unit_nav"):
+            share = amt / fund_info["latest_unit_nav"]
+
         save_user_position_rows(session, [{
             "fund_code": fund_code,
-            "holding_amount": None if not holding_amount.strip() else float(holding_amount),
-            "holding_share": None if not holding_share.strip() else float(holding_share),
+            "holding_amount": amt,
+            "holding_share": share,
             "cost_nav": None if not cost_nav.strip() else float(cost_nav),
-            "platform": platform.strip() or None,
+            "platform": platform.strip() or "支付宝/蚂蚁财富",
             "is_active": is_active == "1",
         }])
     return RedirectResponse(url="/portfolio?saved=1", status_code=303)

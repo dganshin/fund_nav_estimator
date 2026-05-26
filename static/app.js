@@ -1,5 +1,6 @@
 (function () {
   'use strict';
+  console.log("Fund estimator frontend loaded");
 
   // ══════════════════════════════════════════════════════════════════════
   // § 1. 基本配置 & 页面检测
@@ -118,10 +119,48 @@
         }
         newFundResult.textContent = '';
       })
-      .catch(function () { hideNewFundPanel(); });
+      .catch(function () { 
+        newFundPanel.style.display = 'block';
+        newFundInfo.innerHTML = '<strong>' + code + '</strong> — 行情源暂时失败或未找到基金。';
+        newFundResult.textContent = '';
+      })
+      .finally(function () {
+        if (searchBtn) {
+          searchBtn.textContent = "搜索";
+          searchBtn.disabled = false;
+        }
+      });
+  }
+
+  var searchBtn = document.getElementById('search-btn');
+
+  function triggerSearch() {
+    var val = searchInput.value.trim();
+    if (!val) return;
+    if (looksLikeFundCode(val)) {
+      searchBtn.textContent = "搜索中...";
+      searchBtn.disabled = true;
+      doFundCodeSearch(val);
+    } else {
+      if (typeof fetchAndUpdateList === 'function') fetchAndUpdateList();
+    }
   }
 
   if (searchInput && isHomePage) {
+    searchInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        triggerSearch();
+      }
+    });
+    
+    if (searchBtn) {
+      searchBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        triggerSearch();
+      });
+    }
+
     searchInput.addEventListener('input', function () {
       var val = searchInput.value.trim();
       clearTimeout(searchTimer);
@@ -129,10 +168,10 @@
         hideNewFundPanel();
         return;
       }
-      searchTimer = setTimeout(function () { doFundCodeSearch(val); }, 600);
+      // 不自动搜索了，等用户按回车或搜索按钮
+      // 但如果是 6位 数字，可以延迟给一点提示
     });
     searchInput.addEventListener('blur', function () {
-      // 短暂延迟，保证按钮 click 事件先触发
       setTimeout(function () {
         var val = searchInput.value.trim();
         if (!looksLikeFundCode(val)) hideNewFundPanel();
@@ -297,6 +336,15 @@
     searchInput.addEventListener('blur', function () {
       setTimeout(function () { paused = false; scheduleNext(); }, 2000);
     });
+    // 金额输入框 focus 也暂停
+    var amountInput = document.getElementById('quick-buy-amount');
+    if (amountInput) {
+      amountInput.addEventListener('focus', function () { paused = true; clearTimeout(refreshTimer); });
+      amountInput.addEventListener('blur', function () {
+        setTimeout(function () { paused = false; scheduleNext(); }, 2000);
+      });
+    }
+    
     // 实时搜索过滤（非代码模式）
     searchInput.addEventListener('input', function () {
       clearTimeout(searchTimer);

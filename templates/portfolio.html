@@ -12,13 +12,8 @@
   <form method="post" action="/portfolio">
     <div class="form-grid">
       <div class="form-field">
-        <label class="form-label">基金</label>
-        <select name="fund_code" required>
-          <option value="">-- 选择基金 --</option>
-          {% for fund in funds %}
-          <option value="{{ fund.fund_code }}">{{ fund.fund_code }} · {{ fund.fund_name }}</option>
-          {% endfor %}
-        </select>
+        <label class="form-label">基金代码</label>
+        <input type="text" name="fund_code" placeholder="如 001467" required>
       </div>
       <div class="form-field">
         <label class="form-label">持有金额（元）</label>
@@ -32,10 +27,8 @@
         <label class="form-label">成本净值</label>
         <input type="number" step="0.0001" name="cost_nav" placeholder="可选">
       </div>
-      <div class="form-field">
-        <label class="form-label">平台</label>
-        <input type="text" name="platform" placeholder="支付宝/天天基金">
-      </div>
+      <!-- 平台自动设为支付宝/蚂蚁财富，不再让用户填写 -->
+      <input type="hidden" name="platform" value="支付宝/蚂蚁财富">
       <div class="form-field">
         <label class="form-label">状态</label>
         <select name="is_active">

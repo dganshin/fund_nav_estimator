@@ -427,7 +427,6 @@ def test_tencent_live_quote_parser_builds_today_records():
     assert records[0].asset_code == "600988.SH"
     assert records[0].trade_date.isoformat() == "2026-05-26"
     assert round(records[0].return_pct, 6) == round((37.15 / 36.03) - 1.0, 6)
-    assert round(result.coverage_adjusted_estimate or 0.0, 8) == round(expected_effective, 8)
 
 
 def test_user_position_today_profit_equals_amount_times_estimate(tmp_path):

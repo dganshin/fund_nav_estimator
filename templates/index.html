@@ -12,8 +12,9 @@
   <span id="status-message">{{ status_message }}</span>
 </div>
 
-<div class="toolbar">
-  <input id="search-input" type="text" value="{{ search }}" placeholder="搜索基金名称 / 输入基金代码…" autocomplete="off">
+<div class="toolbar" style="display:flex; gap:8px; align-items:center;">
+  <input id="search-input" type="text" value="{{ search }}" placeholder="搜索基金名称 / 输入代码…" autocomplete="off" style="flex:1;">
+  <button id="search-btn" class="btn btn-secondary" style="height:44px; padding:0 16px;">搜索</button>
   <select id="sort-select">
     {% for key, label in sort_options.items() %}
     <option value="{{ key }}" {% if sort == key %}selected{% endif %}>{{ label }}</option>
@@ -21,9 +22,9 @@
   </select>
   <select id="refresh-select">
     <option value="0" {% if refresh == 'off' or not refresh %}selected{% endif %}>不刷新</option>
+    <option value="1" {% if refresh == '1' %}selected{% endif %}>1秒</option>
+    <option value="5" {% if refresh == '5' %}selected{% endif %}>5秒</option>
     <option value="10" {% if refresh == '10' %}selected{% endif %}>10秒</option>
-    <option value="30" {% if refresh == '30' %}selected{% endif %}>30秒</option>
-    <option value="60" {% if refresh == '60' %}selected{% endif %}>60秒</option>
   </select>
   <form method="get" action="/" style="display:contents">
     <input type="hidden" name="force" value="1">

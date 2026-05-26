@@ -21,7 +21,10 @@
       <div class="form-grid">
         <div class="form-field">
           <label class="form-label">基金代码（保留前导零）</label>
-          <input type="text" name="fund_code" placeholder="002207" required>
+          <div style="display:flex; gap:8px;">
+            <input type="text" name="fund_code" id="manage-fund-code" placeholder="002207" required style="flex:1;">
+            <button type="button" class="btn btn-ghost" id="manage-fetch-btn" style="padding:0 8px;">拉取</button>
+          </div>
         </div>
         <div class="form-field">
           <label class="form-label">基金名称</label>
@@ -303,4 +306,35 @@
     {% endif %}
   </div>
 </div>
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+  var fetchBtn = document.getElementById("manage-fetch-btn");
+  if (fetchBtn) {
+    fetchBtn.addEventListener("click", function() {
+      var code = document.getElementById("manage-fund-code").value.trim();
+      if (!code) {
+        alert("请输入基金代码");
+        return;
+      }
+      fetchBtn.textContent = "拉取中...";
+      fetchBtn.disabled = true;
+      fetch("/api/search-fund?code=" + encodeURIComponent(code))
+        .then(r => r.json())
+        .then(data => {
+          if (!data.found && !data.fund_name) {
+            alert("未能拉取到基金信息，请手动填写。");
+          } else {
+            var nameInput = document.querySelector('input[name="fund_name"]');
+            if (nameInput && data.fund_name) nameInput.value = data.fund_name;
+          }
+        })
+        .catch(e => alert("拉取失败：" + e.message))
+        .finally(() => {
+          fetchBtn.textContent = "拉取";
+          fetchBtn.disabled = false;
+        });
+    });
+  }
+});
+</script>
 {% endblock %}
