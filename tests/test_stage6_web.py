@@ -24,6 +24,7 @@ from src.import_data import (
     import_industry_allocations_from_rows,
 )
 from src.init_db import init_db
+from src.web_app import load_live_estimate_results
 from src.web.actions import run_selection_action
 from src.web.queries import (
     get_fund_sidebar_context,
@@ -40,6 +41,14 @@ from src.web_services import (
     save_user_position_rows,
 )
 from tests.test_stage4 import make_mock_source, seed_fund_holdings_and_allocations
+
+
+class EmptyLiveDataSource:
+    def __init__(self) -> None:
+        self.last_warnings = ["Warning: no live quotes fetched."]
+
+    def fetch_stock_live_quotes(self, asset_codes, sleep_seconds=0.0, timeout_seconds=8.0):
+        return []
 
 
 def create_session_factory(tmp_path):
@@ -330,6 +339,35 @@ def test_compute_live_fund_estimates_uses_live_quotes(tmp_path):
     assert results[0].holdings[0].published_weight_pct > 0
     assert results[0].holdings[0].effective_weight_pct > results[0].holdings[0].published_weight_pct
     assert results[0].effective_method == "修正权重"
+
+
+def test_live_estimate_results_fallback_to_latest_daily_quote(tmp_path):
+    session_factory = create_session_factory(tmp_path)
+    data_source = make_mock_source()
+    with session_factory() as session:
+        seed_fund_holdings_and_allocations(tmp_path, session)
+        fetch_and_store_stock_quotes(
+            session,
+            data_source,
+            date.fromisoformat("2026-05-22"),
+            date.fromisoformat("2026-05-22"),
+            ["600988.SH", "000975.SZ"],
+        )
+
+    results, warnings, used_fallback = load_live_estimate_results(
+        session_factory=session_factory,
+        data_source=EmptyLiveDataSource(),
+        selection_policy="coverage_first",
+        window=20,
+        min_samples=5,
+        sleep_seconds=0.0,
+        fund_code="002207",
+    )
+
+    assert used_fallback is True
+    assert results
+    assert results[0].quote_time is not None
+    assert any("fallback" in warning for warning in warnings)
 
 
 def test_effective_weight_versions_scale_to_stock_weight(tmp_path):

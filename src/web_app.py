@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import sys
-from datetime import date
+from datetime import date, datetime, time
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from sqlalchemy import select
 try:
     from streamlit_autorefresh import st_autorefresh
 except ImportError:
@@ -27,6 +28,7 @@ if __package__ in {None, ""}:
     )
     from src.import_data import DataImportError
     from src.init_db import init_db
+    from src.models import DailyQuote
     from src.web import (
         build_error_figure,
         build_return_comparison_figure,
@@ -70,6 +72,7 @@ else:
     )
     from .import_data import DataImportError
     from .init_db import init_db
+    from .models import DailyQuote
     from .web import (
         build_error_figure,
         build_return_comparison_figure,
@@ -144,23 +147,19 @@ def inject_styles() -> None:
         """
         <style>
         .stApp {
-            background: linear-gradient(180deg, #eef4ff 0%, #f8fbff 18%, #f5f7fb 100%);
-            color: #172033;
+            background: #11141a;
+            color: #eef2f9;
         }
         .block-container {
-            padding-top: 4.4rem;
-            padding-bottom: 2.4rem;
-            max-width: 1320px;
+            padding-top: 4.2rem;
+            padding-bottom: 2rem;
+            max-width: 880px;
         }
-        section[data-testid="stSidebar"] {
-            background: #ffffff;
-            border-right: 1px solid #e8edf7;
-        }
-        section[data-testid="stSidebar"] > div {
-            background: #ffffff;
+        #MainMenu, footer {
+            visibility: hidden;
         }
         [data-testid="stHeader"] {
-            background: rgba(245,247,251,0.85);
+            background: rgba(17,20,26,0.92);
             backdrop-filter: blur(10px);
         }
         [data-testid="stToolbar"] {
@@ -175,332 +174,284 @@ def inject_styles() -> None:
             padding: 0.2rem 0 0.6rem;
         }
         .page-title {
-            color: #1f2a44;
-            font-size: 2rem;
+            color: #f5f7fb;
+            font-size: 2.1rem;
             font-weight: 800;
             line-height: 1.1;
             margin-bottom: 0.3rem;
         }
         .page-subtitle {
-            color: #6f7c96;
-            font-size: 0.98rem;
-        }
-        .nav-strip {
-            display: flex;
-            gap: 0.55rem;
-            flex-wrap: wrap;
-            margin-bottom: 0.4rem;
+            color: #9aa6bb;
+            font-size: 0.92rem;
         }
         .toolbar-card {
-            background: #ffffff;
-            border: 1px solid #e6ecf7;
-            border-radius: 22px;
-            padding: 1rem 1.1rem;
-            box-shadow: 0 8px 24px rgba(24,39,75,0.04);
+            background: #171b22;
+            border: 1px solid #272d39;
+            border-radius: 18px;
+            padding: 0.85rem 0.95rem;
+            box-shadow: none;
         }
         .overview-list {
             display: flex;
             flex-direction: column;
-            gap: 0.75rem;
+            gap: 0.5rem;
         }
         .overview-row {
-            background: #ffffff;
-            border: 1px solid #e8eef8;
-            border-radius: 20px;
-            padding: 1rem 1.05rem;
-            box-shadow: 0 8px 22px rgba(24,39,75,0.04);
+            background: #1a1f28;
+            border: 1px solid #2b3340;
+            border-radius: 16px;
+            padding: 0.9rem 1rem;
+            box-shadow: none;
         }
         .overview-grid {
             display: grid;
-            grid-template-columns: minmax(220px, 1.5fr) repeat(6, minmax(88px, 1fr)) 96px;
-            gap: 0.85rem;
+            grid-template-columns: minmax(220px, 1.8fr) minmax(88px, 1fr) minmax(88px, 1fr) 64px 88px;
+            gap: 0.7rem;
             align-items: center;
         }
         .overview-head {
             background: transparent;
             box-shadow: none;
             border: none;
-            padding: 0 0.4rem;
+            padding: 0 0.2rem;
         }
         .overview-head .overview-grid {
-            color: #8693a9;
-            font-size: 0.84rem;
+            color: #7b8698;
+            font-size: 0.8rem;
             font-weight: 700;
         }
         .fund-name {
-            color: #1f2a44;
-            font-size: 1.02rem;
+            color: #f3f6fb;
+            font-size: 1rem;
             font-weight: 800;
             line-height: 1.28;
         }
         .fund-code {
-            color: #91a0b6;
-            font-size: 0.82rem;
-            margin-top: 0.22rem;
+            color: #7f8ba0;
+            font-size: 0.78rem;
+            margin-top: 0.18rem;
         }
         .mini-metric {
-            color: #6f7c96;
-            font-size: 0.78rem;
-            margin-bottom: 0.18rem;
+            color: #7f8ba0;
+            font-size: 0.74rem;
+            margin-bottom: 0.12rem;
         }
         .mini-value {
-            color: #1f2a44;
-            font-size: 1rem;
+            color: #eef2f9;
+            font-size: 1.06rem;
             font-weight: 800;
             line-height: 1.18;
         }
         .mini-value.positive {
-            color: #ef5350;
+            color: #ff6b73;
         }
         .mini-value.negative {
-            color: #10a36d;
+            color: #45c47c;
         }
         .tag-badge {
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            min-width: 52px;
+            min-width: 44px;
             border-radius: 999px;
-            padding: 0.32rem 0.7rem;
-            font-size: 0.78rem;
+            padding: 0.24rem 0.56rem;
+            font-size: 0.74rem;
             font-weight: 800;
         }
         .tag-badge.method {
-            color: #2f6bff;
-            background: #eef4ff;
+            color: #d8e0f1;
+            background: #44516a;
         }
         .tag-badge.conf-a {
-            color: #ffffff;
-            background: #2f6bff;
+            color: #d7e6ff;
+            background: #2a5ee8;
         }
         .tag-badge.conf-b {
-            color: #2f6bff;
-            background: #eaf2ff;
+            color: #b8d2ff;
+            background: #294265;
         }
         .tag-badge.conf-c {
-            color: #9b6b00;
-            background: #fff4d9;
+            color: #ffd488;
+            background: #4b3c1d;
         }
         .tag-badge.conf-d {
-            color: #8a97ad;
-            background: #f2f4f8;
+            color: #bcc5d4;
+            background: #353d49;
         }
         .detail-header {
-            background: #ffffff;
-            border: 1px solid #e8eef8;
-            border-radius: 22px;
-            padding: 1.15rem 1.2rem;
-            box-shadow: 0 8px 22px rgba(24,39,75,0.04);
+            background: #1a1f28;
+            border: 1px solid #2b3340;
+            border-radius: 18px;
+            padding: 1rem 1rem 0.95rem;
+            box-shadow: none;
         }
         .detail-title {
-            color: #1f2a44;
-            font-size: 1.9rem;
+            color: #f5f7fb;
+            font-size: 1.35rem;
             font-weight: 800;
             line-height: 1.15;
         }
         .detail-subtitle {
-            color: #73829b;
-            font-size: 0.96rem;
-            margin-top: 0.25rem;
-        }
-        .app-shell {
-            padding: 1.4rem 1.5rem 1.2rem;
-            border: 1px solid rgba(47,107,255,0.08);
-            border-radius: 24px;
-            background: linear-gradient(135deg, #2f6bff 0%, #5b8cff 78%, #79a2ff 100%);
-            box-shadow: 0 18px 42px rgba(47,107,255,0.16);
-        }
-        .hero-eyebrow {
-            color: rgba(255,255,255,0.82);
-            font-size: 0.86rem;
-            font-weight: 700;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-        }
-        .hero-title {
-            color: #ffffff;
-            margin: 0.45rem 0 0.18rem;
-            font-size: 2.75rem;
-            font-weight: 800;
-            line-height: 1.08;
-        }
-        .hero-subtitle {
-            color: rgba(255,255,255,0.92);
-            font-size: 1rem;
-            margin-bottom: 0.55rem;
-        }
-        .meta-strip {
-            margin-top: 1rem;
-            padding: 0.9rem 1rem;
-            border-radius: 18px;
-            background: rgba(255,255,255,0.18);
-            color: rgba(255,255,255,0.96);
-            font-size: 0.94rem;
-            backdrop-filter: blur(6px);
+            color: #91a0b6;
+            font-size: 0.9rem;
+            margin-top: 0.2rem;
         }
         .section-title {
-            color: #1f2a44;
-            margin-top: 0.25rem;
-            margin-bottom: 0.55rem;
-            font-size: 1.55rem;
+            color: #eef2f9;
+            margin-top: 0.15rem;
+            margin-bottom: 0.4rem;
+            font-size: 1.1rem;
             font-weight: 800;
         }
         .section-caption {
-            color: #7b879d;
-            margin-bottom: 0.8rem;
+            color: #8692a6;
+            margin-bottom: 0.55rem;
+            font-size: 0.85rem;
         }
         .card-section {
-            background: #ffffff;
-            border: 1px solid #ebeff7;
-            border-radius: 22px;
-            padding: 1.15rem 1.2rem;
-            box-shadow: 0 10px 28px rgba(24,39,75,0.05);
+            background: #171b22;
+            border: 1px solid #272d39;
+            border-radius: 18px;
+            padding: 0.95rem 1rem;
+            box-shadow: none;
         }
         .stat-card {
-            background: #ffffff;
-            border: 1px solid #e9eef8;
-            border-radius: 18px;
-            padding: 1rem 1rem 0.95rem;
-            min-height: 116px;
-            box-shadow: 0 10px 24px rgba(24,39,75,0.04);
+            background: #1a1f28;
+            border: 1px solid #2b3340;
+            border-radius: 16px;
+            padding: 0.9rem;
+            min-height: 90px;
+            box-shadow: none;
         }
         .stat-label {
-            color: #7a879b;
-            font-size: 0.9rem;
+            color: #8090a8;
+            font-size: 0.84rem;
             font-weight: 600;
-            margin-bottom: 0.55rem;
+            margin-bottom: 0.4rem;
         }
         .stat-value {
-            color: #172033;
-            font-size: 2rem;
+            color: #eef2f9;
+            font-size: 1.55rem;
             font-weight: 800;
             line-height: 1.06;
             letter-spacing: -0.02em;
         }
         .stat-value.positive {
-            color: #ef5350;
+            color: #ff6b73;
         }
         .stat-value.negative {
-            color: #10a36d;
+            color: #45c47c;
         }
         .stat-subvalue {
             margin-top: 0.45rem;
-            color: #97a2b7;
-            font-size: 0.86rem;
+            color: #8692a6;
+            font-size: 0.8rem;
         }
         .badge-line {
             display: flex;
             flex-wrap: wrap;
-            gap: 0.55rem;
-            margin: 0.2rem 0 0.55rem;
+            gap: 0.45rem;
+            margin: 0.15rem 0 0.45rem;
         }
         .info-badge {
             display: inline-flex;
             align-items: center;
             border-radius: 999px;
-            padding: 0.38rem 0.78rem;
-            background: #eef4ff;
-            color: #2f6bff;
-            font-size: 0.84rem;
+            padding: 0.28rem 0.62rem;
+            background: #252d39;
+            color: #c7d4eb;
+            font-size: 0.78rem;
             font-weight: 700;
         }
-        .summary-slab {
-            background: #ffffff;
-            border: 1px solid #ebeff7;
-            border-radius: 20px;
-            padding: 1rem 1.1rem;
-            box-shadow: 0 10px 24px rgba(24,39,75,0.04);
-        }
-        .summary-slab-title {
-            color: #7b879d;
-            font-size: 0.88rem;
-            font-weight: 600;
-            margin-bottom: 0.4rem;
-        }
-        .summary-slab-value {
-            color: #1f2a44;
-            font-size: 1.15rem;
-            font-weight: 700;
-            line-height: 1.35;
-        }
-        .summary-slab-note {
-            color: #97a2b7;
+        .status-strip {
+            background: #171b22;
+            border: 1px solid #252d39;
+            border-radius: 14px;
+            padding: 0.65rem 0.8rem;
+            color: #aab5c8;
             font-size: 0.82rem;
-            margin-top: 0.32rem;
+            margin-bottom: 0.6rem;
         }
-        .holdings-list {
+        .status-strip.error {
+            border-color: #6a3940;
+            color: #f1b7bd;
+        }
+        .status-strip.warning {
+            border-color: #665733;
+            color: #f1deaa;
+        }
+        .compact-list {
             display: flex;
             flex-direction: column;
-            gap: 0.8rem;
+            gap: 0.4rem;
         }
-        .holding-row {
-            background: #ffffff;
-            border: 1px solid #ebeff7;
-            border-radius: 18px;
-            padding: 0.95rem 1rem;
-            box-shadow: 0 8px 22px rgba(24,39,75,0.04);
+        .compact-row {
+            background: #1a1f28;
+            border: 1px solid #2b3340;
+            border-radius: 14px;
+            padding: 0.82rem 0.9rem;
         }
-        .holding-top {
-            display: flex;
-            justify-content: space-between;
-            gap: 1rem;
-            align-items: baseline;
+        .compact-row-inner {
+            display: grid;
+            grid-template-columns: minmax(180px, 1.6fr) minmax(92px, 1fr) minmax(92px, 1fr) 64px 74px;
+            gap: 0.55rem;
+            align-items: center;
         }
-        .holding-name {
-            color: #1f2a44;
-            font-size: 1.04rem;
+        .compact-head {
+            color: #76839a;
+            font-size: 0.76rem;
+            font-weight: 800;
+            padding: 0 0.3rem;
+            margin-bottom: 0.2rem;
+        }
+        .compact-fund-name {
+            color: #f3f6fb;
+            font-size: 0.98rem;
             font-weight: 700;
         }
-        .holding-weight {
-            color: #1f2a44;
-            font-size: 1.2rem;
+        .compact-fund-note {
+            color: #7f8ba0;
+            font-size: 0.76rem;
+            margin-top: 0.16rem;
+        }
+        .compact-number {
+            color: #eef2f9;
+            font-size: 1.15rem;
             font-weight: 800;
+            text-align: right;
         }
-        .holding-meta {
-            margin-top: 0.35rem;
-            display: flex;
-            justify-content: space-between;
-            gap: 1rem;
-            color: #8692a8;
-            font-size: 0.86rem;
+        .compact-number.positive {
+            color: #ff6b73;
         }
-        .holding-tag {
-            display: inline-flex;
-            align-items: center;
-            border-radius: 10px;
-            padding: 0.15rem 0.45rem;
-            background: #eef4ff;
-            color: #4b6db2;
-            margin-right: 0.35rem;
+        .compact-number.negative {
+            color: #45c47c;
+        }
+        .compact-subnote {
+            color: #7f8ba0;
+            font-size: 0.74rem;
+            text-align: right;
+            margin-top: 0.12rem;
         }
         .stTabs [data-baseweb="tab-list"] {
-            gap: 1.25rem;
+            gap: 0.8rem;
             background: transparent;
-            border-bottom: 1px solid #e6ecf7;
+            border-bottom: 1px solid #293140;
         }
         .stTabs [data-baseweb="tab"] {
-            height: 2.8rem;
+            height: 2.6rem;
             padding-left: 0;
             padding-right: 0;
-            color: #7b879d;
+            color: #7f8ba0;
             font-weight: 700;
         }
         .stTabs [aria-selected="true"] {
-            color: #2f6bff;
-        }
-        .sidebar-help {
-            padding: 0.9rem 1rem;
-            border-radius: 16px;
-            background: #f5f8ff;
-            color: #62718d;
-            font-size: 0.9rem;
-            border: 1px solid #e4ebfb;
+            color: #f5f7fb;
         }
         .stTabs [data-baseweb="tab-border"] {
-            background: #2f6bff;
+            background: #5f86ff;
         }
         .stTabs [data-baseweb="tab-highlight"] {
-            background-color: #2f6bff;
+            background-color: #5f86ff;
         }
         div[data-baseweb="select"] > div,
         div[data-baseweb="input"] > div,
@@ -508,11 +459,11 @@ def inject_styles() -> None:
         .stNumberInput > div > div,
         .stTextInput > div > div,
         .stTextArea textarea {
-            background: #ffffff !important;
-            border: 1px solid #dce5f4 !important;
-            border-radius: 16px !important;
-            box-shadow: 0 6px 18px rgba(24,39,75,0.04) !important;
-            color: #1f2a44 !important;
+            background: #171b22 !important;
+            border: 1px solid #2b3340 !important;
+            border-radius: 14px !important;
+            box-shadow: none !important;
+            color: #eef2f9 !important;
         }
         div[data-baseweb="select"] span,
         div[data-baseweb="input"] input,
@@ -520,92 +471,86 @@ def inject_styles() -> None:
         .stNumberInput input,
         .stTextInput input,
         .stTextArea textarea {
-            color: #1f2a44 !important;
+            color: #eef2f9 !important;
         }
         .stDateInput label,
         .stSelectbox label,
         .stNumberInput label,
         .stTextInput label,
         .stTextArea label {
-            color: #8a97ad !important;
+            color: #7f8ba0 !important;
             font-weight: 600 !important;
         }
         .stButton > button,
         .stDownloadButton > button {
             width: 100%;
-            min-height: 3.15rem;
-            border-radius: 16px !important;
-            border: 1px solid #2f6bff !important;
-            background: linear-gradient(135deg, #2f6bff 0%, #5b8cff 100%) !important;
+            min-height: 2.8rem;
+            border-radius: 14px !important;
+            border: 1px solid #2b3340 !important;
+            background: #1b2230 !important;
             color: #ffffff !important;
             font-weight: 700 !important;
-            box-shadow: 0 12px 24px rgba(47,107,255,0.18) !important;
+            box-shadow: none !important;
         }
         .stButton > button:hover,
         .stDownloadButton > button:hover {
-            border-color: #2459dd !important;
-            background: linear-gradient(135deg, #2459dd 0%, #4c7df6 100%) !important;
+            border-color: #40516a !important;
+            background: #222a39 !important;
         }
         .stButton > button[kind="secondary"] {
-            background: #ffffff !important;
-            color: #2f6bff !important;
-            border: 1px solid #dbe6ff !important;
+            background: #171b22 !important;
+            color: #dbe6ff !important;
+            border: 1px solid #2b3340 !important;
             box-shadow: none !important;
         }
         [data-testid="stExpander"] {
-            border: 1px solid #e6ecf7 !important;
-            border-radius: 18px !important;
-            background: #ffffff !important;
+            border: 1px solid #2b3340 !important;
+            border-radius: 16px !important;
+            background: #171b22 !important;
             overflow: hidden;
         }
         [data-testid="stExpander"] details summary {
-            color: #1f2a44 !important;
+            color: #eef2f9 !important;
             font-weight: 700 !important;
         }
         [data-testid="stDataFrameResizable"] {
-            background: #ffffff;
+            background: #171b22;
         }
         [data-testid="stDataFrame"] thead tr th {
-            background: #f7faff !important;
-            color: #6d7b94 !important;
+            background: #171b22 !important;
+            color: #7f8ba0 !important;
         }
         [data-testid="stDataFrame"] tbody tr {
-            background: #ffffff !important;
+            background: #11141a !important;
         }
         [data-testid="stDataFrame"] tbody tr:nth-child(even) {
-            background: #fbfcff !important;
+            background: #151922 !important;
         }
         [data-testid="stMarkdownContainer"] code {
-            background: #eff4ff;
-            color: #2f6bff;
+            background: #202733;
+            color: #dce6ff;
             border-radius: 8px;
             padding: 0.12rem 0.35rem;
         }
-        .sidebar-section-title {
-            color: #1f2a44;
-            font-size: 1.45rem;
-            font-weight: 800;
-            margin-bottom: 0.6rem;
-        }
         .sidebar-block-title {
-            color: #24324c;
-            font-size: 1.05rem;
+            color: #dce6ff;
+            font-size: 0.96rem;
             font-weight: 700;
-            margin: 1.1rem 0 0.5rem;
+            margin: 0.7rem 0 0.45rem;
         }
         div[data-testid="stDataFrame"] {
-            border: 1px solid #ebeff7;
-            border-radius: 18px;
+            border: 1px solid #2b3340;
+            border-radius: 14px;
             overflow: hidden;
-            box-shadow: 0 8px 22px rgba(24,39,75,0.04);
+            box-shadow: none;
         }
         .small-note {
-            color: #91a0b6;
+            color: #7f8ba0;
             font-size: 0.82rem;
         }
-        @media (max-width: 1100px) {
-            .overview-grid {
-                grid-template-columns: 1.4fr repeat(4, 1fr);
+        @media (max-width: 900px) {
+            .compact-row-inner {
+                grid-template-columns: 1.4fr 0.9fr 0.9fr 64px 74px;
             }
         }
         </style>
@@ -628,6 +573,26 @@ def make_table(rows: list[dict[str, object]], columns: list[str]) -> pd.DataFram
 def show_warnings(warnings: list[str]) -> None:
     for warning in warnings:
         st.warning(warning)
+
+
+def summarize_runtime_status(warnings: list[str], used_fallback: bool = False) -> tuple[str, str]:
+    normalized = [str(item) for item in warnings if item]
+    if used_fallback and normalized:
+        return "部分实时行情失败, 已回退到最近收盘行情。", "warning"
+    if used_fallback:
+        return "当前使用最近收盘行情估值, 实时行情暂不可用。", "warning"
+    if any("timed out" in item or "failed" in item for item in normalized):
+        return "部分行情延迟, 已混合使用可用行情继续估值。", "warning"
+    if normalized:
+        return "部分数据存在异常, 请稍后刷新。", "warning"
+    return "实时行情正常。", "ok"
+
+
+def render_status_strip(message: str, tone: str = "ok") -> None:
+    st.markdown(
+        f'<div class="status-strip {tone}">{message}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def format_method_name(method: str | None) -> str:
@@ -736,6 +701,27 @@ def get_data_status(quote_time: datetime | None) -> tuple[str, str]:
     return f"实时 {age_seconds}s", "ok"
 
 
+def load_latest_daily_quote_map(session, asset_codes: list[str]) -> tuple[dict[str, dict[str, object]], bool]:
+    if not asset_codes:
+        return {}, False
+    rows = session.scalars(
+        select(DailyQuote)
+        .where(DailyQuote.asset_code.in_(asset_codes))
+        .order_by(DailyQuote.trade_date.desc())
+    ).all()
+    quote_map: dict[str, dict[str, object]] = {}
+    for quote in rows:
+        if quote.asset_code in quote_map:
+            continue
+        quote_map[quote.asset_code] = {
+            "asset_name": quote.asset_name,
+            "return_pct": quote.return_pct,
+            "quote_time": datetime.combine(quote.trade_date, time(hour=15, minute=0)),
+            "source": f"{quote.source}:fallback_daily",
+        }
+    return quote_map, bool(quote_map)
+
+
 def render_holdings_preview(rows: list[dict[str, object]]) -> None:
     if not rows:
         st.info("当前没有 active holdings。")
@@ -771,7 +757,7 @@ def load_live_estimate_results(
     min_samples: int,
     sleep_seconds: float,
     fund_code: str | None = None,
-) -> tuple[list, list[str]]:
+) -> tuple[list, list[str], bool]:
     with session_factory() as session:
         target_fund_code = fund_code
         if target_fund_code is None:
@@ -786,7 +772,7 @@ def load_live_estimate_results(
             holding_rows = load_holding_rows(session, target_fund_code)
         asset_codes = list(dict.fromkeys(row["asset_code"] for row in holding_rows))
     if not asset_codes:
-        return [], ["Warning: no active holdings available for live estimate."]
+        return [], ["Warning: no active holdings available for live estimate."], False
 
     if hasattr(data_source, "last_warnings"):
         data_source.last_warnings = []  # type: ignore[attr-defined]
@@ -796,11 +782,6 @@ def load_live_estimate_results(
         timeout_seconds=8.0,
     )
     warnings = list(getattr(data_source, "last_warnings", []))
-    if not live_records:
-        warnings.append("Warning: no live quotes fetched.")
-        return [], warnings
-
-    quote_time = max(record.quote_time for record in live_records)
     live_quote_map = {
         record.asset_code: {
             "asset_name": record.asset_name,
@@ -810,6 +791,28 @@ def load_live_estimate_results(
         }
         for record in live_records
     }
+    used_fallback = False
+    with session_factory() as session:
+        fallback_map, has_fallback = load_latest_daily_quote_map(session, asset_codes)
+    if not live_records and has_fallback:
+        live_quote_map = fallback_map
+        used_fallback = True
+        warnings.append("fallback_to_daily_quotes")
+    elif live_records and len(live_quote_map) < len(asset_codes) and has_fallback:
+        for asset_code, payload in fallback_map.items():
+            live_quote_map.setdefault(asset_code, payload)
+        used_fallback = True
+        warnings.append("partial_fallback_to_daily_quotes")
+    if not live_quote_map:
+        warnings.append("Warning: no live quotes fetched.")
+        return [], warnings, False
+
+    quote_times = [
+        payload.get("quote_time")
+        for payload in live_quote_map.values()
+        if isinstance(payload.get("quote_time"), datetime)
+    ]
+    quote_time = max(quote_times) if quote_times else datetime.now()
     with session_factory() as session:
         results = compute_live_fund_estimates(
             session=session,
@@ -825,7 +828,7 @@ def load_live_estimate_results(
             calibration_base="coverage_adjusted",
             calibration_min_samples=5,
         )
-    return results, warnings
+    return results, warnings, used_fallback
 
 
 def render_overview_page(
@@ -839,7 +842,7 @@ def render_overview_page(
     search_text: str = "",
 ) -> None:
     with st.spinner("正在抓取实时行情并计算基金估值..."):
-        results, warnings = load_live_estimate_results(
+        results, warnings, used_fallback = load_live_estimate_results(
             session_factory=session_factory,
             data_source=data_source,
             selection_policy=selection_policy,
@@ -860,6 +863,7 @@ def render_overview_page(
             "quote_time": item.quote_time,
             "status_label": get_data_status(item.quote_time)[0],
             "latest_real_nav_date": item.latest_real_nav_date,
+            "is_holding": item.holding_amount is not None,
             "warnings": item.warnings,
         }
         for item in results
@@ -882,32 +886,31 @@ def render_overview_page(
     elif sort_by == "confidence":
         rows.sort(key=lambda row: {"A": 4, "B": 3, "C": 2, "D": 1}.get(row["confidence_level"], 0), reverse=descending)
 
-    st.markdown('<div class="section-title">今日估值排序</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">基金实时估值</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="section-caption">首页只看基金池实时估值。点详情时, 再看这只基金的持仓股票涨跌和贡献。</div>',
+        '<div class="section-caption">首页只看估值和今日盈亏, 点进去再看股票贡献。</div>',
         unsafe_allow_html=True,
     )
 
     latest_times = [row["quote_time"] for row in rows if row["quote_time"] is not None]
     latest_time_text = max(latest_times).strftime("%H:%M:%S") if latest_times else "N/A"
-    st.caption(f"行情更新时间: {latest_time_text} | 估值日期: {format_display_date(rows[0]['latest_estimate_date']) if rows else 'N/A'} | 候选基金数: {len(rows)}")
-    show_warnings(warnings)
+    st.caption(f"更新时间: {latest_time_text} | 估值日期: {format_display_date(rows[0]['latest_estimate_date']) if rows else 'N/A'} | 候选基金数: {len(rows)} | 仅供参考")
+    status_text, status_tone = summarize_runtime_status(warnings, used_fallback=used_fallback)
+    render_status_strip(status_text, status_tone)
 
     if not rows:
-        st.error("当前没有生成任何实时估值结果。")
-        st.info("先检查 3 件事: 1. 是否有启用中的基金和持仓 2. 实时股票行情是否抓到 3. 点击一次“刷新实时估值”或“生成/更新修正权重”。")
+        st.markdown('<div class="small-note">当前没有生成任何实时估值结果。请检查基金池、持仓和行情源。</div>', unsafe_allow_html=True)
         return
 
     st.markdown(
         """
-        <div class="overview-row overview-head">
-            <div class="overview-grid">
+        <div class="compact-head">
+            <div class="compact-row-inner">
                 <div>基金</div>
-                <div>实时估值</div>
-                <div>今日盈亏</div>
-                <div>置信度</div>
-                <div>更新时间</div>
-                <div></div>
+                <div style="text-align:right;">实时估值</div>
+                <div style="text-align:right;">今日盈亏</div>
+                <div style="text-align:center;">置信</div>
+                <div style="text-align:right;">详情</div>
             </div>
         </div>
         """,
@@ -915,33 +918,32 @@ def render_overview_page(
     )
 
     for row in rows:
-        row_cols = st.columns([3.2, 1.1, 1.1, 0.8, 1.0, 0.8])
+        row_cols = st.columns([3.8, 1.3, 1.3, 0.8, 0.9], vertical_alignment="center")
         with row_cols[0]:
-            amount_note = "未录入持仓金额"
+            amount_note = "未录入持仓"
             if row["holding_amount"] is not None:
                 amount_note = f"持有金额 {float(row['holding_amount']):.2f}"
+            hold_note = "持有" if row["is_holding"] else "观察"
             st.markdown(
                 f"""
                 <div class="fund-name">{row['fund_name'] or '未命名基金'}</div>
-                <div class="fund-code">{row['fund_code']} | {amount_note}</div>
+                <div class="fund-code">{row['fund_code']} | {hold_note} | {amount_note}</div>
                 """,
                 unsafe_allow_html=True,
             )
         with row_cols[1]:
-            render_overview_metric("估值", format_percent(row["best_estimate"], signed=True))
+            render_overview_metric("", format_percent(row["best_estimate"], signed=True))
         with row_cols[2]:
             profit_value = "N/A" if row["estimated_today_profit"] is None else f"{float(row['estimated_today_profit']):+.2f}"
-            render_overview_metric("盈亏", profit_value)
+            render_overview_metric("", profit_value, row["status_label"])
         with row_cols[3]:
             st.markdown(render_tag_badge(row["confidence_level"] or "N/A", badge_type="confidence", level=row["confidence_level"]), unsafe_allow_html=True)
         with row_cols[4]:
-            render_overview_metric("更新", row["quote_time"].strftime("%H:%M:%S") if row["quote_time"] else "N/A", row["status_label"])
-        with row_cols[5]:
             if st.button("详情", key=f"goto_detail_{row['fund_code']}", use_container_width=True):
                 st.session_state["selected_fund_code"] = row["fund_code"]
                 st.session_state["active_page"] = "详情"
                 st.rerun()
-        st.divider()
+        st.markdown("<div style='height:0.35rem;'></div>", unsafe_allow_html=True)
 
 
 def render_detail_header(snapshot: dict[str, object], selection_policy: str, window: int) -> None:
@@ -1300,7 +1302,7 @@ def render_dashboard_tab(
         return
 
     with st.spinner("正在抓取该基金实时行情和持仓贡献..."):
-        live_results, live_warnings = load_live_estimate_results(
+        live_results, live_warnings, used_fallback = load_live_estimate_results(
             session_factory=session_factory,
             data_source=data_source,
             selection_policy=selection_policy,
@@ -1311,7 +1313,7 @@ def render_dashboard_tab(
         )
     live_result = live_results[0] if live_results else None
     if live_result is None:
-        st.warning("当前没有可用的实时估值结果, 请先确认 active holdings 和实时行情。")
+        render_status_strip("当前没有可用的估值结果, 请先检查持仓和行情源。", "error")
         return
 
     with session_factory() as session:
@@ -1371,11 +1373,15 @@ def render_dashboard_tab(
     }
 
     render_detail_header(snapshot, selection_policy, window)
-    show_warnings(live_warnings + live_result.warnings)
+    detail_status, detail_tone = summarize_runtime_status(
+        live_warnings + live_result.warnings,
+        used_fallback=used_fallback,
+    )
+    render_status_strip(detail_status, detail_tone)
 
     st.markdown('<div class="section-title">基金详情</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="section-caption">主视图只看估值和持仓股票涨跌贡献, 历史误差和校准统计全部后置到分析区。</div>',
+        '<div class="section-caption">只看当前估值、今日盈亏和股票贡献, 其他分析默认折叠。</div>',
         unsafe_allow_html=True,
     )
 
@@ -1420,13 +1426,13 @@ def render_dashboard_tab(
         holdings_frame["修正权重"] = holdings_frame["修正权重"].map(lambda value: format_table_percent(value, signed=False))
         holdings_frame["涨跌幅"] = holdings_frame["涨跌幅"].map(lambda value: format_table_percent(value, signed=True))
         holdings_frame["贡献"] = holdings_frame["贡献"].map(lambda value: format_table_percent(value, signed=True))
-    st.markdown('<div class="section-title">前10持仓与当日贡献</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">持仓股票贡献</div>', unsafe_allow_html=True)
     st.caption(f"行情更新时间: {live_result.quote_time.strftime('%H:%M:%S') if live_result.quote_time else 'N/A'}")
     st.dataframe(
         holdings_frame[["名称", "代码", "公开权重", "修正权重", "涨跌幅", "贡献", "说明"]] if not holdings_frame.empty else holdings_frame,
         use_container_width=True,
         hide_index=True,
-        height=460,
+        height=420,
     )
 
     comparison_frame = comparison_rows_to_frame(compare_rows)
@@ -1558,7 +1564,7 @@ def main() -> None:
         <div class="page-shell">
             <div class="page-head">
                 <div class="page-title">基金盘中估值助手</div>
-                <div class="page-subtitle">先看基金池汇总, 再点进单基金详情, 管理功能单独后置。</div>
+                <div class="page-subtitle">首页看估值和今日盈亏, 详情看股票贡献, 管理功能单独后置。</div>
             </div>
         </div>
         """,
@@ -1578,7 +1584,7 @@ def main() -> None:
         st.session_state["selected_fund_code"] = default_fund_code
     default_start = sidebar_context["start_date"] or date.today().replace(day=1)
     default_end = sidebar_context["end_date"] or date.today()
-    nav_options = ["首页", "详情", "管理", "更新日志"]
+    nav_options = ["首页", "详情", "我的持仓", "管理", "更新日志"]
     if st.session_state.get("active_page") not in nav_options:
         st.session_state["active_page"] = "首页"
     page = st.radio(
@@ -1589,23 +1595,32 @@ def main() -> None:
         key="active_page",
     )
 
-    toolbar_left, toolbar_right = st.columns([5.2, 1.8])
+    toolbar_left, toolbar_right = st.columns([4.8, 1.7], vertical_alignment="bottom")
     with toolbar_left:
         st.markdown('<div class="toolbar-card">', unsafe_allow_html=True)
-        filter_cols = st.columns([1.15, 0.95, 0.95, 1.0, 1.0, 1.0])
-        selected_fund = filter_cols[0].selectbox(
-            "基金",
-            options=list(fund_map.keys()),
-            index=list(fund_map.keys()).index(st.session_state["selected_fund_code"]) if fund_map and st.session_state.get("selected_fund_code") in fund_map else 0 if fund_map else None,
-            format_func=lambda item: f"{item} | {fund_map[item]}",
-        ) if fund_map else None
-        if selected_fund:
-            st.session_state["selected_fund_code"] = selected_fund
-        start_date = filter_cols[1].date_input("开始日期", value=default_start, key="main_start_date")
-        end_date = filter_cols[2].date_input("结束日期", value=default_end, key="main_end_date")
-        search_text = filter_cols[3].text_input("搜索基金", value="", placeholder="名称或代码")
-        sort_label = filter_cols[4].selectbox("首页排序", options=list(SORT_OPTIONS.keys()), index=0)
-        refresh_mode = filter_cols[5].selectbox("自动刷新", options=["关闭", "5秒", "10秒", "30秒"], index=0)
+        selected_fund = st.session_state.get("selected_fund_code")
+        start_date = default_start
+        end_date = default_end
+        search_text = ""
+        sort_label = "按今日估值"
+        refresh_mode = "关闭"
+        if page == "首页":
+            filter_cols = st.columns([1.2, 1.0, 0.8])
+            search_text = filter_cols[0].text_input("搜索基金", value="", placeholder="名称或代码")
+            sort_label = filter_cols[1].selectbox("首页排序", options=list(SORT_OPTIONS.keys()), index=0)
+            refresh_mode = filter_cols[2].selectbox("自动刷新", options=["关闭", "5秒", "10秒", "30秒"], index=0)
+        else:
+            filter_cols = st.columns([1.2, 1.0, 1.0])
+            selected_fund = filter_cols[0].selectbox(
+                "基金",
+                options=list(fund_map.keys()),
+                index=list(fund_map.keys()).index(st.session_state["selected_fund_code"]) if fund_map and st.session_state.get("selected_fund_code") in fund_map else 0 if fund_map else None,
+                format_func=lambda item: f"{item} | {fund_map[item]}",
+            ) if fund_map else None
+            if selected_fund:
+                st.session_state["selected_fund_code"] = selected_fund
+            start_date = filter_cols[1].date_input("开始日期", value=default_start, key="main_start_date")
+            end_date = filter_cols[2].date_input("结束日期", value=default_end, key="main_end_date")
         selection_policy = "coverage_first"
         with st.expander("高级参数", expanded=False):
             advanced_cols = st.columns(3)
@@ -1624,7 +1639,7 @@ def main() -> None:
             st.caption("自动刷新组件未安装, 当前仅支持手动刷新。")
         if st.button("刷新实时估值", use_container_width=True):
             st.rerun()
-        if page in {"详情", "管理"} and st.button("生成/更新修正权重", use_container_width=True):
+        if page in {"详情", "我的持仓", "管理"} and st.button("生成/更新修正权重", use_container_width=True):
             run_action(
                 "生成/更新修正权重",
                 session_factory,
@@ -1680,7 +1695,7 @@ def main() -> None:
                 min_samples,
                 sleep_seconds,
             )
-        st.caption("首页只看估值和今日盈亏, 其余都后置。")
+        st.caption("首页只看估值榜和今日盈亏, 其余都后置。")
         st.markdown("</div>", unsafe_allow_html=True)
 
     try:
@@ -1708,19 +1723,19 @@ def main() -> None:
                 min_samples=min_samples,
                 sleep_seconds=sleep_seconds,
             )
+        elif page == "我的持仓":
+            render_position_editor(session_factory)
         elif page == "管理":
-            manage_tab1, manage_tab2, manage_tab3, manage_tab4, manage_tab5 = st.tabs(
-                ["我的持仓", "基金管理", "持仓管理", "资产配置", "行业配置"]
+            manage_tab1, manage_tab2, manage_tab3, manage_tab4 = st.tabs(
+                ["基金管理", "持仓管理", "资产配置", "行业配置"]
             )
             with manage_tab1:
-                render_position_editor(session_factory)
-            with manage_tab2:
                 render_fund_editor(session_factory)
-            with manage_tab3:
+            with manage_tab2:
                 render_holdings_editor(session_factory, selected_fund)
-            with manage_tab4:
+            with manage_tab3:
                 render_asset_editor(session_factory, selected_fund)
-            with manage_tab5:
+            with manage_tab4:
                 render_industry_editor(session_factory, selected_fund)
         else:
             render_action_report()
