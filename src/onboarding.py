@@ -89,6 +89,11 @@ def _find_target_etf(data_source, fund_name: str, basic_info: dict[str, str]) ->
         return None
     full_name = fund_name if "ETF" in fund_name.upper() else (basic_info.get("基金全称") or fund_name)
     manager = (basic_info.get("基金公司") or "").replace("基金管理有限公司", "").replace("基金", "")
+    if not manager:
+        for prefix in ("华夏", "华安", "博时", "易方达", "国泰", "工银", "前海开源", "广发", "天弘", "南方", "嘉实"):
+            if fund_name.startswith(prefix):
+                manager = prefix
+                break
     theme_candidates: list[str] = []
     for pattern in (
         r"中证(.+?)(?:ETF|交易型开放式|指数证券投资基金)",
@@ -124,6 +129,9 @@ def _find_target_etf(data_source, fund_name: str, basic_info: dict[str, str]) ->
     if any("有色金属" in theme for theme in theme_candidates):
         theme_keywords.append("有色金属")
         theme_keywords.append("工业有色")
+    if any("黄金" in theme for theme in theme_candidates):
+        theme_keywords.append("黄金ETF")
+        theme_keywords.append("黄金")
     theme_keywords = [kw for kw in dict.fromkeys(theme_keywords) if kw]
     candidates = []
     for _, row in df.iterrows():
@@ -134,10 +142,14 @@ def _find_target_etf(data_source, fund_name: str, basic_info: dict[str, str]) ->
         theme_hit = any(keyword and keyword in name for keyword in theme_keywords)
         manager_hit = bool(manager and manager in name)
         if theme_hit:
-            candidates.append((0 if manager_hit else 1, -sum(1 for kw in theme_keywords if kw in name), code, name))
+            exact_penalty = 0
+            if any("黄金" in theme for theme in theme_candidates):
+                # 黄金ETF联接应优先锚定实物黄金ETF, 避免误选黄金股ETF。
+                exact_penalty = 0 if "黄金ETF" in name and "黄金股" not in name else 1
+            candidates.append((exact_penalty, 0 if manager_hit else 1, -sum(1 for kw in theme_keywords if kw in name), code, name))
     if not candidates:
         return None
-    _, _, code, name = sorted(candidates)[0]
+    *_, code, name = sorted(candidates)[0]
     return {
         "asset_code": normalize_asset_code(code),
         "asset_name": name,

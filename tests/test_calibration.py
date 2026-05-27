@@ -36,7 +36,7 @@ from src.calibration import (
     run_online_calibration,
 )
 from src.data_sources.base import FundNavRecord, FundProfile, StockQuoteRecord
-from src.onboarding import ensure_fund_full_onboarded
+from src.onboarding import _find_target_etf, ensure_fund_full_onboarded
 from src.frontend_app import app
 from src.init_db import init_db
 from src.db import get_session_factory
@@ -435,6 +435,24 @@ def test_etf_feeder_prefers_target_etf_over_public_stock_holdings(tmp_path):
     assert item.asset_code == "560780.SH"
     assert item.asset_type == "etf"
     assert round(item.weight, 4) == 0.95
+
+
+def test_gold_etf_feeder_matches_physical_gold_etf_not_gold_stock_etf():
+    class GoldEtfSource:
+        class ak:
+            @staticmethod
+            def fund_etf_spot_em():
+                return pd.DataFrame([
+                    {"代码": "159562", "名称": "黄金股ETF华夏"},
+                    {"代码": "518850", "名称": "黄金ETF华夏"},
+                    {"代码": "518880", "名称": "黄金ETF华安"},
+                ])
+
+    target = _find_target_etf(GoldEtfSource(), "华夏黄金ETF联接A", {})
+
+    assert target is not None
+    assert target["asset_code"] == "518850.SH"
+    assert target["asset_name"] == "黄金ETF华夏"
 
 
 def test_missing_holdings_home_row_shows_status_not_zero(tmp_path):
