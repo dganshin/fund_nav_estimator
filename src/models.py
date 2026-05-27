@@ -290,6 +290,7 @@ class OnlineCalibrationState(Base):
     beta_unknown: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     alpha: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     selected_model: Mapped[str] = mapped_column(String(32), nullable=False, default="coverage_adjusted")
+    model_weight_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_update_trade_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     confidence_level: Mapped[str | None] = mapped_column(String(16), nullable=True)

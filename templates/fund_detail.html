@@ -122,10 +122,12 @@
         <thead>
           <tr>
             <th>日期</th>
-            <th>模型估值 (%)</th>
             <th>实际涨跌 (%)</th>
-            <th>估值误差 (%)</th>
-            <th>模型</th>
+            <th>coverage估值/误差</th>
+            <th>single估值/误差</th>
+            <th>two_factor估值/误差</th>
+            <th>最终估值/误差</th>
+            <th>最终模型</th>
           </tr>
         </thead>
         <tbody id="history-tbody"></tbody>
@@ -245,14 +247,19 @@
     tbody.innerHTML = '';
     rows.slice().reverse().forEach(function(r) {
       var tr = document.createElement('tr');
-      var estimate = pctNumber(r.calibrated_estimate, true);
       var actual = pctNumber(r.actual_return, true);
-      var residual = pctNumber(r.residual, true);
+      function pair(estimate, residual) {
+        var e = pctNumber(estimate, true);
+        var re = pctNumber(residual, true);
+        return '<span' + toneClass(e) + '>' + e + '</span><span style="color:#94a3b8;"> / </span><span' + toneClass(re) + '>' + re + '</span>';
+      }
       tr.innerHTML = [
         '<td>' + r.trade_date + '</td>',
-        '<td' + toneClass(estimate) + '>' + estimate + '</td>',
         '<td' + toneClass(actual) + '>' + actual + '</td>',
-        '<td' + toneClass(residual) + '>' + residual + '</td>',
+        '<td>' + pair(r.coverage_estimate, r.coverage_residual) + '</td>',
+        '<td>' + pair(r.single_estimate, r.single_residual) + '</td>',
+        '<td>' + pair(r.two_factor_estimate, r.two_factor_residual) + '</td>',
+        '<td>' + pair(r.calibrated_estimate, r.residual) + '</td>',
         '<td>' + (r.model_version || '--') + '</td>'
       ].join('');
       tbody.appendChild(tr);

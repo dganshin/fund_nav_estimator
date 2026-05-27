@@ -18,6 +18,7 @@ def migrate_schema(engine) -> None:
                 "beta_unknown": "ALTER TABLE online_calibration_states ADD COLUMN beta_unknown FLOAT NOT NULL DEFAULT 1.0",
                 "alpha": "ALTER TABLE online_calibration_states ADD COLUMN alpha FLOAT NOT NULL DEFAULT 0.0",
                 "selected_model": "ALTER TABLE online_calibration_states ADD COLUMN selected_model VARCHAR(32) NOT NULL DEFAULT 'coverage_adjusted'",
+                "model_weight_json": "ALTER TABLE online_calibration_states ADD COLUMN model_weight_json TEXT NOT NULL DEFAULT '{}'",
             }.items():
                 if name not in columns:
                     connection.execute(text(ddl))

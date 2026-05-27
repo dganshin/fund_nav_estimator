@@ -18,6 +18,7 @@ update 流程：
 from __future__ import annotations
 
 import logging
+import json
 from datetime import date, datetime
 from typing import NamedTuple
 
@@ -50,6 +51,8 @@ MODEL_SELECTION_WINDOW = 20
 MODEL_MIN_ERRORS = 5
 TWO_FACTOR_MIN_IMPROVEMENT = 0.0003
 TWO_FACTOR_RECENT_GUARD = 1.5
+ENSEMBLE_MIN_ERRORS = 5
+ENSEMBLE_ERROR_FLOOR = 0.0005
 
 
 def calculate_error_band(
@@ -79,6 +82,16 @@ def calculate_error_band(
         .order_by(CalibrationResidual.trade_date.desc())
         .limit(window)
     ).all()
+    chronological_rows = list(reversed(rows))
+    unreliable_reason = estimate_unreliable_reason(chronological_rows)
+    if unreliable_reason:
+        return {
+            "error_band_pct": None,
+            "error_band_label": unreliable_reason,
+            "confidence_text": unreliable_reason,
+            "sample_count": len(chronological_rows),
+            "estimate_unreliable_reason": unreliable_reason,
+        }
     values = sorted([row.abs_residual for row in rows if row.abs_residual is not None])
     sample_count = len(values)
     if sample_count >= 10:
@@ -96,6 +109,7 @@ def calculate_error_band(
         "error_band_label": label,
         "confidence_text": label,
         "sample_count": sample_count,
+        "estimate_unreliable_reason": "",
     }
 
 
@@ -332,6 +346,14 @@ def _mean(values: list[float]) -> float | None:
     return None if not values else sum(values) / len(values)
 
 
+def _fmt_pct(value: float | None) -> str:
+    return "--" if value is None else f"{value:+.4%}"
+
+
+def _fmt_abs_pct(value: float | None) -> str:
+    return "--" if value is None else f"{value:.4%}"
+
+
 def _is_two_factor_unstable(errors: list[float]) -> bool:
     if len(errors) < 10:
         return True
@@ -375,6 +397,71 @@ def _select_causal_model(training: list[CalibrationResidual], sample_count: int)
     ):
         return "two_factor"
     return selected
+
+
+def _candidate_mae_map(training: list[CalibrationResidual]) -> dict[str, float]:
+    maes: dict[str, float] = {}
+    for model in ("coverage_adjusted", "single_scale", "two_factor"):
+        errors = _candidate_errors(training, model)
+        if len(errors) >= ENSEMBLE_MIN_ERRORS:
+            mae = _mean(errors)
+            if mae is not None:
+                maes[model] = mae
+    return maes
+
+
+def _ensemble_weights(training: list[CalibrationResidual]) -> dict[str, float]:
+    """用过去样本外误差生成单一最终估值权重。"""
+    maes = _candidate_mae_map(training)
+    if not maes:
+        return {"coverage_adjusted": 1.0}
+    inv = {
+        model: 1.0 / (max(mae, ENSEMBLE_ERROR_FLOOR) ** 2)
+        for model, mae in maes.items()
+    }
+    total = sum(inv.values())
+    return {model: weight / total for model, weight in inv.items()}
+
+
+def _weighted_estimate(candidates: dict[str, float | None], weights: dict[str, float]) -> float:
+    usable = {
+        model: weight
+        for model, weight in weights.items()
+        if candidates.get(model) is not None
+    }
+    if not usable:
+        return candidates["coverage_adjusted"] or 0.0
+    total = sum(usable.values())
+    return sum((candidates[model] or 0.0) * weight / total for model, weight in usable.items())
+
+
+def estimate_unreliable_reason(rows: list[CalibrationResidual]) -> str:
+    if not rows:
+        return ""
+    latest = rows[-1]
+    latest_candidate_errors = []
+    for model in ("coverage_adjusted", "single_scale", "two_factor"):
+        estimate = _candidate_estimate(latest, model)
+        if estimate is not None:
+            latest_candidate_errors.append(abs(latest.actual_return - estimate))
+    if len(latest_candidate_errors) >= 2 and min(latest_candidate_errors) > 0.008:
+        return "疑似持仓漂移"
+    if latest.abs_residual is not None and latest.abs_residual > 0.010:
+        return "误差扩大"
+    if len(rows) >= 10:
+        recent5 = [r.abs_residual for r in rows[-5:] if r.abs_residual is not None]
+        recent20 = [r.abs_residual for r in rows[-20:] if r.abs_residual is not None]
+        mae5 = _mean(recent5)
+        mae20 = _mean(recent20)
+        if (
+            mae5 is not None
+            and mae20 is not None
+            and mae20 > 0
+            and mae5 > 0.008
+            and mae5 > mae20 * 1.5
+        ):
+            return "误差扩大"
+    return ""
 
 
 def run_online_calibration(
@@ -457,20 +544,22 @@ def run_online_calibration(
             + two_params[2]
         )
 
-    model_mode = _select_causal_model(training, sample_count)
-    if model_mode == "two_factor" and two_params is not None and two_estimate is not None:
+    candidates = {
+        "coverage_adjusted": coverage_estimate,
+        "single_scale": single_estimate,
+        "two_factor": two_estimate,
+    }
+    model_weights = _ensemble_weights(training)
+    model_mode = "ensemble" if len(model_weights) > 1 else next(iter(model_weights))
+    effective_estimate = _weighted_estimate(candidates, model_weights)
+    # 状态同时保存 single_scale 和 two_factor 参数, 供盘中组合估值使用。
+    scale_for_row = single_scale if single_scale is not None else 1.0
+    if two_params is not None:
         beta_known, beta_unknown, alpha = two_params
-        effective_estimate = two_estimate
-        scale_for_row = beta_known
-    elif model_mode == "single_scale" and single_scale is not None and single_estimate is not None:
-        scale_for_row = single_scale
+    elif single_scale is not None:
         beta_known, beta_unknown, alpha = single_scale, single_scale, 0.0
-        effective_estimate = single_estimate
     else:
-        model_mode = "coverage_adjusted"
         beta_known, beta_unknown, alpha = 1.0, 1.0, 0.0
-        scale_for_row = 1.0
-        effective_estimate = coverage_estimate
 
     residual = actual_return_val - effective_estimate
     abs_residual = abs(residual)
@@ -500,6 +589,7 @@ def run_online_calibration(
         state.beta_unknown = beta_unknown
         state.alpha = alpha
         state.selected_model = model_mode
+        state.model_weight_json = json.dumps(model_weights, ensure_ascii=False)
         state.last_update_trade_date = calibration_date
         state.sample_count = (state.sample_count or 0) + 1
         prev_ewma = state.ewma_error or abs_residual
@@ -633,6 +723,15 @@ def load_calibration_residuals(
         {
             "trade_date": r.trade_date.isoformat(),
             "actual_return": f"{r.actual_return:+.4%}",
+            "coverage_estimate": _fmt_pct(r.coverage_adjusted_estimate if r.coverage_adjusted_estimate is not None else r.base_estimate),
+            "coverage_residual": _fmt_pct(None if (r.coverage_adjusted_estimate is None and r.base_estimate is None) else r.actual_return - (r.coverage_adjusted_estimate if r.coverage_adjusted_estimate is not None else r.base_estimate)),
+            "coverage_abs_residual": _fmt_abs_pct(None if (r.coverage_adjusted_estimate is None and r.base_estimate is None) else abs(r.actual_return - (r.coverage_adjusted_estimate if r.coverage_adjusted_estimate is not None else r.base_estimate))),
+            "single_estimate": _fmt_pct(r.single_scale_estimate),
+            "single_residual": _fmt_pct(None if r.single_scale_estimate is None else r.actual_return - r.single_scale_estimate),
+            "single_abs_residual": _fmt_abs_pct(None if r.single_scale_estimate is None else abs(r.actual_return - r.single_scale_estimate)),
+            "two_factor_estimate": _fmt_pct(r.two_factor_estimate),
+            "two_factor_residual": _fmt_pct(None if r.two_factor_estimate is None else r.actual_return - r.two_factor_estimate),
+            "two_factor_abs_residual": _fmt_abs_pct(None if r.two_factor_estimate is None else abs(r.actual_return - r.two_factor_estimate)),
             "known_estimate": f"{r.known_estimate:+.4%}",
             "unknown_estimate": f"{r.unknown_estimate:+.4%}",
             "base_estimate": f"{r.base_estimate:+.4%}",

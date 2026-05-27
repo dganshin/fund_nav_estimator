@@ -877,6 +877,15 @@ def compute_live_fund_estimate(
     beta_known = 1.0 if state is None else (state.beta_known or 1.0)
     beta_unknown = 1.0 if state is None else (state.beta_unknown or 1.0)
     alpha = 0.0 if state is None else (state.alpha or 0.0)
+    model_weights: dict[str, float] = {}
+    if state is not None and getattr(state, "model_weight_json", ""):
+        try:
+            model_weights = {
+                str(k): float(v)
+                for k, v in json.loads(state.model_weight_json or "{}").items()
+            }
+        except Exception:
+            model_weights = {}
     selected_model = "coverage_adjusted" if state is None else getattr(state, "selected_model", "") or ""
     if not selected_model:
         if sample_count_for_model >= 15:
@@ -945,6 +954,25 @@ def compute_live_fund_estimate(
     unknown_estimate = unknown_weight * known_avg
     base_estimate = raw_estimate + unknown_estimate
     causal_calibrated_estimate = beta_known * raw_estimate + beta_unknown * unknown_estimate + alpha
+    single_scale_estimate = current_scale_factor * base_estimate
+    if model_weights:
+        candidate_estimates = {
+            "coverage_adjusted": base_estimate,
+            "single_scale": single_scale_estimate,
+            "two_factor": causal_calibrated_estimate,
+        }
+        usable_weights = {
+            model: weight
+            for model, weight in model_weights.items()
+            if model in candidate_estimates
+        }
+        total_weight = sum(usable_weights.values())
+        if total_weight > 0:
+            causal_calibrated_estimate = sum(
+                candidate_estimates[model] * weight / total_weight
+                for model, weight in usable_weights.items()
+            )
+            model_mode = "ensemble"
     coverage_adjusted_estimate: float | None = None
     coverage_warnings: list[str] = []
     if effective_version is not None:
