@@ -304,6 +304,13 @@ def reliability_from_error(error_band_pct: float | None, label: str | None) -> d
             "detail": "近期误差扩大或疑似调仓, 仅供方向参考。",
             "tone": "warn",
         }
+    if text == "ETF锚定":
+        return {
+            "key": "etf_anchor",
+            "label": "ETF锚定",
+            "detail": "已锚定目标ETF, 暂无足够历史误差样本。",
+            "tone": "good",
+        }
     if error_band_pct is None:
         return {
             "key": "sample_limited",
@@ -619,6 +626,14 @@ def build_home_rows(
             continue
 
         status_text = item.error_band_label or "样本不足"
+        if (
+            item.error_band_pct is None
+            and item.best_status == "ok"
+            and item.covered_weight >= 0.9
+            and len(item.holdings) == 1
+            and item.holdings[0].asset_type == "etf"
+        ):
+            status_text = "ETF锚定"
         current_estimate_text = format_percent(item.current_estimate)
         if item.best_status == "no_data":
             current_estimate_text = "缺持仓"

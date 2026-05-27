@@ -21,6 +21,18 @@ logger = logging.getLogger(__name__)
 DEFAULT_PLATFORM = "支付宝/蚂蚁财富"
 
 KNOWN_ETF_FEEDER_TARGETS: dict[str, dict[str, object]] = {
+    "008887": {
+        "fund_name": "华夏国证半导体芯片ETF联接A",
+        "target_code": "159995.SZ",
+        "target_name": "芯片ETF",
+        "weight_pct": 95.0,
+    },
+    "008888": {
+        "fund_name": "华夏国证半导体芯片ETF联接C",
+        "target_code": "159995.SZ",
+        "target_name": "芯片ETF",
+        "weight_pct": 95.0,
+    },
     "016707": {
         "fund_name": "华夏有色金属ETF联接A",
         "target_code": "516650.SH",
@@ -49,6 +61,18 @@ KNOWN_ETF_FEEDER_TARGETS: dict[str, dict[str, object]] = {
         "fund_name": "南方有色金属ETF联接C",
         "target_code": "512400.SH",
         "target_name": "有色金属ETF南方",
+        "weight_pct": 95.0,
+    },
+    "021607": {
+        "fund_name": "南方上证科创板芯片ETF发起联接A",
+        "target_code": "588890.SH",
+        "target_name": "科创芯片ETF南方",
+        "weight_pct": 95.0,
+    },
+    "021608": {
+        "fund_name": "南方上证科创板芯片ETF发起联接C",
+        "target_code": "588890.SH",
+        "target_name": "科创芯片ETF南方",
         "weight_pct": 95.0,
     },
 }
