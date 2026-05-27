@@ -16,7 +16,7 @@
   </div>
   <div class="fund-amount">¥{{ row.holding_amount_text }}</div>
   <div class="fund-profit {{ row.profit_tone }}">{{ row.estimated_today_profit_text }}</div>
-  <div class="fund-error">{{ row.error_band_short }}</div>
+  <div class="fund-error reliability-{{ row.reliability_tone }}">{{ row.reliability_label }}</div>
 </a>
 {% endmacro %}
 
@@ -30,7 +30,7 @@
   <div class="fund-compare {{ row.actual_return_tone }}">
     {% if row.actual_return_available %}{{ row.actual_return_today_text }}{% else %}--{% endif %}
   </div>
-  <div class="fund-error">{{ row.error_band_short }}</div>
+  <div class="fund-error reliability-{{ row.reliability_tone }}">{{ row.reliability_label }}</div>
 </a>
 {% endmacro %}
 
@@ -121,7 +121,7 @@
       <div class="header-col">实际收盘</div>
       <div class="header-col">持有金额</div>
       <div class="header-col">今日盈亏</div>
-      <div class="header-col">预计误差</div>
+      <div class="header-col">可靠性</div>
     </div>
     <div id="holding-list">
       {% for row in holding_rows %}
@@ -140,7 +140,7 @@
       <div class="header-main">基金名称</div>
       <div class="header-col">实时估值</div>
       <div class="header-col">实际收盘</div>
-      <div class="header-col">预计误差</div>
+      <div class="header-col">可靠性</div>
     </div>
     <div id="watchlist-list">
       {% for row in watchlist_rows %}

@@ -237,6 +237,60 @@ def short_error_label(label: str | None) -> str:
     return text
 
 
+def reliability_from_error(error_band_pct: float | None, label: str | None) -> dict:
+    text = str(label or "样本不足")
+    if text in {"缺持仓", "缺公开持仓", "不可估", "行情缺失", "同步失败"}:
+        return {
+            "key": "unavailable",
+            "label": text,
+            "detail": "数据不足, 暂不能估值。",
+            "tone": "muted",
+        }
+    if "漂移" in text or "扩大" in text:
+        return {
+            "key": "unreliable",
+            "label": "误差较大",
+            "detail": "近期误差扩大或疑似调仓, 仅供方向参考。",
+            "tone": "warn",
+        }
+    if error_band_pct is None:
+        return {
+            "key": "sample_limited",
+            "label": "样本不足",
+            "detail": "历史校准样本不足, 暂只适合粗略参考。",
+            "tone": "muted",
+        }
+
+    pct_text = f"±{error_band_pct * 100:.2f}%"
+    if error_band_pct <= 0.001:
+        return {
+            "key": "very_accurate",
+            "label": f"很准 {pct_text}",
+            "detail": f"估值很准, 近20日80%误差约 {pct_text}, 适合实时参考。",
+            "tone": "good",
+        }
+    if error_band_pct <= 0.004:
+        return {
+            "key": "stable",
+            "label": f"较稳 {pct_text}",
+            "detail": f"估值较稳, 近20日80%误差约 {pct_text}, 可用于观察当天方向和幅度。",
+            "tone": "ok",
+        }
+    if error_band_pct <= 0.007:
+        return {
+            "key": "reference",
+            "label": f"可参考 {pct_text}",
+            "detail": f"误差中等, 近20日80%误差约 {pct_text}, 建议只看大方向。",
+            "tone": "warn",
+        }
+    return {
+        "key": "unreliable",
+        "label": "误差较大",
+        "detail": f"近20日80%误差约 {pct_text}, 可能受调仓或公开持仓滞后影响。",
+        "tone": "warn",
+    }
+
+
 def record_position_event(
     session,
     *,
@@ -501,6 +555,7 @@ def build_home_rows(
         elif item.best_status == "missing_quotes":
             current_estimate_text = "行情缺失"
             status_text = "不可估"
+        reliability = reliability_from_error(item.error_band_pct, status_text)
 
         res = residuals_map.get(item.fund_code)
         actual_return_today, actual_return_date = select_visible_actual_return(
@@ -564,6 +619,10 @@ def build_home_rows(
                 "error_band_pct": item.error_band_pct,
                 "error_band_label": status_text,
                 "error_band_short": short_error_label(status_text),
+                "reliability_key": reliability["key"],
+                "reliability_label": reliability["label"],
+                "reliability_detail": reliability["detail"],
+                "reliability_tone": reliability["tone"],
                 "confidence_text": item.confidence_text,
                 "best_status": item.best_status,
                 "quote_time": item.quote_time.strftime("%H:%M:%S")
@@ -687,6 +746,9 @@ def build_detail_context(
         ),
         "confidence_level": result.confidence_level or "D",
         "error_band_label": result.error_band_label or "样本不足",
+        "reliability": reliability_from_error(
+            result.error_band_pct, result.error_band_label or "样本不足"
+        ),
         "confidence_text": result.confidence_text,
         "quote_time": result.quote_time.strftime("%H:%M:%S")
         if (result.quote_time and result.quote_time.date() == date.today())

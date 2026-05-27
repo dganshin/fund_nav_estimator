@@ -68,6 +68,10 @@
     {% endif %}
   </div>
 
+  <div class="status-bar reliability-{{ detail.reliability.tone }}" style="margin-top:10px; margin-bottom:0;">
+    {{ detail.reliability.detail }}
+  </div>
+
   {% if detail.has_pending_today_event %}
   <div class="status-bar" style="margin-top:10px; margin-bottom:0; color:#1e40af; background:#eff6ff; border-color:#bfdbfe;">
     今日有手工交易记录：持有总金额已更新，但新增/减少金额从下一交易日开始影响“今日盈亏”。
