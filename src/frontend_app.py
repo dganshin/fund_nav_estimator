@@ -4,7 +4,7 @@ import csv
 import io
 import logging
 import sys
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from functools import lru_cache
 from pathlib import Path
 from time import monotonic
@@ -105,6 +105,57 @@ STATIC_DIR = PROJECT_ROOT / "static"
 app = FastAPI(title="基金实时估值")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+TASK_STALE_AFTER = timedelta(minutes=20)
+
+
+def _utcnow_naive() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+def cleanup_task_runs(session) -> None:
+    """清理旧 running 任务, 避免首页误报后台仍在跑。"""
+    now = _utcnow_naive()
+    cutoff = now - TASK_STALE_AFTER
+    active = session.scalars(
+        select(TaskRun)
+        .where(TaskRun.status.in_(["pending", "running"]))
+        .order_by(TaskRun.id.desc())
+    ).all()
+    seen: set[tuple[str, str]] = set()
+    changed = False
+    for task in active:
+        key = (task.task_type, task.fund_code)
+        should_close = task.started_at < cutoff or key in seen
+        if should_close:
+            task.status = "failed"
+            task.progress_text = "旧任务已停止显示"
+            task.error_message = "任务超时或已有新的同类任务"
+            task.finished_at = now
+            changed = True
+        else:
+            seen.add(key)
+    if changed:
+        session.commit()
+
+
+def close_existing_task_runs(session, task_type: str, fund_code: str) -> None:
+    """启动新任务前关闭同类旧任务。"""
+    now = _utcnow_naive()
+    tasks = session.scalars(
+        select(TaskRun).where(
+            TaskRun.task_type == task_type,
+            TaskRun.fund_code == fund_code,
+            TaskRun.status.in_(["pending", "running"]),
+        )
+    ).all()
+    for task in tasks:
+        task.status = "failed"
+        task.progress_text = "已有新任务启动, 旧任务已停止显示"
+        task.error_message = "superseded"
+        task.finished_at = now
+    if tasks:
+        session.commit()
 
 SORT_OPTIONS = {
     "estimate_desc": "估值从高到低",
@@ -824,6 +875,7 @@ def index(
 
     session_factory = get_cached_session_factory()
     with session_factory() as session:
+        cleanup_task_runs(session)
         fund_codes = [r.fund_code for r in results]
         residuals_map = get_compare_residuals(session, fund_codes)
         watchlist_codes = {
@@ -1458,6 +1510,8 @@ async def api_quick_add(request: Request, background_tasks: BackgroundTasks):
     session_factory = get_cached_session_factory()
     data_source = get_cached_data_source()
     with session_factory() as session:
+        cleanup_task_runs(session)
+        close_existing_task_runs(session, "onboard_fund", fund_code)
         # 先保存自选，让前端立刻可见
         save_watchlist_rows(session, [{"fund_code": fund_code, "is_active": True}])
 
@@ -1507,6 +1561,8 @@ async def api_quick_buy(request: Request, background_tasks: BackgroundTasks):
     session_factory = get_cached_session_factory()
     data_source = get_cached_data_source()
     with session_factory() as session:
+        cleanup_task_runs(session)
+        close_existing_task_runs(session, "onboard_fund", fund_code)
         profile = ensure_fund_by_code(session, fund_code, data_source)
 
         pos = session.scalar(
@@ -1854,6 +1910,8 @@ async def api_position_import_image(request: Request):
 async def api_sync_daily(background_tasks: BackgroundTasks):
     session_factory = get_cached_session_factory()
     with session_factory() as session:
+        cleanup_task_runs(session)
+        close_existing_task_runs(session, "sync_daily", "ALL")
         task = TaskRun(
             task_type="sync_daily",
             fund_code="ALL",
