@@ -47,6 +47,7 @@ from src.models import (
     HoldingItem,
     OnlineCalibrationState,
     Fund,
+    UserFundPositionEvent,
 )
 from tests.test_stage4 import seed_fund_holdings_and_allocations
 
@@ -170,10 +171,13 @@ def test_quick_buy_platform_default(tmp_path, monkeypatch):
     from src.web_services import load_user_position_rows
     with sf() as session:
         positions = load_user_position_rows(session)
+        event = session.scalar(select(UserFundPositionEvent).where(UserFundPositionEvent.fund_code == "001467"))
     pos = next((p for p in positions if p["fund_code"] == "001467"), None)
     assert pos is not None
     assert pos["holding_amount"] == 5000.0
     assert "支付宝" in (pos.get("platform") or "")
+    assert event.event_type == "set_amount"
+    assert event.effective_date == event.trade_date
 
 
 # ── 4. /api/search-fund：未知代码触发 fetch_fund_profile ────────────────

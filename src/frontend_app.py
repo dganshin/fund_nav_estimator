@@ -1530,15 +1530,27 @@ async def api_quick_buy(request: Request, background_tasks: BackgroundTasks):
             ],
         )
         save_watchlist_rows(session, [{"fund_code": fund_code, "is_active": True}])
-        record_position_event(
-            session,
-            fund_code=fund_code,
-            event_type="buy",
-            amount_delta=holding_amount,
-            effective_date=next_business_date(),
-            source="manual",
-            note="首页按金额买入；今日不计入当日盈亏",
-        )
+        if current_amount <= 0:
+            # 首次录入代表当前持有总金额, 当天参与盈亏。
+            record_position_event(
+                session,
+                fund_code=fund_code,
+                event_type="set_amount",
+                amount_delta=holding_amount,
+                effective_date=date.today(),
+                source="manual",
+                note="首页录入当前持有总金额；当天计入今日盈亏",
+            )
+        else:
+            record_position_event(
+                session,
+                fund_code=fund_code,
+                event_type="buy",
+                amount_delta=holding_amount,
+                effective_date=next_business_date(),
+                source="manual",
+                note="首页加仓；新增金额从下一交易日开始计入今日盈亏",
+            )
 
         pos = session.scalar(
             select(UserFundPosition).where(UserFundPosition.fund_code == fund_code)
