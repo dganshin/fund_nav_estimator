@@ -877,10 +877,19 @@ def compute_live_fund_estimate(
     beta_known = 1.0 if state is None else (state.beta_known or 1.0)
     beta_unknown = 1.0 if state is None else (state.beta_unknown or 1.0)
     alpha = 0.0 if state is None else (state.alpha or 0.0)
-    if sample_count_for_model >= 15:
+    selected_model = "coverage_adjusted" if state is None else getattr(state, "selected_model", "") or ""
+    if not selected_model:
+        if sample_count_for_model >= 15:
+            selected_model = "two_factor"
+        elif sample_count_for_model >= 5:
+            selected_model = "single_scale"
+        else:
+            selected_model = "coverage_adjusted"
+
+    if selected_model == "two_factor":
         display_known_factor = beta_known
         model_mode = "two_factor"
-    elif sample_count_for_model >= 5:
+    elif selected_model == "single_scale":
         display_known_factor = current_scale_factor
         beta_known = current_scale_factor
         beta_unknown = current_scale_factor

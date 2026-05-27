@@ -46,6 +46,10 @@ SCALE_MIN_SAMPLES = 5
 RIDGE_LAMBDA = 20.0
 RIDGE_DECAY = 0.90
 RIDGE_WINDOW = 30
+MODEL_SELECTION_WINDOW = 20
+MODEL_MIN_ERRORS = 5
+TWO_FACTOR_MIN_IMPROVEMENT = 0.0003
+TWO_FACTOR_RECENT_GUARD = 1.5
 
 
 def calculate_error_band(
@@ -304,6 +308,75 @@ def _fit_two_factor(rows: list[CalibrationResidual]) -> tuple[float, float, floa
     return beta_known, beta_unknown, alpha
 
 
+def _candidate_estimate(row: CalibrationResidual, model: str) -> float | None:
+    if model == "coverage_adjusted":
+        return row.coverage_adjusted_estimate if row.coverage_adjusted_estimate is not None else row.base_estimate
+    if model == "single_scale":
+        return row.single_scale_estimate
+    if model == "two_factor":
+        return row.two_factor_estimate
+    return None
+
+
+def _candidate_errors(rows: list[CalibrationResidual], model: str, window: int = MODEL_SELECTION_WINDOW) -> list[float]:
+    errors: list[float] = []
+    for row in rows[-window:]:
+        estimate = _candidate_estimate(row, model)
+        if estimate is None:
+            continue
+        errors.append(abs(row.actual_return - estimate))
+    return errors
+
+
+def _mean(values: list[float]) -> float | None:
+    return None if not values else sum(values) / len(values)
+
+
+def _is_two_factor_unstable(errors: list[float]) -> bool:
+    if len(errors) < 10:
+        return True
+    recent5 = errors[-5:]
+    mean20 = _mean(errors[-MODEL_SELECTION_WINDOW:])
+    mean5 = _mean(recent5)
+    if mean20 is None or mean5 is None or mean20 <= 0:
+        return True
+    return mean5 > mean20 * TWO_FACTOR_RECENT_GUARD
+
+
+def _select_causal_model(training: list[CalibrationResidual], sample_count: int) -> str:
+    """只用 D 之前的候选模型残差选择 D 当天模型。"""
+    if sample_count < SCALE_MIN_SAMPLES:
+        return "coverage_adjusted"
+
+    coverage_errors = _candidate_errors(training, "coverage_adjusted")
+    single_errors = _candidate_errors(training, "single_scale")
+    coverage_mae = _mean(coverage_errors)
+    single_mae = _mean(single_errors)
+
+    if len(single_errors) < MODEL_MIN_ERRORS:
+        selected = "coverage_adjusted"
+    elif coverage_mae is not None and single_mae is not None and single_mae > coverage_mae:
+        selected = "coverage_adjusted"
+    else:
+        selected = "single_scale"
+
+    if sample_count < TWO_FACTOR_MIN_SAMPLES:
+        return selected
+
+    two_errors = _candidate_errors(training, "two_factor")
+    two_mae = _mean(two_errors)
+    if (
+        selected == "single_scale"
+        and len(two_errors) >= MODEL_MIN_ERRORS
+        and single_mae is not None
+        and two_mae is not None
+        and two_mae + TWO_FACTOR_MIN_IMPROVEMENT < single_mae
+        and not _is_two_factor_unstable(two_errors)
+    ):
+        return "two_factor"
+    return selected
+
+
 def run_online_calibration(
     session: Session,
     fund_code: str,
@@ -372,24 +445,32 @@ def run_online_calibration(
     raw_estimate = features.base_estimate
 
     scale_before = state.current_scale_factor
-    if sample_count >= TWO_FACTOR_MIN_SAMPLES:
-        beta_known, beta_unknown, alpha = _fit_two_factor(training)
+    coverage_estimate = features.base_estimate
+    single_scale = _fit_single_scale(training, 1.0) if sample_count >= SCALE_MIN_SAMPLES else None
+    single_estimate = None if single_scale is None else single_scale * features.base_estimate
+    two_params = _fit_two_factor(training) if sample_count >= TWO_FACTOR_MIN_SAMPLES else None
+    two_estimate = None
+    if two_params is not None:
+        two_estimate = (
+            two_params[0] * features.known_estimate
+            + two_params[1] * features.unknown_estimate
+            + two_params[2]
+        )
+
+    model_mode = _select_causal_model(training, sample_count)
+    if model_mode == "two_factor" and two_params is not None and two_estimate is not None:
+        beta_known, beta_unknown, alpha = two_params
+        effective_estimate = two_estimate
         scale_for_row = beta_known
-        model_mode = "two_factor"
-    elif sample_count >= SCALE_MIN_SAMPLES:
-        scale_for_row = _fit_single_scale(training, 1.0)
-        beta_known, beta_unknown, alpha = scale_for_row, scale_for_row, 0.0
-        model_mode = "single_scale"
+    elif model_mode == "single_scale" and single_scale is not None and single_estimate is not None:
+        scale_for_row = single_scale
+        beta_known, beta_unknown, alpha = single_scale, single_scale, 0.0
+        effective_estimate = single_estimate
     else:
+        model_mode = "coverage_adjusted"
         beta_known, beta_unknown, alpha = 1.0, 1.0, 0.0
         scale_for_row = 1.0
-        model_mode = "coverage_adjusted"
-
-    effective_estimate = (
-        beta_known * features.known_estimate
-        + beta_unknown * features.unknown_estimate
-        + alpha
-    )
+        effective_estimate = coverage_estimate
 
     residual = actual_return_val - effective_estimate
     abs_residual = abs(residual)
@@ -418,6 +499,7 @@ def run_online_calibration(
         state.beta_known = beta_known
         state.beta_unknown = beta_unknown
         state.alpha = alpha
+        state.selected_model = model_mode
         state.last_update_trade_date = calibration_date
         state.sample_count = (state.sample_count or 0) + 1
         prev_ewma = state.ewma_error or abs_residual
@@ -434,7 +516,7 @@ def run_online_calibration(
             state.confidence_level = "D"
         state.warning_json = f'["{model_mode}"]'
 
-    params_fitted_until = training[0].trade_date if training else None
+    params_fitted_until = training[-1].trade_date if training else None
 
     # 8. 写入 calibration_residuals（幂等 upsert）
     existing_residual = session.scalar(
@@ -453,6 +535,9 @@ def run_online_calibration(
             known_estimate=features.known_estimate,
             unknown_estimate=features.unknown_estimate,
             base_estimate=features.base_estimate,
+            coverage_adjusted_estimate=coverage_estimate,
+            single_scale_estimate=single_estimate,
+            two_factor_estimate=two_estimate,
             raw_estimate=raw_estimate,
             calibrated_estimate=effective_estimate,
             effective_estimate=effective_estimate,
@@ -478,6 +563,9 @@ def run_online_calibration(
         existing_residual.known_estimate = features.known_estimate
         existing_residual.unknown_estimate = features.unknown_estimate
         existing_residual.base_estimate = features.base_estimate
+        existing_residual.coverage_adjusted_estimate = coverage_estimate
+        existing_residual.single_scale_estimate = single_estimate
+        existing_residual.two_factor_estimate = two_estimate
         existing_residual.raw_estimate = raw_estimate
         existing_residual.calibrated_estimate = effective_estimate
         existing_residual.effective_estimate = effective_estimate

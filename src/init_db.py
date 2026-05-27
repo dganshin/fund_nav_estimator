@@ -17,6 +17,7 @@ def migrate_schema(engine) -> None:
                 "beta_known": "ALTER TABLE online_calibration_states ADD COLUMN beta_known FLOAT NOT NULL DEFAULT 1.0",
                 "beta_unknown": "ALTER TABLE online_calibration_states ADD COLUMN beta_unknown FLOAT NOT NULL DEFAULT 1.0",
                 "alpha": "ALTER TABLE online_calibration_states ADD COLUMN alpha FLOAT NOT NULL DEFAULT 0.0",
+                "selected_model": "ALTER TABLE online_calibration_states ADD COLUMN selected_model VARCHAR(32) NOT NULL DEFAULT 'coverage_adjusted'",
             }.items():
                 if name not in columns:
                     connection.execute(text(ddl))
@@ -28,6 +29,9 @@ def migrate_schema(engine) -> None:
                 "known_estimate": "ALTER TABLE calibration_residuals ADD COLUMN known_estimate FLOAT NOT NULL DEFAULT 0.0",
                 "unknown_estimate": "ALTER TABLE calibration_residuals ADD COLUMN unknown_estimate FLOAT NOT NULL DEFAULT 0.0",
                 "base_estimate": "ALTER TABLE calibration_residuals ADD COLUMN base_estimate FLOAT NOT NULL DEFAULT 0.0",
+                "coverage_adjusted_estimate": "ALTER TABLE calibration_residuals ADD COLUMN coverage_adjusted_estimate FLOAT",
+                "single_scale_estimate": "ALTER TABLE calibration_residuals ADD COLUMN single_scale_estimate FLOAT",
+                "two_factor_estimate": "ALTER TABLE calibration_residuals ADD COLUMN two_factor_estimate FLOAT",
                 "calibrated_estimate": "ALTER TABLE calibration_residuals ADD COLUMN calibrated_estimate FLOAT NOT NULL DEFAULT 0.0",
                 "beta_known": "ALTER TABLE calibration_residuals ADD COLUMN beta_known FLOAT NOT NULL DEFAULT 1.0",
                 "beta_unknown": "ALTER TABLE calibration_residuals ADD COLUMN beta_unknown FLOAT NOT NULL DEFAULT 1.0",

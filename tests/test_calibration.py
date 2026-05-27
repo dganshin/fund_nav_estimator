@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.calibration import (
     CalibrationResidual,
+    _select_causal_model,
     calculate_error_band,
     ensure_fund_by_code,
     get_calibration_stats,
@@ -78,6 +79,31 @@ def seed_with_actual_return(tmp_path, session):
     )
     session.add(ar)
     session.commit()
+
+
+def make_candidate_residual(day: int, actual: float, single: float, two: float) -> CalibrationResidual:
+    return CalibrationResidual(
+        fund_code="002207",
+        holding_version_id=1,
+        trade_date=date(2026, 5, day),
+        actual_return=actual,
+        known_estimate=actual,
+        unknown_estimate=0.0,
+        base_estimate=actual + 0.003,
+        coverage_adjusted_estimate=actual + 0.003,
+        single_scale_estimate=single,
+        two_factor_estimate=two,
+        raw_estimate=actual + 0.003,
+        calibrated_estimate=single,
+        effective_estimate=single,
+        residual=actual - single,
+        abs_residual=abs(actual - single),
+        scale_used_before_update=1.0,
+        is_used_for_update=True,
+        skip_reason="",
+        model_version="single_scale",
+        is_out_of_sample=True,
+    )
 
 
 # ── 1. ensure_fund_by_code：未知基金自动创建 ─────────────────────────────
@@ -448,3 +474,17 @@ def test_error_band_uses_recent_residuals(tmp_path):
         band = calculate_error_band(session, "002207", hv.id)
 
     assert band["error_band_label"].startswith("预计误差≤±")
+
+
+def test_model_selector_does_not_force_two_factor_when_single_scale_is_better():
+    rows = [
+        make_candidate_residual(
+            day=i,
+            actual=0.01,
+            single=0.0105,
+            two=0.014,
+        )
+        for i in range(1, 21)
+    ]
+
+    assert _select_causal_model(rows, sample_count=20) == "single_scale"
