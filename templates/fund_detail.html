@@ -110,6 +110,35 @@
   {% endfor %}
 </div>
 
+<!-- 历史估值对比 -->
+<details class="advanced-box" style="margin-top:12px" id="history-section" open>
+  <summary>历史估值对比 <span id="history-summary-badge" style="font-size:12px; color:#64748b; margin-left:8px;"></span></summary>
+  <p style="color:#64748b; font-size:13px; margin:8px 0 10px;">
+    这里展示每个收盘日用当时模型算出的估值和真实净值涨跌, 用来判断估值是否稳定以及是否可能发生大调仓。
+  </p>
+  <div id="history-table-wrap" style="display:none">
+    <div class="table-wrap">
+      <table class="plain-table" id="history-table">
+        <thead>
+          <tr>
+            <th>日期</th>
+            <th>收盘后模型估值</th>
+            <th>实际涨跌</th>
+            <th>偏差</th>
+            <th>|偏差|</th>
+            <th>模型</th>
+            <th>训练截止日</th>
+            <th>纳入后续校准</th>
+            <th>跳过原因</th>
+          </tr>
+        </thead>
+        <tbody id="history-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+  <p id="history-loading" style="color:#94a3b8; font-size:13px;">加载历史估值对比中...</p>
+</details>
+
 <!-- 校准残差折叠区 -->
 <details class="advanced-box" style="margin-top:12px" id="calibration-section">
   <summary>校准残差 <span id="cal-summary-badge" style="font-size:12px; color:#64748b; margin-left:8px;"></span></summary>
@@ -180,43 +209,97 @@
 (function() {
   var fundCode = {{ detail.fund_code | tojson }};
   var section = document.getElementById('calibration-section');
-  var loaded = false;
-  section.addEventListener('toggle', function() {
-    if (section.open && !loaded) {
-      loaded = true;
-      var loadingEl = document.getElementById('residual-loading');
-      loadingEl.textContent = '加载中…';
-      fetch('/api/fund/' + fundCode + '/calibration-residuals?limit=90')
+  var rowsPromise = null;
+  var residualRendered = false;
+
+  function toneClass(v) {
+    var text = String(v || '');
+    if (text.startsWith('+')) return ' class="up"';
+    if (text.startsWith('-')) return ' class="down"';
+    return '';
+  }
+
+  function loadRows() {
+    if (!rowsPromise) {
+      rowsPromise = fetch('/api/fund/' + fundCode + '/calibration-residuals?limit=90')
         .then(function(r) { return r.json(); })
-        .then(function(data) {
-          loadingEl.style.display = 'none';
-          var rows = data.residuals || [];
-          if (rows.length === 0) {
-            loadingEl.style.display = 'block';
-            loadingEl.textContent = '暂无残差记录。请先点击"手动校准"。';
-            return;
-          }
-          var badge = document.getElementById('cal-summary-badge');
-          badge.textContent = rows.length + ' 条记录';
-          var tbody = document.getElementById('residual-tbody');
-          tbody.innerHTML = '';
-          rows.forEach(function(r) {
-            var tr = document.createElement('tr');
-            tr.innerHTML = [
-              r.trade_date, r.actual_return, r.known_estimate, r.unknown_estimate,
-              r.base_estimate, r.calibrated_estimate, r.residual, r.abs_residual,
-              r.beta_known, r.beta_unknown, r.alpha, r.sample_count,
-              r.params_fitted_until, r.is_out_of_sample, r.is_used, r.skip_reason || ''
-            ].map(function(v, i) {
-              var cls = '';
-              if (i === 6) { cls = String(v).startsWith('+') ? ' class="up"' : (String(v).startsWith('-') ? ' class="down"' : ''); }
-              if (i === 14) { cls = v === 'Y' ? ' style="color:#16a34a"' : ' style="color:#94a3b8"'; }
-              return '<td' + cls + '>' + v + '</td>';
-            }).join('');
-            tbody.appendChild(tr);
-          });
-          document.getElementById('residual-table-wrap').style.display = 'block';
-        })
+        .then(function(data) { return data.residuals || []; });
+    }
+    return rowsPromise;
+  }
+
+  function renderHistory(rows) {
+    var loadingEl = document.getElementById('history-loading');
+    loadingEl.style.display = 'none';
+    if (rows.length === 0) {
+      loadingEl.style.display = 'block';
+      loadingEl.textContent = '暂无历史估值记录。请先点击"手动校准"。';
+      return;
+    }
+    document.getElementById('history-summary-badge').textContent = rows.length + ' 天';
+    var tbody = document.getElementById('history-tbody');
+    tbody.innerHTML = '';
+    rows.slice().reverse().forEach(function(r) {
+      var tr = document.createElement('tr');
+      var usedStyle = r.is_used === 'Y' ? ' style="color:#16a34a"' : ' style="color:#94a3b8"';
+      tr.innerHTML = [
+        '<td>' + r.trade_date + '</td>',
+        '<td' + toneClass(r.calibrated_estimate) + '>' + r.calibrated_estimate + '</td>',
+        '<td' + toneClass(r.actual_return) + '>' + r.actual_return + '</td>',
+        '<td' + toneClass(r.residual) + '>' + r.residual + '</td>',
+        '<td>' + r.abs_residual + '</td>',
+        '<td>' + (r.model_version || '--') + '</td>',
+        '<td>' + r.params_fitted_until + '</td>',
+        '<td' + usedStyle + '>' + r.is_used + '</td>',
+        '<td>' + (r.skip_reason || '') + '</td>'
+      ].join('');
+      tbody.appendChild(tr);
+    });
+    document.getElementById('history-table-wrap').style.display = 'block';
+  }
+
+  function renderResiduals(rows) {
+    var loadingEl = document.getElementById('residual-loading');
+    loadingEl.style.display = 'none';
+    if (rows.length === 0) {
+      loadingEl.style.display = 'block';
+      loadingEl.textContent = '暂无残差记录。请先点击"手动校准"。';
+      return;
+    }
+    document.getElementById('cal-summary-badge').textContent = rows.length + ' 条记录';
+    var tbody = document.getElementById('residual-tbody');
+    tbody.innerHTML = '';
+    rows.forEach(function(r) {
+      var tr = document.createElement('tr');
+      tr.innerHTML = [
+        r.trade_date, r.actual_return, r.known_estimate, r.unknown_estimate,
+        r.base_estimate, r.calibrated_estimate, r.residual, r.abs_residual,
+        r.beta_known, r.beta_unknown, r.alpha, r.sample_count,
+        r.params_fitted_until, r.is_out_of_sample, r.is_used, r.skip_reason || ''
+      ].map(function(v, i) {
+        var cls = '';
+        if (i === 6) { cls = toneClass(v); }
+        if (i === 14) { cls = v === 'Y' ? ' style="color:#16a34a"' : ' style="color:#94a3b8"'; }
+        return '<td' + cls + '>' + v + '</td>';
+      }).join('');
+      tbody.appendChild(tr);
+    });
+    document.getElementById('residual-table-wrap').style.display = 'block';
+  }
+
+  loadRows()
+    .then(renderHistory)
+    .catch(function(e) {
+      document.getElementById('history-loading').textContent = '加载失败：' + e.message;
+    });
+
+  section.addEventListener('toggle', function() {
+    if (section.open && !residualRendered) {
+      residualRendered = true;
+      var loadingEl = document.getElementById('residual-loading');
+      loadingEl.textContent = '加载中...';
+      loadRows()
+        .then(renderResiduals)
         .catch(function(e) {
           loadingEl.textContent = '加载失败：' + e.message;
         });
