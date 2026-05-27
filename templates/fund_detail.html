@@ -110,11 +110,26 @@
   {% endfor %}
 </div>
 
+<section class="advanced-box" style="margin-top:12px" id="estimate-health-section">
+  <div style="font-size:16px; font-weight:800; color:#0f172a; margin-bottom:8px;">估值稳定性</div>
+  <div id="estimate-health-loading" style="color:#94a3b8; font-size:13px;">正在分析最近校准记录...</div>
+  <div id="estimate-health-content" style="display:none">
+    <div class="advanced-grid" style="margin-bottom:10px">
+      <div><div class="advanced-label">结论</div><div class="advanced-value" id="health-level">--</div></div>
+      <div><div class="advanced-label">近20日平均误差</div><div class="advanced-value" id="health-mae20">--</div></div>
+      <div><div class="advanced-label">80%误差</div><div class="advanced-value" id="health-p80">--</div></div>
+      <div><div class="advanced-label">最大误差</div><div class="advanced-value" id="health-max">--</div></div>
+      <div><div class="advanced-label">最近误差</div><div class="advanced-value" id="health-latest">--</div></div>
+    </div>
+    <div id="health-diagnosis" style="font-size:13px; color:#64748b; line-height:1.6;"></div>
+  </div>
+</section>
+
 <!-- 历史估值对比 -->
-<details class="advanced-box" style="margin-top:12px" id="history-section" open>
-  <summary>历史估值对比 <span id="history-summary-badge" style="font-size:12px; color:#64748b; margin-left:8px;"></span></summary>
+<details class="advanced-box" style="margin-top:12px" id="history-section">
+  <summary>模型诊断明细 <span id="history-summary-badge" style="font-size:12px; color:#64748b; margin-left:8px;"></span></summary>
   <p style="color:#64748b; font-size:13px; margin:8px 0 10px;">
-    这里展示每个收盘日用当时模型算出的估值和真实净值涨跌, 用来判断估值是否稳定以及是否可能发生大调仓。
+    明细用于排查: 如果三个候选模型同时偏离, 通常说明公开持仓或未知仓位代理已经失效。
   </p>
   <div id="history-table-wrap" style="display:none">
     <div class="table-wrap">
@@ -225,6 +240,23 @@
     return sign + num.toFixed(2);
   }
 
+  function pctFloat(v) {
+    var num = Number(String(v || '').replace('%', ''));
+    return isFinite(num) ? num : null;
+  }
+
+  function absPct(v) {
+    var num = pctFloat(v);
+    return num === null ? null : Math.abs(num);
+  }
+
+  function percentile(values, q) {
+    if (!values.length) return null;
+    var sorted = values.slice().sort(function(a, b) { return a - b; });
+    var idx = Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * q));
+    return sorted[idx];
+  }
+
   function loadRows() {
     if (!rowsPromise) {
       rowsPromise = fetch('/api/fund/' + fundCode + '/calibration-residuals?limit=90')
@@ -232,6 +264,58 @@
         .then(function(data) { return data.residuals || []; });
     }
     return rowsPromise;
+  }
+
+  function renderHealth(rows) {
+    var loadingEl = document.getElementById('estimate-health-loading');
+    var contentEl = document.getElementById('estimate-health-content');
+    if (rows.length === 0) {
+      loadingEl.textContent = '暂无校准记录。';
+      return;
+    }
+    var recent = rows.slice(-20);
+    var errors = recent.map(function(r) { return absPct(r.residual); }).filter(function(v) { return v !== null; });
+    if (!errors.length) {
+      loadingEl.textContent = '暂无有效误差样本。';
+      return;
+    }
+    var mae20 = errors.reduce(function(a, b) { return a + b; }, 0) / errors.length;
+    var p80 = percentile(errors, 0.8);
+    var maxErr = Math.max.apply(null, errors);
+    var latest = absPct(rows[rows.length - 1].residual);
+    var latestRow = rows[rows.length - 1];
+    var candidateErrors = [
+      absPct(latestRow.coverage_residual),
+      absPct(latestRow.single_residual),
+      absPct(latestRow.two_factor_residual)
+    ].filter(function(v) { return v !== null; });
+    var allBad = candidateErrors.length >= 2 && Math.min.apply(null, candidateErrors) > 0.8;
+    var level = '可参考';
+    var diagnosis = '估值有一定偏差, 适合看大致方向, 不适合精确到小数点。';
+    if (allBad || latest > 1.0) {
+      level = '疑似持仓漂移';
+      diagnosis = '最近多个模型同时偏离, 公开持仓或未知仓位代理可能已经失效, 这类基金需要降低信任度。';
+    } else if (p80 <= 0.10) {
+      level = '很准';
+      diagnosis = '通常是 ETF 联接或持仓高度透明基金, 盘中估值可信度较高。';
+    } else if (p80 <= 0.40) {
+      level = '较稳';
+      diagnosis = '近期估值比较稳定, 可用于观察当天方向和大致幅度。';
+    } else if (p80 <= 0.80) {
+      level = '可参考';
+      diagnosis = '误差中等, 可能存在调仓或未知仓位影响。';
+    } else {
+      level = '误差较大';
+      diagnosis = '近期误差偏大, 大概率受主动调仓或公开持仓滞后影响。';
+    }
+    document.getElementById('health-level').textContent = level;
+    document.getElementById('health-mae20').textContent = mae20.toFixed(2) + '%';
+    document.getElementById('health-p80').textContent = p80.toFixed(2) + '%';
+    document.getElementById('health-max').textContent = maxErr.toFixed(2) + '%';
+    document.getElementById('health-latest').textContent = latest === null ? '--' : latest.toFixed(2) + '%';
+    document.getElementById('health-diagnosis').textContent = diagnosis;
+    loadingEl.style.display = 'none';
+    contentEl.style.display = 'block';
   }
 
   function renderHistory(rows) {
@@ -297,9 +381,13 @@
   }
 
   loadRows()
-    .then(renderHistory)
+    .then(function(rows) {
+      renderHealth(rows);
+      renderHistory(rows);
+    })
     .catch(function(e) {
-      document.getElementById('history-loading').textContent = '加载失败：' + e.message;
+      document.getElementById('estimate-health-loading').textContent = '加载失败: ' + e.message;
+      document.getElementById('history-loading').textContent = '加载失败: ' + e.message;
     });
 
   section.addEventListener('toggle', function() {
