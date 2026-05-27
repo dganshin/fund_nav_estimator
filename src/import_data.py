@@ -190,7 +190,9 @@ def import_funds_from_rows(
             fund = Fund(fund_code=fund_code)
             session.add(fund)
 
-        fund.fund_name = read_required_value(row, "fund_name", row_number, csv_path)
+        fund_name = read_required_value(row, "fund_name", row_number, csv_path)
+        if not (fund_name == fund_code and fund.fund_name and fund.fund_name != fund_code):
+            fund.fund_name = fund_name
         fund.fund_type = read_required_value(row, "fund_type", row_number, csv_path)
         fund.market = read_required_value(row, "market", row_number, csv_path)
         fund.is_active = parse_bool(read_required_value(row, "is_active", row_number, csv_path))

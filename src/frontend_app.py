@@ -377,8 +377,16 @@ def get_tone(v: float | None) -> str:
     return "up" if v > 0 else ("down" if v < 0 else "muted")
 
 
-def summarize_status(warnings: list[str], used_fallback: bool) -> str:
+def is_trading_time(now: datetime | None = None) -> bool:
+    now = now or datetime.now()
+    current = now.time()
+    return time(9, 30) <= current < time(15, 0)
+
+
+def summarize_status(warnings: list[str], used_fallback: bool, has_today_fallback: bool = False) -> str:
     if used_fallback:
+        if has_today_fallback:
+            return "实时源异常，已使用盘中日K缓存"
         return "部分行情延迟，已使用最近收盘缓存"
     if any("timed out" in w or "failed" in w for w in warnings):
         return "部分行情延迟，已使用可用行情"
@@ -394,14 +402,21 @@ def load_latest_daily_quote_map(session, asset_codes: list[str]):
         .order_by(DailyQuote.trade_date.desc())
     ).all()
     quote_map: dict = {}
+    now = datetime.now()
     for q in rows:
         if q.asset_code in quote_map:
             continue
+        quote_time = datetime.combine(q.trade_date, time(15, 0))
+        source_suffix = "fallback_daily"
+        if q.trade_date == now.date() and is_trading_time(now):
+            # 盘中日K是缓存口径, 不能显示成 15:00 收盘。
+            quote_time = now
+            source_suffix = "fallback_intraday_daily"
         quote_map[q.asset_code] = {
             "asset_name": q.asset_name,
             "return_pct": q.return_pct,
-            "quote_time": datetime.combine(q.trade_date, time(15, 0)),
-            "source": f"{q.source}:fallback_daily",
+            "quote_time": quote_time,
+            "source": f"{q.source}:{source_suffix}",
         }
     return quote_map, bool(quote_map)
 
@@ -477,6 +492,11 @@ def load_live_estimate_bundle(
     used_fallback = False
     with session_factory() as session:
         fallback_map, has_fallback = load_latest_daily_quote_map(session, asset_codes)
+    has_today_fallback = any(
+        isinstance(p.get("quote_time"), datetime)
+        and p["quote_time"].date() == date.today()
+        for p in fallback_map.values()
+    )
 
     if not live_records and has_fallback:
         live_quote_map = fallback_map
@@ -514,7 +534,7 @@ def load_live_estimate_bundle(
             calibration_min_samples=5,
         )
 
-    payload = (results, summarize_status(warnings, used_fallback), used_fallback)
+    payload = (results, summarize_status(warnings, used_fallback, has_today_fallback), used_fallback)
     LIVE_BUNDLE_CACHE[cache_key] = (monotonic(), payload)
     return payload
 
@@ -932,7 +952,10 @@ def index(
         (r.get("estimated_today_profit") or 0.0) for r in holding_rows
     )
 
-    data_mode = "最近收盘缓存" if used_fallback else "实时行情"
+    has_today_quote = any(
+        isinstance(t, datetime) and t.date() == date.today() for t in raw_times
+    )
+    data_mode = "盘中日K缓存" if used_fallback and has_today_quote else ("最近收盘缓存" if used_fallback else "实时行情")
     quote_dates = [
         res.quote_time.date().isoformat() for res in results if res.quote_time
     ]
@@ -1024,7 +1047,10 @@ def api_live_estimates(
     total_today_profit = sum(
         (r.get("estimated_today_profit") or 0.0) for r in holding_rows
     )
-    data_mode = "最近收盘缓存" if used_fallback else "实时行情"
+    has_today_quote = any(
+        isinstance(t, datetime) and t.date() == date.today() for t in raw_times
+    )
+    data_mode = "盘中日K缓存" if used_fallback and has_today_quote else ("最近收盘缓存" if used_fallback else "实时行情")
 
     return JSONResponse(
         {
