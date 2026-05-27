@@ -20,6 +20,39 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PLATFORM = "支付宝/蚂蚁财富"
 
+KNOWN_ETF_FEEDER_TARGETS: dict[str, dict[str, object]] = {
+    "016707": {
+        "fund_name": "华夏有色金属ETF联接A",
+        "target_code": "516650.SH",
+        "target_name": "有色金属ETF华夏",
+        "weight_pct": 95.0,
+    },
+    "016708": {
+        "fund_name": "华夏有色金属ETF联接C",
+        "target_code": "516650.SH",
+        "target_name": "有色金属ETF华夏",
+        "weight_pct": 95.0,
+    },
+    "021534": {
+        "fund_name": "华夏有色金属ETF联接D",
+        "target_code": "516650.SH",
+        "target_name": "有色金属ETF华夏",
+        "weight_pct": 95.0,
+    },
+    "004432": {
+        "fund_name": "南方有色金属ETF联接A",
+        "target_code": "512400.SH",
+        "target_name": "有色金属ETF南方",
+        "weight_pct": 95.0,
+    },
+    "004433": {
+        "fund_name": "南方有色金属ETF联接C",
+        "target_code": "512400.SH",
+        "target_name": "有色金属ETF南方",
+        "weight_pct": 95.0,
+    },
+}
+
 
 def _to_pct(value: object) -> float | None:
     if value in {None, ""}:
@@ -81,6 +114,17 @@ def _parse_target_weight_pct(basic_info: dict[str, str]) -> float:
     if match:
         return float(match.group(1))
     return 95.0
+
+
+def _known_etf_feeder_target(fund_code: str) -> dict[str, object] | None:
+    known = KNOWN_ETF_FEEDER_TARGETS.get(str(fund_code).zfill(6))
+    if not known:
+        return None
+    return {
+        "asset_code": known["target_code"],
+        "asset_name": known["target_name"],
+        "weight_pct": known["weight_pct"],
+    }
 
 
 def _find_target_etf(data_source, fund_name: str, basic_info: dict[str, str]) -> dict[str, object] | None:
@@ -301,9 +345,16 @@ def ensure_fund_full_onboarded(
 
     profile = data_source.fetch_fund_profile(fund_code)
     basic_info = _fetch_xq_basic_info(data_source, fund_code)
-    fund_name = basic_info.get("基金名称") or profile.fund_name or fund_code
+    known_target = KNOWN_ETF_FEEDER_TARGETS.get(fund_code)
+    fund_name = (
+        basic_info.get("基金名称")
+        or (known_target or {}).get("fund_name")
+        or profile.fund_name
+        or fund_code
+    )
+    fund_name = str(fund_name)
     fund_type = basic_info.get("基金类型") or profile.fund_type or "equity"
-    is_etf_feeder = _is_etf_feeder(fund_name, fund_type, basic_info)
+    is_etf_feeder = bool(known_target) or _is_etf_feeder(str(fund_name), fund_type, basic_info)
     print(f"[onboard] profile fetched: name={fund_name}, type={fund_type}")
     import_funds_from_rows(session, [{
         "fund_code": fund_code,
@@ -315,7 +366,10 @@ def ensure_fund_full_onboarded(
 
     holdings_rows: list[dict[str, object]] = []
     try:
-        target_etf = _find_target_etf(data_source, fund_name, basic_info) if is_etf_feeder else None
+        target_etf = (
+            _known_etf_feeder_target(fund_code)
+            or (_find_target_etf(data_source, str(fund_name), basic_info) if is_etf_feeder else None)
+        )
         if target_etf is not None:
             holdings_rows = [{
                 "fund_code": fund_code,

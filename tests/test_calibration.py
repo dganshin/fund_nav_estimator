@@ -36,7 +36,7 @@ from src.calibration import (
     run_online_calibration,
 )
 from src.data_sources.base import FundNavRecord, FundProfile, StockQuoteRecord
-from src.onboarding import _find_target_etf, ensure_fund_full_onboarded
+from src.onboarding import _find_target_etf, _known_etf_feeder_target, ensure_fund_full_onboarded
 from src.frontend_app import app
 from src.init_db import init_db
 from src.db import get_session_factory
@@ -519,6 +519,14 @@ def test_gold_etf_feeder_matches_physical_gold_etf_not_gold_stock_etf():
     assert target is not None
     assert target["asset_code"] == "518850.SH"
     assert target["asset_name"] == "黄金ETF华夏"
+
+
+def test_known_etf_feeder_target_fallback_handles_fund_code_only():
+    target = _known_etf_feeder_target("016708")
+
+    assert target is not None
+    assert target["asset_code"] == "516650.SH"
+    assert target["asset_name"] == "有色金属ETF华夏"
 
 
 def test_missing_holdings_home_row_shows_status_not_zero(tmp_path):
