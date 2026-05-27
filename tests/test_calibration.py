@@ -43,12 +43,15 @@ from src.db import get_session_factory
 from src.models import (
     ActualReturn,
     DailyQuote,
+    FundNav,
     HoldingVersion,
     HoldingItem,
     OnlineCalibrationState,
     Fund,
+    TaskRun,
     UserFundPositionEvent,
 )
+from src.tasks import sync_daily_all_funds
 from tests.test_stage4 import seed_fund_holdings_and_allocations
 
 
@@ -80,6 +83,69 @@ def seed_with_actual_return(tmp_path, session):
     )
     session.add(ar)
     session.commit()
+
+
+def test_sync_daily_skips_per_fund_nav_when_already_calibrated(tmp_path, monkeypatch):
+    sf = make_db(tmp_path)
+
+    class IncrementalOnlySource:
+        def fetch_latest_fund_navs_bulk(self):
+            return []
+
+        def fetch_fund_navs(self, *args, **kwargs):
+            raise AssertionError("daily sync should not refetch per-fund nav history")
+
+        def fetch_stock_daily_quotes(self, *args, **kwargs):
+            raise AssertionError("already calibrated fund should not refetch quotes")
+
+    monkeypatch.setattr("src.tasks.get_session_factory", lambda: sf)
+    monkeypatch.setattr("src.tasks.AKShareDataSource", IncrementalOnlySource)
+
+    with sf() as session:
+        session.add(Fund(fund_code="009999", fund_name="已校准基金", fund_type="equity", market="CN", is_active=True))
+        hv = HoldingVersion(
+            fund_code="009999",
+            report_date=date(2026, 3, 31),
+            source="test",
+            total_weight=0.5,
+            is_active=True,
+        )
+        session.add(hv)
+        session.flush()
+        session.add(HoldingItem(holding_version_id=hv.id, asset_code="600000.SH", asset_name="测试股票", asset_type="stock", weight=0.5))
+        session.add(FundNav(trade_date=date(2026, 5, 26), fund_code="009999", unit_nav=1.0, source="test"))
+        session.add(ActualReturn(trade_date=date(2026, 5, 26), fund_code="009999", actual_return=0.01, source="test"))
+        session.add(CalibrationResidual(
+            fund_code="009999",
+            holding_version_id=hv.id,
+            trade_date=date(2026, 5, 26),
+            actual_return=0.01,
+            known_estimate=0.01,
+            unknown_estimate=0.0,
+            base_estimate=0.01,
+            raw_estimate=0.01,
+            calibrated_estimate=0.01,
+            effective_estimate=0.01,
+            residual=0.0,
+            abs_residual=0.0,
+            scale_used_before_update=1.0,
+            beta_known=1.0,
+            beta_unknown=1.0,
+            alpha=0.0,
+            sample_count=1,
+            is_used_for_update=True,
+            skip_reason="",
+        ))
+        task = TaskRun(task_type="sync_daily", fund_code="ALL", status="pending")
+        session.add(task)
+        session.commit()
+        task_id = task.id
+
+    sync_daily_all_funds(task_id)
+
+    with sf() as session:
+        task = session.get(TaskRun, task_id)
+    assert task.status == "success"
 
 
 def make_candidate_residual(day: int, actual: float, single: float, two: float) -> CalibrationResidual:

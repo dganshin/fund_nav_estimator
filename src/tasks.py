@@ -2,16 +2,23 @@ import logging
 from datetime import date, timedelta, datetime, timezone
 from traceback import format_exc
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .calibration import run_online_calibration
 from .data_sources import AKShareDataSource
 from .db import get_session_factory
-from .models import ActualReturn, CalibrationResidual, HoldingVersion, TaskRun
+from .models import ActualReturn, CalibrationResidual, DailyQuote, FundNav, HoldingVersion, TaskRun
 from .onboarding import ensure_fund_full_onboarded
 
 logger = logging.getLogger(__name__)
+
+
+def _max_trade_date(session: Session, model, *where_clauses) -> date | None:
+    return session.scalar(select(func.max(model.trade_date)).where(*where_clauses))
+
+
+def _next_day(day: date) -> date:
+    return day + timedelta(days=1)
 
 
 def update_task_progress(session: Session, task_id: int, status: str, progress_text: str = "", error_message: str = ""):
@@ -73,7 +80,7 @@ def sync_daily_all_funds(task_id: int):
             funds = session.scalars(select(Fund).where(Fund.is_active.is_(True))).all()
             total = len(funds)
             
-            # 批量获取最新净值
+            # 批量获取最新净值；避免每只基金再单独爬东财历史净值。
             update_task_progress(session, task_id, "running", "正在批量拉取最新公募基金和ETF净值...")
             from .backfill import fetch_and_store_bulk_navs
             active_codes = {f.fund_code for f in funds}
@@ -84,39 +91,82 @@ def sync_daily_all_funds(task_id: int):
             
             for i, fund in enumerate(funds, 1):
                 fund_code = fund.fund_code
-                update_task_progress(session, task_id, "running", f"({i}/{total}) 正在同步 {fund_code} 行情并校准")
+                update_task_progress(session, task_id, "running", f"({i}/{total}) 检查 {fund_code} 增量数据")
                 
-                # 增量拉取净值和行情
-                # 利用 ensure_fund_full_onboarded 的幂等性，但只拉取缺失日期
-                from .onboarding import _latest_nav
-                from .backfill import fetch_and_store_fund_navs, fetch_and_store_stock_quotes
-                
-                latest_nav = _latest_nav(session, fund_code)
-                # 最多往前追溯30天，或基于最新有净值的日期
-                start_date = latest_nav.trade_date if latest_nav else (today - timedelta(days=30))
-                
-                try:
-                    fetch_and_store_fund_navs(session, data_source, fund_code, start_date, today)
-                except Exception as exc:
-                    logger.warning("sync_daily_all_funds nav error for %s: %s", fund_code, exc)
-                
-                # 找到当前 active 的 holding_version 拉取成分股行情
+                # 只处理尚未生成残差的新真实净值日。
+                latest_actual_date = _max_trade_date(
+                    session, ActualReturn, ActualReturn.fund_code == fund_code
+                )
+                latest_nav_date = _max_trade_date(
+                    session, FundNav, FundNav.fund_code == fund_code
+                )
+                if latest_actual_date is None:
+                    logger.info("sync_daily_all_funds skip %s: no actual_return", fund_code)
+                    continue
+
                 active_holding = session.scalar(
                     select(HoldingVersion)
                     .where(HoldingVersion.fund_code == fund_code, HoldingVersion.is_active.is_(True))
                     .order_by(HoldingVersion.report_date.desc())
                 )
-                if active_holding:
-                    asset_codes = [item.asset_code for item in active_holding.items]
-                    if asset_codes:
+                if active_holding is None:
+                    logger.info("sync_daily_all_funds skip %s: no active holding", fund_code)
+                    continue
+
+                latest_residual_date = _max_trade_date(
+                    session,
+                    CalibrationResidual,
+                    CalibrationResidual.fund_code == fund_code,
+                    CalibrationResidual.holding_version_id == active_holding.id,
+                )
+                if latest_residual_date and latest_actual_date <= latest_residual_date:
+                    logger.info(
+                        "sync_daily_all_funds skip %s: already calibrated to %s",
+                        fund_code,
+                        latest_residual_date,
+                    )
+                    continue
+
+                start_date = max(
+                    active_holding.report_date,
+                    _next_day(latest_residual_date) if latest_residual_date else active_holding.report_date,
+                )
+                end_date = latest_actual_date
+                if start_date > end_date:
+                    continue
+
+                update_task_progress(
+                    session,
+                    task_id,
+                    "running",
+                    f"({i}/{total}) 同步 {fund_code} {start_date}~{end_date} 行情并校准",
+                )
+
+                from .backfill import fetch_and_store_stock_quotes
+                asset_codes = [item.asset_code for item in active_holding.items]
+                if asset_codes:
+                    latest_quote_count = session.scalar(
+                        select(func.count(func.distinct(DailyQuote.asset_code))).where(
+                            DailyQuote.asset_code.in_(asset_codes),
+                            DailyQuote.trade_date == end_date,
+                        )
+                    ) or 0
+                    if latest_quote_count < len(set(asset_codes)):
                         try:
-                            fetch_and_store_stock_quotes(session, data_source, start_date, today, asset_codes)
+                            fetch_and_store_stock_quotes(
+                                session, data_source, start_date, end_date, asset_codes
+                            )
                         except Exception as exc:
                             logger.warning("sync_daily_all_funds quote error for %s: %s", fund_code, exc)
-                
-                # 增量校准
+
                 from .calibration import run_incremental_calibration
-                run_incremental_calibration(session, fund_code)
+                calibrated = run_incremental_calibration(session, fund_code)
+                logger.info(
+                    "sync_daily_all_funds calibrated %s: %s rows, latest_nav=%s",
+                    fund_code,
+                    calibrated,
+                    latest_nav_date,
+                )
             
             update_task_progress(session, task_id, "success", "每日数据同步和校准完成")
             
