@@ -122,14 +122,10 @@
         <thead>
           <tr>
             <th>日期</th>
-            <th>收盘后模型估值</th>
-            <th>实际涨跌</th>
-            <th>偏差</th>
-            <th>|偏差|</th>
+            <th>模型估值 (%)</th>
+            <th>实际涨跌 (%)</th>
+            <th>估值误差 (%)</th>
             <th>模型</th>
-            <th>训练截止日</th>
-            <th>纳入后续校准</th>
-            <th>跳过原因</th>
           </tr>
         </thead>
         <tbody id="history-tbody"></tbody>
@@ -219,6 +215,14 @@
     return '';
   }
 
+  function pctNumber(v, signed) {
+    var text = String(v || '').replace('%', '');
+    var num = Number(text);
+    if (!isFinite(num)) return '--';
+    var sign = signed && num > 0 ? '+' : '';
+    return sign + num.toFixed(2);
+  }
+
   function loadRows() {
     if (!rowsPromise) {
       rowsPromise = fetch('/api/fund/' + fundCode + '/calibration-residuals?limit=90')
@@ -241,17 +245,15 @@
     tbody.innerHTML = '';
     rows.slice().reverse().forEach(function(r) {
       var tr = document.createElement('tr');
-      var usedStyle = r.is_used === 'Y' ? ' style="color:#16a34a"' : ' style="color:#94a3b8"';
+      var estimate = pctNumber(r.calibrated_estimate, true);
+      var actual = pctNumber(r.actual_return, true);
+      var residual = pctNumber(r.residual, true);
       tr.innerHTML = [
         '<td>' + r.trade_date + '</td>',
-        '<td' + toneClass(r.calibrated_estimate) + '>' + r.calibrated_estimate + '</td>',
-        '<td' + toneClass(r.actual_return) + '>' + r.actual_return + '</td>',
-        '<td' + toneClass(r.residual) + '>' + r.residual + '</td>',
-        '<td>' + r.abs_residual + '</td>',
-        '<td>' + (r.model_version || '--') + '</td>',
-        '<td>' + r.params_fitted_until + '</td>',
-        '<td' + usedStyle + '>' + r.is_used + '</td>',
-        '<td>' + (r.skip_reason || '') + '</td>'
+        '<td' + toneClass(estimate) + '>' + estimate + '</td>',
+        '<td' + toneClass(actual) + '>' + actual + '</td>',
+        '<td' + toneClass(residual) + '>' + residual + '</td>',
+        '<td>' + (r.model_version || '--') + '</td>'
       ].join('');
       tbody.appendChild(tr);
     });
