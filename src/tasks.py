@@ -7,7 +7,16 @@ from sqlalchemy.orm import Session
 
 from .data_sources import AKShareDataSource
 from .db import get_session_factory
-from .models import ActualReturn, CalibrationResidual, DailyQuote, FundNav, HoldingVersion, TaskRun
+from .models import (
+    ActualReturn,
+    CalibrationResidual,
+    DailyQuote,
+    FundNav,
+    HoldingVersion,
+    TaskRun,
+    UserFundPosition,
+    UserFundPositionEvent,
+)
 from .onboarding import ensure_fund_full_onboarded
 
 logger = logging.getLogger(__name__)
@@ -19,6 +28,70 @@ def _max_trade_date(session: Session, model, *where_clauses) -> date | None:
 
 def _next_day(day: date) -> date:
     return day + timedelta(days=1)
+
+
+def roll_forward_positions_by_actual_returns(session: Session, today: date | None = None) -> int:
+    """用已公布实际涨跌滚动持仓金额, 每个基金每日只更新一次。"""
+    today = today or date.today()
+    positions = session.scalars(
+        select(UserFundPosition).where(UserFundPosition.is_active.is_(True))
+    ).all()
+    updated = 0
+    for pos in positions:
+        amount = float(pos.holding_amount or 0.0)
+        if amount <= 0:
+            continue
+        actual = session.scalar(
+            select(ActualReturn)
+            .where(
+                ActualReturn.fund_code == pos.fund_code,
+                ActualReturn.trade_date < today,
+            )
+            .order_by(ActualReturn.trade_date.desc())
+        )
+        if actual is None:
+            continue
+        existed = session.scalar(
+            select(UserFundPositionEvent).where(
+                UserFundPositionEvent.fund_code == pos.fund_code,
+                UserFundPositionEvent.event_type == "nav_rollover",
+                UserFundPositionEvent.trade_date == actual.trade_date,
+            )
+        )
+        if existed is not None:
+            continue
+        pending_delta = session.scalar(
+            select(func.coalesce(func.sum(UserFundPositionEvent.amount_delta), 0.0)).where(
+                UserFundPositionEvent.fund_code == pos.fund_code,
+                UserFundPositionEvent.trade_date == actual.trade_date,
+                UserFundPositionEvent.effective_date.is_not(None),
+                UserFundPositionEvent.effective_date > actual.trade_date,
+            )
+        ) or 0.0
+        base_amount = max(amount - float(pending_delta), 0.0)
+        profit = round(base_amount * actual.actual_return, 2)
+        if abs(profit) < 0.005:
+            continue
+        pos.holding_amount = round(amount + profit, 2)
+        session.add(
+            UserFundPositionEvent(
+                fund_code=pos.fund_code,
+                event_type="nav_rollover",
+                amount_delta=profit,
+                share_delta=None,
+                nav=None,
+                trade_date=actual.trade_date,
+                effective_date=today,
+                source="system",
+                raw_text="",
+                image_path="",
+                note=f"按 {actual.trade_date} 实际涨跌 {actual.actual_return * 100:+.2f}% 更新持有金额",
+            )
+        )
+        updated += 1
+    if updated:
+        session.commit()
+    return updated
 
 
 def update_task_progress(session: Session, task_id: int, status: str, progress_text: str = "", error_message: str = ""):
@@ -167,6 +240,9 @@ def sync_daily_all_funds(task_id: int):
                     calibrated,
                     latest_nav_date,
                 )
+
+            rolled = roll_forward_positions_by_actual_returns(session, today=today)
+            logger.info("sync_daily_all_funds rolled forward positions: %s", rolled)
             
             update_task_progress(session, task_id, "success", "每日数据同步和校准完成")
             
