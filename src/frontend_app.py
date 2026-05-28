@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import re
+from difflib import SequenceMatcher
 import sys
 from datetime import UTC, date, datetime, time, timedelta
 from functools import lru_cache
@@ -393,6 +395,64 @@ def record_position_event(
             note=note,
         )
     )
+
+
+def normalize_fund_match_text(text: str) -> str:
+    text = str(text or "").upper()
+    replacements = {
+        " ": "",
+        "\t": "",
+        "（": "(",
+        "）": ")",
+        "，": "",
+        ",": "",
+        "·": "",
+        "基金": "",
+        "混合": "",
+        "发起式": "",
+        "主题": "",
+        "指数": "",
+        "连接": "联接",
+        "(QDII)": "QDII",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return re.sub(r"[^0-9A-Z\u4e00-\u9fff]", "", text)
+
+
+def parse_force_position_text(raw_text: str) -> list[tuple[str, float]]:
+    rows: list[tuple[str, float]] = []
+    for raw_line in str(raw_text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("|") or line.startswith(":"):
+            continue
+        match = re.search(r"(.+?)\s+([+-]?\d[\d,]*(?:\.\d+)?)\s*$", line)
+        if not match:
+            continue
+        name = match.group(1).strip()
+        amount = float(match.group(2).replace(",", ""))
+        rows.append((name, max(0.0, amount)))
+    return rows
+
+
+def match_fund_by_name(name: str, funds: list[Fund]) -> Fund | None:
+    needle = normalize_fund_match_text(name)
+    if not needle:
+        return None
+    expected_class = needle[-1] if needle[-1:] in {"A", "C", "E"} else ""
+    best: tuple[float, Fund] | None = None
+    for fund in funds:
+        hay = normalize_fund_match_text(fund.fund_name)
+        if expected_class and hay[-1:] in {"A", "C", "E"} and hay[-1] != expected_class:
+            continue
+        if needle == fund.fund_code or needle == hay:
+            return fund
+        score = SequenceMatcher(None, needle, hay).ratio()
+        if needle in hay or hay in needle:
+            score += 0.2
+        if best is None or score > best[0]:
+            best = (score, fund)
+    return best[1] if best and best[0] >= 0.55 else None
 
 
 def get_tone(v: float | None) -> str:
@@ -1302,7 +1362,7 @@ def toggle_watch(fund_code: str):
 
 
 @app.get("/portfolio")
-def portfolio(request: Request, saved: int = 0):
+def portfolio(request: Request, saved: int = 0, imported: int = 0, failed: int = 0):
     session_factory = get_cached_session_factory()
     with session_factory() as session:
         positions = load_user_position_rows(session)
@@ -1333,6 +1393,8 @@ def portfolio(request: Request, saved: int = 0):
             ],
             "watchlist_rows": wl_rows,
             "saved": saved,
+            "imported": imported,
+            "failed": failed,
         },
     )
 
@@ -1386,6 +1448,65 @@ def save_watchlist(fund_code: str = Form(...), is_active: str = Form("1")):
             session, [{"fund_code": fund_code, "is_active": is_active == "1"}]
         )
     return RedirectResponse(url="/portfolio?saved=1", status_code=303)
+
+
+@app.post("/portfolio/force-import")
+def force_import_portfolio(raw_text: str = Form("")):
+    rows = parse_force_position_text(raw_text)
+    imported = 0
+    failed = 0
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        funds = session.scalars(select(Fund)).all()
+        for name, amount in rows:
+            fund = match_fund_by_name(name, funds)
+            if fund is None:
+                failed += 1
+                continue
+            fund.is_active = True
+            pos = session.scalar(
+                select(UserFundPosition).where(
+                    UserFundPosition.fund_code == fund.fund_code
+                )
+            )
+            current = safe_float(pos.holding_amount if pos else 0.0, 0.0)
+            delta = amount - current
+            save_user_position_rows(
+                session,
+                [
+                    {
+                        "fund_code": fund.fund_code,
+                        "holding_amount": amount,
+                        "holding_share": None if pos is None else pos.holding_share,
+                        "cost_nav": None if pos is None else pos.cost_nav,
+                        "platform": (
+                            pos.platform if pos and pos.platform else "支付宝/蚂蚁财富"
+                        ),
+                        "is_active": amount > 0,
+                    }
+                ],
+            )
+            if amount > 0:
+                save_watchlist_rows(
+                    session, [{"fund_code": fund.fund_code, "is_active": True}]
+                )
+            if abs(delta) > 1e-9:
+                record_position_event(
+                    session,
+                    fund_code=fund.fund_code,
+                    event_type="set_amount",
+                    amount_delta=delta,
+                    effective_date=date.today(),
+                    source="ocr_text",
+                    note=f"文本导入强制覆盖金额: {name}",
+                )
+            imported += 1
+        session.commit()
+    clear_live_bundle_cache()
+    return RedirectResponse(
+        url=f"/portfolio?imported={imported}&failed={failed}",
+        status_code=303,
+    )
 
 
 # ── Manage ──────────────────────────────────────────────────────────────────
