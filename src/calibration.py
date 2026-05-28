@@ -835,6 +835,20 @@ def ensure_fund_by_code(
 
     fund = session.get(Fund, fund_code)
     if fund is not None:
+        latest_unit_nav: float | None = None
+        latest_nav_date = None
+        if fund.fund_name == fund_code and data_source is not None and hasattr(data_source, "fetch_fund_profile"):
+            try:
+                profile = data_source.fetch_fund_profile(fund_code)
+                if profile.fund_name and profile.fund_name != fund_code:
+                    fund.fund_name = profile.fund_name
+                fund.fund_type = profile.fund_type or fund.fund_type
+                fund.market = profile.market or fund.market
+                latest_unit_nav = profile.latest_unit_nav
+                latest_nav_date = profile.latest_nav_date
+                session.commit()
+            except Exception as exc:
+                logger.warning("ensure_fund_by_code: refresh fund profile failed for %s: %s", fund_code, exc)
         return {
             "fund_code": fund.fund_code,
             "fund_name": fund.fund_name,
@@ -842,6 +856,8 @@ def ensure_fund_by_code(
             "market": fund.market,
             "is_active": fund.is_active,
             "created": False,
+            "latest_unit_nav": latest_unit_nav,
+            "latest_nav_date": latest_nav_date.isoformat() if latest_nav_date else None,
         }
 
     # 自动拉取基金信息

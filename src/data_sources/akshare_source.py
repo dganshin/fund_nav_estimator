@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date, datetime, timedelta
@@ -7,6 +9,7 @@ from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 
 import pandas as pd
+import requests
 
 from .base import DataSourceError, FundNavRecord, FundProfile, LiveStockQuoteRecord, StockQuoteRecord
 from .code_utils import normalize_asset_code, to_plain_symbol, to_prefixed_symbol
@@ -22,6 +25,41 @@ class AKShareDataSource:
         except ImportError as exc:
             raise DataSourceError("akshare is not installed. Run pip install -r requirements.txt first.") from exc
         self.ak = ak
+
+    def _request_text(self, url: str, timeout: float = 8.0) -> str:
+        session = requests.Session()
+        session.trust_env = False
+        response = session.get(
+            url,
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        response.raise_for_status()
+        return response.text
+
+    def _fetch_profile_from_eastmoney_suggest(self, fund_code: str) -> tuple[str | None, str | None]:
+        try:
+            payload = self._request_text(
+                f"https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx?m=1&key={fund_code}"
+            )
+            data = json.loads(payload)
+            for item in data.get("Datas", []) or []:
+                if str(item.get("CODE", "")).zfill(6) == fund_code:
+                    return str(item.get("NAME") or "").strip() or None, None
+        except Exception as exc:
+            self.last_warnings.append(f"eastmoney suggest profile failed for {fund_code}: {exc}")
+        return None, None
+
+    def _fetch_profile_from_fundcode_search(self, fund_code: str) -> tuple[str | None, str | None]:
+        try:
+            payload = self._request_text("https://fund.eastmoney.com/js/fundcode_search.js", timeout=12.0)
+            pattern = rf'\["{fund_code}",\s*"[^"]*",\s*"([^"]+)",\s*"([^"]*)"'
+            match = re.search(pattern, payload)
+            if match:
+                return match.group(1).strip() or None, match.group(2).strip() or None
+        except Exception as exc:
+            self.last_warnings.append(f"eastmoney fundcode profile failed for {fund_code}: {exc}")
+        return None, None
 
     def fetch_fund_navs(
         self,
@@ -306,6 +344,7 @@ class AKShareDataSource:
     def fetch_fund_profile(self, fund_code: str) -> FundProfile:
         """拉取基金基础信息：名称、最新净值、净值日期。失败时返回降级结果，不报错。"""
         fund_name = fund_code
+        fund_type = "equity"
         latest_unit_nav: float | None = None
         latest_nav_date: date | None = None
         accumulated_nav: float | None = None
@@ -348,12 +387,26 @@ class AKShareDataSource:
                     matched = name_df[name_df["基金代码"].astype(str).str.zfill(6) == fund_code]
                     if not matched.empty:
                         fund_name = str(matched.iloc[0]["基金简称"] or fund_code).strip() or fund_code
+                        if "基金类型" in matched.columns:
+                            fund_type = str(matched.iloc[0]["基金类型"] or fund_type).strip() or fund_type
             except Exception:
                 pass
+        if fund_name == fund_code:
+            fallback_name, fallback_type = self._fetch_profile_from_eastmoney_suggest(fund_code)
+            if fallback_name:
+                fund_name = fallback_name
+            if fallback_type:
+                fund_type = fallback_type
+        if fund_name == fund_code or fund_type == "equity":
+            fallback_name, fallback_type = self._fetch_profile_from_fundcode_search(fund_code)
+            if fallback_name:
+                fund_name = fallback_name
+            if fallback_type:
+                fund_type = fallback_type
         return FundProfile(
             fund_code=fund_code,
             fund_name=fund_name,
-            fund_type="equity",
+            fund_type=fund_type,
             market="CN",
             latest_unit_nav=latest_unit_nav,
             latest_nav_date=latest_nav_date,
