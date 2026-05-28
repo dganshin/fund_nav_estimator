@@ -38,6 +38,17 @@ class Fund(Base):
     calibration_residuals: Mapped[list["CalibrationResidual"]] = relationship(back_populates="fund")
 
 
+class FundAlias(Base):
+    __tablename__ = "fund_aliases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    alias_name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    normalized_alias: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+
 class HoldingVersion(Base):
     __tablename__ = "holding_versions"
 

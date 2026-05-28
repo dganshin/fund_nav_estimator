@@ -47,7 +47,7 @@
 <div class="panel">
   <div class="panel-title">批量强制修改持仓金额</div>
   <p class="panel-note">粘贴“基金名称 金额”, 系统按基金名称匹配并直接覆盖当前持有金额。这个口径代表当前总金额, 当天立即生效, 晚上净值出来后会继续滚动当天收益。</p>
-  <form method="post" action="/portfolio/force-import">
+  <form method="post" action="/portfolio/force-preview">
     <textarea name="raw_text" placeholder="前海开源金银珠宝混合 C 2833.96&#10;华富永鑫灵活配置混合 C 2815.78&#10;西部利得策略优选混合 C 1247.73"></textarea>
     <div class="form-actions" style="justify-content:flex-end; margin-top:10px;">
       <button type="submit" class="btn-warn">强制覆盖金额</button>

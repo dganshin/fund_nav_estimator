@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}确认导入持仓{% endblock %}
+
+{% block content %}
+<div class="panel">
+  <div class="panel-title">确认强制修改持仓金额</div>
+  <p class="panel-note">请检查支付宝名称和本地基金是否匹配。未匹配的行可以手动选择基金, 确认后会保存别名, 下次自动识别。</p>
+  <form method="post" action="/portfolio/force-import">
+    <div class="table-wrap">
+      <table class="plain-table">
+        <thead>
+          <tr>
+            <th>导入名称</th>
+            <th class="align-right">金额</th>
+            <th>匹配基金</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+          <tr>
+            <td>
+              <input type="hidden" name="alias_name" value="{{ row.name }}">
+              <input type="hidden" name="amount" value="{{ row.amount }}">
+              <div style="font-weight:700">{{ row.name }}</div>
+            </td>
+            <td class="align-right">¥{{ "%.2f"|format(row.amount) }}</td>
+            <td>
+              <select name="fund_code">
+                <option value="">-- 不导入 --</option>
+                {% for fund in funds %}
+                <option value="{{ fund.fund_code }}" {% if row.fund_code == fund.fund_code %}selected{% endif %}>{{ fund.fund_code }} · {{ fund.fund_name }}</option>
+                {% endfor %}
+              </select>
+              {% if not row.fund_code %}
+              <div class="muted" style="font-size:12px; margin-top:4px;">未自动匹配, 请手动选择。</div>
+              {% endif %}
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="3" class="muted">没有识别到“基金名称 金额”格式。</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="form-actions" style="justify-content:flex-end; margin-top:12px;">
+      <a class="btn btn-secondary" href="/portfolio">返回</a>
+      <button type="submit" class="btn-warn">确认覆盖金额</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

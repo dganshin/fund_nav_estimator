@@ -34,6 +34,7 @@ if __package__ in {None, ""}:
         DailyQuote,
         EffectiveWeightVersion,
         Fund,
+        FundAlias,
         HoldingVersion,
         TaskRun,
         UserFundPosition,
@@ -73,6 +74,7 @@ else:
         DailyQuote,
         EffectiveWeightVersion,
         Fund,
+        FundAlias,
         HoldingVersion,
         TaskRun,
         UserFundPosition,
@@ -435,10 +437,15 @@ def parse_force_position_text(raw_text: str) -> list[tuple[str, float]]:
     return rows
 
 
-def match_fund_by_name(name: str, funds: list[Fund]) -> Fund | None:
+def match_fund_by_name(name: str, funds: list[Fund], aliases: dict[str, str] | None = None) -> Fund | None:
     needle = normalize_fund_match_text(name)
     if not needle:
         return None
+    fund_by_code = {fund.fund_code: fund for fund in funds}
+    if aliases and needle in aliases:
+        matched = fund_by_code.get(aliases[needle])
+        if matched is not None:
+            return matched
     expected_class = needle[-1] if needle[-1:] in {"A", "C", "E"} else ""
     best: tuple[float, Fund] | None = None
     for fund in funds:
@@ -453,6 +460,34 @@ def match_fund_by_name(name: str, funds: list[Fund]) -> Fund | None:
         if best is None or score > best[0]:
             best = (score, fund)
     return best[1] if best and best[0] >= 0.55 else None
+
+
+def load_fund_alias_map(session) -> dict[str, str]:
+    rows = session.scalars(select(FundAlias)).all()
+    return {row.normalized_alias: row.fund_code for row in rows}
+
+
+def save_fund_alias(session, alias_name: str, fund_code: str) -> None:
+    alias_name = str(alias_name or "").strip()
+    normalized = normalize_fund_match_text(alias_name)
+    if not alias_name or not normalized:
+        return
+    row = session.scalar(
+        select(FundAlias).where(FundAlias.normalized_alias == normalized)
+    )
+    if row is None:
+        session.add(
+            FundAlias(
+                alias_name=alias_name,
+                normalized_alias=normalized,
+                fund_code=fund_code,
+                source="manual",
+            )
+        )
+    else:
+        row.alias_name = alias_name
+        row.fund_code = fund_code
+        row.source = "manual"
 
 
 def get_tone(v: float | None) -> str:
@@ -1450,19 +1485,51 @@ def save_watchlist(fund_code: str = Form(...), is_active: str = Form("1")):
     return RedirectResponse(url="/portfolio?saved=1", status_code=303)
 
 
-@app.post("/portfolio/force-import")
-def force_import_portfolio(raw_text: str = Form("")):
+@app.post("/portfolio/force-preview")
+def force_preview_portfolio(request: Request, raw_text: str = Form("")):
     rows = parse_force_position_text(raw_text)
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        funds = session.scalars(select(Fund).order_by(Fund.fund_code.asc())).all()
+        alias_map = load_fund_alias_map(session)
+    preview_rows = []
+    for name, amount in rows:
+        fund = match_fund_by_name(name, funds, alias_map)
+        preview_rows.append(
+            {
+                "name": name,
+                "amount": amount,
+                "fund_code": None if fund is None else fund.fund_code,
+            }
+        )
+    return templates.TemplateResponse(
+        request,
+        "force_import_preview.html",
+        {"rows": preview_rows, "funds": funds},
+    )
+
+
+@app.post("/portfolio/force-import")
+async def force_import_portfolio(request: Request):
+    form = await request.form()
+    alias_names = form.getlist("alias_name")
+    amounts = form.getlist("amount")
+    fund_codes = form.getlist("fund_code")
     imported = 0
     failed = 0
     session_factory = get_cached_session_factory()
     with session_factory() as session:
-        funds = session.scalars(select(Fund)).all()
-        for name, amount in rows:
-            fund = match_fund_by_name(name, funds)
+        for name, amount_raw, fund_code in zip(alias_names, amounts, fund_codes):
+            fund_code = str(fund_code or "").strip()
+            if not fund_code:
+                failed += 1
+                continue
+            amount = max(0.0, float(str(amount_raw).replace(",", "")))
+            fund = session.get(Fund, fund_code)
             if fund is None:
                 failed += 1
                 continue
+            save_fund_alias(session, str(name), fund_code)
             fund.is_active = True
             pos = session.scalar(
                 select(UserFundPosition).where(
