@@ -12,73 +12,63 @@
   {% endif %}
 </div>
 
-<div class="exposure-hero">
+<div class="summary-card exposure-summary">
   <div>
-    <div class="eyebrow">场内穿透</div>
-    <div class="hero-title">等效股票/ETF持仓</div>
-    <div class="hero-note">按基金持有金额 × 校准后修正权重映射, 今日贡献按今日参与盈亏金额计算。</div>
+    <div class="summary-title">穿透持仓总览</div>
+    <div class="summary-note">按基金持有金额 × 校准后修正权重映射成等效股票/ETF, 今日贡献按今日参与盈亏金额计算。</div>
   </div>
-  <div class="hero-metrics">
-    <div class="hero-metric">
+  <div class="exposure-summary-metrics">
+    <div class="summary-mini">
       <span>资产数</span>
       <strong>{{ asset_count }}</strong>
     </div>
-    <div class="hero-metric">
+    <div class="summary-mini">
       <span>等效金额</span>
       <strong>¥{{ total_amount_text }}</strong>
     </div>
-    <div class="hero-metric">
+    <div class="summary-mini">
       <span>今日贡献</span>
       <strong>{{ total_profit_text }}</strong>
     </div>
   </div>
 </div>
 
-<div class="panel exposure-panel">
-  <div class="panel-title-row">
-    <div class="panel-title">等效持仓明细</div>
-    <form method="get" action="/exposure">
-      <select name="sort" onchange="this.form.submit()" class="exposure-sort">
-        <option value="amount_desc" {% if sort == 'amount_desc' %}selected{% endif %}>按等效金额</option>
-        <option value="profit_desc" {% if sort == 'profit_desc' %}selected{% endif %}>按今日贡献高到低</option>
-        <option value="profit_asc" {% if sort == 'profit_asc' %}selected{% endif %}>按今日贡献低到高</option>
-        <option value="return_desc" {% if sort == 'return_desc' %}selected{% endif %}>按涨跌幅高到低</option>
-        <option value="return_asc" {% if sort == 'return_asc' %}selected{% endif %}>按涨跌幅低到高</option>
-      </select>
-    </form>
+<div class="section-head exposure-section-head">
+  <div class="section-title">等效持仓明细</div>
+  <form method="get" action="/exposure">
+    <select name="sort" onchange="this.form.submit()" class="exposure-sort">
+      <option value="amount_desc" {% if sort == 'amount_desc' %}selected{% endif %}>按等效金额</option>
+      <option value="profit_desc" {% if sort == 'profit_desc' %}selected{% endif %}>按今日贡献高到低</option>
+      <option value="profit_asc" {% if sort == 'profit_asc' %}selected{% endif %}>按今日贡献低到高</option>
+      <option value="return_desc" {% if sort == 'return_desc' %}selected{% endif %}>按涨跌幅高到低</option>
+      <option value="return_asc" {% if sort == 'return_asc' %}selected{% endif %}>按涨跌幅低到高</option>
+    </select>
+  </form>
+</div>
+
+<div class="fund-list">
+  <div class="fund-list-header exposure-header">
+    <div class="header-main">股票/ETF</div>
+    <div>等效金额</div>
+    <div>组合占比</div>
+    <div>涨跌幅</div>
+    <div>今日贡献</div>
+    <div>来源基金</div>
   </div>
-  <div class="table-wrap">
-    <table class="plain-table exposure-table">
-      <thead>
-        <tr>
-          <th>股票/ETF</th>
-          <th class="align-right">等效金额</th>
-          <th class="align-right">组合占比</th>
-          <th class="align-right">涨跌幅</th>
-          <th class="align-right">今日贡献</th>
-          <th>来源基金</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for row in rows %}
-        <tr>
-          <td>
-            <div class="asset-cell">
-              <div class="asset-name">{{ row.asset_name }}</div>
-              <div class="asset-code"><code>{{ row.asset_code }}</code> · {{ row.asset_type }}</div>
-            </div>
-          </td>
-          <td class="align-right amount-cell">¥{{ row.equivalent_amount_text }}</td>
-          <td class="align-right">{{ row.portfolio_weight_text }}</td>
-          <td class="align-right {{ row.return_tone }}">{{ row.return_text }}</td>
-          <td class="align-right {{ row.today_profit_tone }}">{{ row.today_profit_text }}</td>
-          <td class="source-cell">{{ row.fund_summary }}</td>
-        </tr>
-        {% else %}
-        <tr><td colspan="6" class="muted">暂无可穿透持仓。请先录入持仓并确保基金已拉取公开持仓。</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
+  {% for row in rows %}
+  <div class="fund-row exposure-row">
+    <div class="fund-main">
+      <div class="fund-name">{{ row.asset_name }}</div>
+      <div class="fund-sub"><code>{{ row.asset_code }}</code> · {{ row.asset_type }}</div>
+    </div>
+    <div class="fund-value">¥{{ row.equivalent_amount_text }}</div>
+    <div class="fund-value muted-strong">{{ row.portfolio_weight_text }}</div>
+    <div class="fund-value {{ row.return_tone }}">{{ row.return_text }}</div>
+    <div class="fund-value {{ row.today_profit_tone }}">{{ row.today_profit_text }}</div>
+    <div class="exposure-source">{{ row.fund_summary }}</div>
   </div>
+  {% else %}
+  <div class="empty-panel">暂无可穿透持仓。请先录入持仓并确保基金已拉取公开持仓。</div>
+  {% endfor %}
 </div>
 {% endblock %}
