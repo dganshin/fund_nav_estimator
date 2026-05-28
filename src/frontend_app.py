@@ -25,7 +25,7 @@ if __package__ in {None, ""}:
         load_calibration_residuals,
         run_online_calibration,
     )
-    from src.data_sources import AKShareDataSource
+    from src.data_sources import AKShareDataSource, EfinanceDataSource, FallbackDataSource
     from src.db import get_session_factory
     from src.estimator import compute_live_fund_estimates
     from src.init_db import init_db
@@ -65,7 +65,7 @@ else:
         load_calibration_residuals,
         run_online_calibration,
     )
-    from .data_sources import AKShareDataSource
+    from .data_sources import AKShareDataSource, EfinanceDataSource, FallbackDataSource
     from .db import get_session_factory
     from .estimator import compute_live_fund_estimates
     from .init_db import init_db
@@ -185,7 +185,10 @@ def get_cached_session_factory():
 
 @lru_cache(maxsize=1)
 def get_cached_data_source():
-    return AKShareDataSource(raw_dir=RAW_CACHE_DIR)
+    return FallbackDataSource([
+        AKShareDataSource(raw_dir=RAW_CACHE_DIR),
+        EfinanceDataSource(raw_dir=RAW_CACHE_DIR.parent / "efinance"),
+    ])
 
 
 def format_percent(v: float | None) -> str:
@@ -597,6 +600,36 @@ def load_live_estimate_bundle(
         logger.warning("fetch_stock_live_quotes failed: %s", exc)
         live_records = []
         warnings = [str(exc)]
+
+    # 将实时行情写入 DailyQuote，校准残差使用与盘中估值相同的数据源
+    if live_records:
+        try:
+            with session_factory() as session:
+                today = date.today()
+                for r in live_records:
+                    existing = session.get(DailyQuote, {"trade_date": today, "asset_code": r.asset_code})
+                    if existing is not None:
+                        existing.return_pct = r.return_pct
+                        existing.source = f"{r.source}:live_intraday"
+                    else:
+                        try:
+                            session.add(DailyQuote(
+                                trade_date=today,
+                                asset_code=r.asset_code,
+                                asset_name=r.asset_name,
+                                return_pct=r.return_pct,
+                                source=f"{r.source}:live_intraday",
+                            ))
+                            session.flush()
+                        except Exception:
+                            session.rollback()
+                            existing = session.get(DailyQuote, {"trade_date": today, "asset_code": r.asset_code})
+                            if existing is not None:
+                                existing.return_pct = r.return_pct
+                                existing.source = f"{r.source}:live_intraday"
+                session.commit()
+        except Exception as exc:
+            logger.warning("upsert live quotes to DailyQuote failed: %s", exc)
 
     live_quote_map = {
         r.asset_code: {
@@ -1089,6 +1122,18 @@ def build_detail_context(
                 "盈亏口径",
                 actual_return_source_label(actual_return_date, now),
             ),
+            (
+                "三大模型(覆盖)",
+                format_percent(result.coverage_adjusted_estimate),
+            ),
+            (
+                "三大模型(单因子)",
+                format_percent(result.single_scale_estimate),
+            ),
+            (
+                "三大模型(双因子)",
+                format_percent(result.two_factor_estimate),
+            ),
         ],
     }
 
@@ -1397,7 +1442,7 @@ def toggle_watch(fund_code: str):
 
 
 @app.get("/portfolio")
-def portfolio(request: Request, saved: int = 0, imported: int = 0, failed: int = 0):
+def portfolio(request: Request, saved: int = 0, imported: int = 0, failed: int = 0, wl_imported: int = 0, wl_failed: int = 0):
     session_factory = get_cached_session_factory()
     with session_factory() as session:
         positions = load_user_position_rows(session)
@@ -1430,6 +1475,8 @@ def portfolio(request: Request, saved: int = 0, imported: int = 0, failed: int =
             "saved": saved,
             "imported": imported,
             "failed": failed,
+            "wl_imported": wl_imported,
+            "wl_failed": wl_failed,
         },
     )
 
@@ -1483,6 +1530,49 @@ def save_watchlist(fund_code: str = Form(...), is_active: str = Form("1")):
             session, [{"fund_code": fund_code, "is_active": is_active == "1"}]
         )
     return RedirectResponse(url="/portfolio?saved=1", status_code=303)
+
+
+@app.post("/portfolio/watchlist-batch")
+async def watchlist_batch_import(request: Request, background_tasks: BackgroundTasks, raw_text: str = Form("")):
+    """批量导入自选基金：粘贴六位数基金代码，每行一个。"""
+    fund_codes: list[str] = []
+    for line in str(raw_text or "").splitlines():
+        code = line.strip()
+        if re.match(r"^\d{6}$", code):
+            fund_codes.append(code)
+
+    if not fund_codes:
+        return RedirectResponse(url="/portfolio?wl_imported=0&wl_failed=0", status_code=303)
+
+    session_factory = get_cached_session_factory()
+    data_source = get_cached_data_source()
+    imported = 0
+    failed = 0
+    with session_factory() as session:
+        cleanup_task_runs(session)
+        for code in fund_codes:
+            try:
+                close_existing_task_runs(session, "onboard_fund", code)
+                save_watchlist_rows(session, [{"fund_code": code, "is_active": True}])
+                ensure_fund_by_code(session, code, data_source)
+                task = TaskRun(
+                    task_type="onboard_fund",
+                    fund_code=code,
+                    status="pending",
+                    progress_text="等待建档任务启动...",
+                )
+                session.add(task)
+                session.commit()
+                background_tasks.add_task(async_onboard_new_fund, code, task.id)
+                imported += 1
+            except Exception:
+                session.rollback()
+                failed += 1
+    clear_live_bundle_cache()
+    return RedirectResponse(
+        url=f"/portfolio?wl_imported={imported}&wl_failed={failed}",
+        status_code=303,
+    )
 
 
 @app.post("/portfolio/force-preview")
@@ -2014,15 +2104,16 @@ async def api_fund_calibrate(fund_code: str, request: Request):
     force = body.get("force", False)
 
     session_factory = get_cached_session_factory()
+    data_source = get_cached_data_source()
     with session_factory() as session:
         if force:
             from .calibration import force_replay_calibration
 
-            count = force_replay_calibration(session, fund_code)
+            count = force_replay_calibration(session, fund_code, data_source)
         else:
             from .calibration import run_incremental_calibration
 
-            count = run_incremental_calibration(session, fund_code)
+            count = run_incremental_calibration(session, fund_code, data_source)
 
     return JSONResponse(
         {
@@ -2290,6 +2381,39 @@ async def api_sync_daily(background_tasks: BackgroundTasks):
     return JSONResponse({"ok": True, "task_id": task_id})
 
 
+@app.post("/api/sync-daily-force")
+async def api_sync_daily_force(background_tasks: BackgroundTasks):
+    """强制全量重建：清空所有校准残差，从头拉数据并重跑校准。"""
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        cleanup_task_runs(session)
+        close_existing_task_runs(session, "sync_daily", "ALL")
+        # 清空所有校准残差和状态，强制从头重建
+        from sqlalchemy import delete
+        try:
+            from .models import OnlineCalibrationState
+        except ImportError:
+            from src.models import OnlineCalibrationState
+        deleted_residuals = session.execute(delete(CalibrationResidual)).rowcount
+        deleted_states = session.execute(delete(OnlineCalibrationState)).rowcount
+        session.commit()
+        logger.info("force rebuild: deleted %s residuals, %s states", deleted_residuals, deleted_states)
+
+        task = TaskRun(
+            task_type="sync_daily",
+            fund_code="ALL",
+            status="pending",
+            progress_text="强制全量重建：已清空 %s 条残差，正在重新拉取数据..." % (deleted_residuals + deleted_states),
+        )
+        session.add(task)
+        session.commit()
+        task_id = task.id
+
+    clear_live_bundle_cache()
+    background_tasks.add_task(sync_daily_all_funds, task_id)
+    return JSONResponse({"ok": True, "task_id": task_id, "deleted": deleted_residuals + deleted_states})
+
+
 # ── Calibration Routes ─────────────────────────────────────────────────────
 
 
@@ -2301,6 +2425,7 @@ def manage_calibration_run(
 ):
     """手动触发单基金因果校准。"""
     session_factory = get_cached_session_factory()
+    data_source = get_cached_data_source()
     cal_date = (
         date.fromisoformat(calibration_date) if calibration_date.strip() else None
     )
@@ -2310,6 +2435,7 @@ def manage_calibration_run(
             fund_code=fund_code,
             calibration_date=cal_date,
             force=force == "1",
+            data_source=data_source,
         )
     if result is None:
         msg = f"校准失败：{fund_code} 暂无可用数据（需要 active 持仓 + 已公布真实净值）"

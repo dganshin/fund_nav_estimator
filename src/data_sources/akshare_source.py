@@ -221,6 +221,20 @@ class AKShareDataSource:
     ) -> list[LiveStockQuoteRecord]:
         self.last_warnings = []
         dedup_codes = list(dict.fromkeys(asset_codes))
+        # 优先东财实时行情（跟日K同一数据源，盘中收盘涨跌幅口径一致）
+        try:
+            records = self._fetch_stock_live_quotes_from_eastmoney(
+                asset_codes=dedup_codes,
+                timeout_seconds=timeout_seconds,
+            )
+            if records:
+                records.sort(key=lambda item: item.asset_code)
+                return records
+        except Exception as exc:
+            self.last_warnings.append(
+                f"Warning: eastmoney live quote fetch failed: {exc}"
+            )
+        # 回退腾讯实时行情
         try:
             records = self._fetch_stock_live_quotes_from_tencent(
                 asset_codes=dedup_codes,
@@ -272,6 +286,85 @@ class AKShareDataSource:
                         f"Warning: live stock quote fetch timed out for {asset_code}."
                     )
         records.sort(key=lambda item: item.asset_code)
+        return records
+
+    def _asset_code_to_eastmoney_secid(self, asset_code: str) -> str | None:
+        """将资产代码转为东财 secid 格式（1.SH, 0.SZ, 116.HK）。"""
+        normalized = normalize_asset_code(asset_code)
+        if "." not in normalized:
+            return None
+        digits, market = normalized.split(".", 1)
+        market_map = {"SH": "1", "SZ": "0", "BJ": "0", "HK": "116"}
+        prefix = market_map.get(market.upper())
+        if prefix is None:
+            return None
+        return f"{prefix}.{digits}"
+
+    def _fetch_stock_live_quotes_from_eastmoney(
+        self,
+        asset_codes: list[str],
+        timeout_seconds: float,
+    ) -> list[LiveStockQuoteRecord]:
+        """东财实时行情，跟日K同一数据源，盘中收盘涨跌幅口径一致。"""
+        if not asset_codes:
+            return []
+        secids = []
+        code_map: dict[str, str] = {}
+        for code in asset_codes:
+            secid = self._asset_code_to_eastmoney_secid(code)
+            if secid is None:
+                continue
+            secids.append(secid)
+            code_map[secid] = code
+        if not secids:
+            return []
+        url = "http://push2.eastmoney.com/api/qt/stock/get"
+        fields = "f43,f57,f58,f60,f170"
+        records: list[LiveStockQuoteRecord] = []
+        now = datetime.now()
+        import requests as req
+        for start in range(0, len(secids), 50):
+            chunk = secids[start:start + 50]
+            try:
+                r = req.get(
+                    url,
+                    params={"secids": ",".join(chunk), "fields": fields},
+                    timeout=max(timeout_seconds, 2.0),
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                r.raise_for_status()
+                payload = r.json()
+            except Exception:
+                continue
+            stocks = payload.get("data", {})
+            if not stocks:
+                continue
+            # 单只返回 dict，批量返回 list
+            if isinstance(stocks, dict):
+                stocks = [stocks]
+            for stock in stocks:
+                if not isinstance(stock, dict):
+                    continue
+                secid = stock.get("f57", "")
+                orig_code = code_map.get(secid)
+                if orig_code is None:
+                    # 反向匹配：东财可能返回带市场前缀的代码
+                    plain = str(secid).replace("1.", "").replace("0.", "").replace("116.", "")
+                    normalized = normalize_asset_code(plain)
+                    orig_code = normalized
+                latest = stock.get("f43")
+                prev_close = stock.get("f60")
+                change_pct = stock.get("f170")
+                if latest is None or prev_close in (None, 0) or change_pct is None:
+                    continue
+                records.append(LiveStockQuoteRecord(
+                    trade_date=now.date(),
+                    quote_time=now,
+                    asset_code=normalize_asset_code(orig_code),
+                    asset_name=str(stock.get("f58", orig_code)),
+                    return_pct=(float(change_pct) / 100.0),
+                    source="eastmoney:qt_live",
+                ))
         return records
 
     def _fetch_stock_live_quotes_from_tencent(

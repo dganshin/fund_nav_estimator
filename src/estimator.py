@@ -163,6 +163,8 @@ class LiveFundEstimateResult:
     effective_weight_estimate: float | None
     coverage_adjusted_estimate: float | None
     calibrated_estimate: float | None
+    single_scale_estimate: float | None
+    two_factor_estimate: float | None
     final_estimate: float
     final_method: str
     covered_weight: float
@@ -611,6 +613,18 @@ def upsert_online_calibration_state(
             holding_version_id=holding_version_id,
         )
         session.add(state)
+        try:
+            session.flush()
+        except Exception:
+            session.rollback()
+            state = session.scalar(
+                select(OnlineCalibrationState).where(
+                    OnlineCalibrationState.fund_code == fund_code,
+                    OnlineCalibrationState.holding_version_id == holding_version_id,
+                )
+            )
+            if state is None:
+                raise
     state.base_scale_factor = base_scale_factor
     state.current_scale_factor = base_scale_factor
     state.min_scale_factor = min_scale_factor
@@ -831,6 +845,8 @@ def compute_live_fund_estimate(
             effective_weight_estimate=None,
             coverage_adjusted_estimate=None,
             calibrated_estimate=None,
+            single_scale_estimate=None,
+            two_factor_estimate=None,
             final_estimate=None,
             final_method="无数据",
             covered_weight=0.0,
@@ -955,6 +971,7 @@ def compute_live_fund_estimate(
     base_estimate = raw_estimate + unknown_estimate
     causal_calibrated_estimate = beta_known * raw_estimate + beta_unknown * unknown_estimate + alpha
     single_scale_estimate = current_scale_factor * base_estimate
+    _two_factor_estimate = causal_calibrated_estimate  # 保持纯 two_factor，在 ensemble 覆盖之前
     if model_weights:
         candidate_estimates = {
             "coverage_adjusted": base_estimate,
@@ -1051,6 +1068,8 @@ def compute_live_fund_estimate(
         effective_weight_estimate=None if coverage_adjusted_estimate is None else round(effective_weight_estimate, 8),
         coverage_adjusted_estimate=None if coverage_adjusted_estimate is None else round(coverage_adjusted_estimate, 8),
         calibrated_estimate=None if calibrated_estimate is None else round(calibrated_estimate, 8),
+        single_scale_estimate=round(single_scale_estimate, 8),
+        two_factor_estimate=round(_two_factor_estimate, 8),
         final_estimate=None if best_estimate is None else round(best_estimate, 8),
         final_method=best_method,
         covered_weight=round(covered_weight, 8),
@@ -1104,7 +1123,38 @@ def compute_live_fund_estimates(
         )
         if result is not None:
             results.append(result)
+            # 保存实时估值快照（含所有模型值 + ensemble），校准直接使用，不再重算
+            _upsert_live_fund_estimate(session, result)
     return results
+
+
+def _upsert_live_fund_estimate(session: Session, result: LiveFundEstimateResult) -> None:
+    from .models import FundEstimate
+    import json
+    existing = session.get(FundEstimate, {"trade_date": result.trade_date, "fund_code": result.fund_code})
+    snapshot = json.dumps({
+        "current_estimate": result.current_estimate,
+        "coverage_adjusted": result.coverage_adjusted_estimate,
+        "single_scale": result.single_scale_estimate,
+        "two_factor": result.two_factor_estimate,
+        "calibrated": result.calibrated_estimate,
+    })
+    if existing is not None:
+        existing.raw_estimate = result.raw_estimate
+        existing.covered_weight = result.covered_weight
+        existing.missing_weight = result.missing_weight
+        existing.missing_assets_json = snapshot
+    else:
+        session.add(FundEstimate(
+            trade_date=result.trade_date,
+            fund_code=result.fund_code,
+            holding_version_id=result.holding_version_id or 0,
+            raw_estimate=result.raw_estimate,
+            covered_weight=result.covered_weight,
+            missing_weight=result.missing_weight,
+            missing_assets_json=snapshot,
+        ))
+    session.commit()
 
 
 def build_fund_estimates(

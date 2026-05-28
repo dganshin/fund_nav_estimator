@@ -8,6 +8,9 @@
 {% if imported %}
 <div class="msg-ok">✓ 已强制导入 {{ imported }} 条持仓金额{% if failed %}, {{ failed }} 条未匹配{% endif %}。</div>
 {% endif %}
+{% if wl_imported %}
+<div class="msg-ok">✓ 已批量导入 {{ wl_imported }} 只自选基金{% if wl_failed %}, {{ wl_failed }} 只失败{% endif %}。</div>
+{% endif %}
 
 <div class="panel">
   <div class="panel-title">录入 / 编辑我的持仓</div>
@@ -79,6 +82,17 @@
         <label class="form-label">&nbsp;</label>
         <button type="submit">保存自选</button>
       </div>
+    </div>
+  </form>
+</div>
+
+<div class="panel">
+  <div class="panel-title">批量导入自选基金</div>
+  <p class="panel-note">粘贴六位数基金代码, 每行一个, 系统自动建档并加入自选。</p>
+  <form method="post" action="/portfolio/watchlist-batch">
+    <textarea name="raw_text" placeholder="001467&#10;012345&#10;678901"></textarea>
+    <div class="form-actions" style="justify-content:flex-end; margin-top:10px;">
+      <button type="submit">批量导入自选</button>
     </div>
   </form>
 </div>

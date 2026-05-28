@@ -207,22 +207,93 @@ def _compute_features_from_daily_quotes(
     session: Session,
     holding_version: HoldingVersion,
     trade_date: date,
+    data_source=None,
 ) -> CalibrationFeatures:
-    """构造 known + unknown proxy 两个低维特征。"""
+    """构造 known + unknown proxy 两个低维特征。
+
+    优先使用当日实时估值快照（与用户盘中看到的一致），
+    退而使用 DailyQuote 收盘行情，最后尝试实时行情 API。
+    """
+    from .models import FundEstimate
     items = holding_version.items
-    known = 0.0
-    quoted_weight = 0.0
     covered_weight = sum(item.weight for item in items)
     allocation = _select_asset_allocation_for_holding(session, holding_version)
     stock_weight = covered_weight if allocation is None else allocation.stock_weight
-    for item in items:
-        q = session.scalar(
-            select(DailyQuote)
-            .where(DailyQuote.asset_code == item.asset_code, DailyQuote.trade_date == trade_date)
+
+    # 1. 优先使用实时估值快照（与用户盘中看到的数据完全一致）
+    saved = session.get(FundEstimate, {"trade_date": trade_date, "fund_code": holding_version.fund_code})
+    if saved is not None and saved.raw_estimate != 0.0:
+        return CalibrationFeatures(
+            known_estimate=saved.raw_estimate,
+            unknown_estimate=max((stock_weight or 0.0) - covered_weight, 0.0)
+                * (saved.raw_estimate / covered_weight if covered_weight > 0 else 0.0),
+            base_estimate=saved.raw_estimate
+                + max((stock_weight or 0.0) - covered_weight, 0.0)
+                * (saved.raw_estimate / covered_weight if covered_weight > 0 else 0.0),
+            quote_coverage=1.0 if covered_weight > 0 else 0.0,
+            covered_weight=covered_weight,
+            stock_weight=stock_weight or covered_weight,
         )
-        if q is not None:
-            quoted_weight += item.weight
-            known += item.weight * q.return_pct
+
+    is_today = (trade_date == date.today())
+    known = 0.0
+    quoted_weight = 0.0
+    missing_codes: list[str] = []
+
+    # 2. 当日优先用实时行情（与用户盘中看到的一致），历史日用 DailyQuote
+    if is_today and data_source is not None and hasattr(data_source, "fetch_stock_live_quotes"):
+        asset_codes = [item.asset_code for item in items]
+        try:
+            live_records = data_source.fetch_stock_live_quotes(
+                asset_codes=asset_codes, sleep_seconds=0.0, timeout_seconds=8.0
+            )
+            live_map = {r.asset_code: r.return_pct for r in live_records}
+            for item in items:
+                if item.asset_code in live_map:
+                    quoted_weight += item.weight
+                    known += item.weight * live_map[item.asset_code]
+                else:
+                    missing_codes.append(item.asset_code)
+        except Exception:
+            pass
+        # 实时行情覆盖不全时用 DailyQuote 补
+        if missing_codes:
+            for item in items:
+                if item.asset_code not in missing_codes:
+                    continue
+                q = session.scalar(
+                    select(DailyQuote)
+                    .where(DailyQuote.asset_code == item.asset_code, DailyQuote.trade_date == trade_date)
+                )
+                if q is not None:
+                    quoted_weight += item.weight
+                    known += item.weight * q.return_pct
+    else:
+        # 历史日：从 DailyQuote 计算
+        for item in items:
+            q = session.scalar(
+                select(DailyQuote)
+                .where(DailyQuote.asset_code == item.asset_code, DailyQuote.trade_date == trade_date)
+            )
+            if q is not None:
+                quoted_weight += item.weight
+                known += item.weight * q.return_pct
+            else:
+                missing_codes.append(item.asset_code)
+        # 历史日行情缺失时尝试实时行情兜底
+        if missing_codes and data_source is not None and hasattr(data_source, "fetch_stock_live_quotes"):
+            try:
+                live_records = data_source.fetch_stock_live_quotes(
+                    asset_codes=missing_codes, sleep_seconds=0.0, timeout_seconds=8.0
+                )
+                live_map = {r.asset_code: r.return_pct for r in live_records}
+                for item in items:
+                    if item.asset_code in missing_codes and item.asset_code in live_map:
+                        return_pct = live_map[item.asset_code]
+                        quoted_weight += item.weight
+                        known += item.weight * return_pct
+            except Exception:
+                pass
     known_avg = known / quoted_weight if quoted_weight > 0 else 0.0
     unknown_weight = max((stock_weight or 0.0) - covered_weight, 0.0)
     unknown = unknown_weight * known_avg
@@ -469,6 +540,7 @@ def run_online_calibration(
     fund_code: str,
     calibration_date: date | None = None,
     force: bool = False,
+    data_source=None,
 ) -> CalibrationResult | None:
     """
     为指定基金运行一次因果在线校准。
@@ -526,7 +598,7 @@ def run_online_calibration(
     already_calibrated = (state.last_update_trade_date == calibration_date)
 
     # 5. 构造当天特征, 训练样本严格限制在 trade_date < D。
-    features = _compute_features_from_daily_quotes(session, holding_version, calibration_date)
+    features = _compute_features_from_daily_quotes(session, holding_version, calibration_date, data_source)
     training = _training_rows(session, fund_code, holding_version.id, calibration_date)
     sample_count = len(training)
     raw_estimate = features.base_estimate
@@ -643,6 +715,27 @@ def run_online_calibration(
             sample_count=state.sample_count,
             confidence_level=state.confidence_level or "D",
         )
+
+    # 优先使用盘中实时估值快照，与用户看到的数值完全一致
+    import json as _json
+    from .models import FundEstimate as _FE
+    _snap_row = session.get(_FE, {"trade_date": calibration_date, "fund_code": fund_code})
+    if _snap_row is not None and _snap_row.missing_assets_json and _snap_row.missing_assets_json.startswith("{"):
+        try:
+            _snap = _json.loads(_snap_row.missing_assets_json)
+            if _snap.get("coverage_adjusted") is not None:
+                coverage_estimate = float(_snap["coverage_adjusted"])
+            if _snap.get("single_scale") is not None:
+                single_estimate = float(_snap["single_scale"])
+            if _snap.get("two_factor") is not None:
+                two_estimate = float(_snap["two_factor"])
+            _snap_final = _snap.get("current_estimate") or _snap.get("calibrated")
+            if _snap_final is not None:
+                effective_estimate = float(_snap_final)
+            residual = actual_return_val - effective_estimate
+            abs_residual = abs(residual)
+        except Exception:
+            pass
 
     if existing_residual is None:
         residual_row = CalibrationResidual(
@@ -928,13 +1021,17 @@ def ensure_fund_by_code(
     }
 
 
-def run_incremental_calibration(session: Session, fund_code: str) -> int:
+def run_incremental_calibration(session: Session, fund_code: str, data_source=None) -> int:
     """找出尚未生成 residual 的 actual_return 日期并逐日进行 run_online_calibration。"""
     from .models import ActualReturn, CalibrationResidual, HoldingVersion
 
     # 先找到 active holding_version
     stmt = select(HoldingVersion).where(HoldingVersion.fund_code == fund_code, HoldingVersion.is_active.is_(True))
     holding_version = session.scalar(stmt)
+    if not holding_version and data_source is not None:
+        from .onboarding import ensure_fund_full_onboarded
+        ensure_fund_full_onboarded(session, fund_code, data_source)
+        holding_version = session.scalar(stmt)
     if not holding_version:
         return 0
 
@@ -952,13 +1049,13 @@ def run_incremental_calibration(session: Session, fund_code: str) -> int:
     calibrated_count = 0
     for d in all_dates:
         if d >= holding_version.report_date and d not in existing_dates:
-            run_online_calibration(session, fund_code, calibration_date=d, force=False)
+            run_online_calibration(session, fund_code, calibration_date=d, force=False, data_source=data_source)
             calibrated_count += 1
             session.commit()
     return calibrated_count
 
 
-def force_replay_calibration(session: Session, fund_code: str) -> int:
+def force_replay_calibration(session: Session, fund_code: str, data_source=None) -> int:
     """清理当前 holding_version 下的全部 residual，重置状态并从头 replay 一遍。"""
     from .models import ActualReturn, CalibrationResidual, HoldingVersion, OnlineCalibrationState
     from sqlalchemy import delete
@@ -966,6 +1063,10 @@ def force_replay_calibration(session: Session, fund_code: str) -> int:
     # 找到 active holding_version
     stmt = select(HoldingVersion).where(HoldingVersion.fund_code == fund_code, HoldingVersion.is_active.is_(True))
     holding_version = session.scalar(stmt)
+    if not holding_version and data_source is not None:
+        from .onboarding import ensure_fund_full_onboarded
+        ensure_fund_full_onboarded(session, fund_code, data_source)
+        holding_version = session.scalar(stmt)
     if not holding_version:
         return 0
 
@@ -988,7 +1089,7 @@ def force_replay_calibration(session: Session, fund_code: str) -> int:
     calibrated_count = 0
     for d in all_dates:
         if d >= holding_version.report_date:
-            run_online_calibration(session, fund_code, calibration_date=d, force=True)
+            run_online_calibration(session, fund_code, calibration_date=d, force=True, data_source=data_source)
             calibrated_count += 1
             session.commit()
     return calibrated_count

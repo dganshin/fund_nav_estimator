@@ -75,6 +75,12 @@ KNOWN_ETF_FEEDER_TARGETS: dict[str, dict[str, object]] = {
         "target_name": "科创芯片ETF南方",
         "weight_pct": 95.0,
     },
+    "018392": {
+        "fund_name": "南方上海金ETF发起联接C",
+        "target_code": "518860.SH",
+        "target_name": "上海金ETF建信",
+        "weight_pct": 95.0,
+    },
 }
 
 
@@ -200,6 +206,12 @@ def _find_target_etf(data_source, fund_name: str, basic_info: dict[str, str]) ->
     if any("黄金" in theme for theme in theme_candidates):
         theme_keywords.append("黄金ETF")
         theme_keywords.append("黄金")
+    if any("上海金" in theme for theme in theme_candidates):
+        theme_keywords.append("上海金ETF")
+        theme_keywords.append("上海金")
+    if any("游戏" in theme or "动漫" in theme for theme in theme_candidates):
+        theme_keywords.append("游戏ETF")
+        theme_keywords.append("游戏")
     theme_keywords = [kw for kw in dict.fromkeys(theme_keywords) if kw]
     candidates = []
     for _, row in df.iterrows():
@@ -346,7 +358,7 @@ def _run_causal_calibration_history(
     ).all()
     count = 0
     for trade_date in dates:
-        result = run_online_calibration(session, fund_code, calibration_date=trade_date, force=force_rebuild)
+        result = run_online_calibration(session, fund_code, calibration_date=trade_date, force=force_rebuild, data_source=data_source)
         if result is not None:
             count += 1
     return count
@@ -394,23 +406,65 @@ def ensure_fund_full_onboarded(
             _known_etf_feeder_target(fund_code)
             or (_find_target_etf(data_source, str(fund_name), basic_info) if is_etf_feeder else None)
         )
-        if target_etf is not None:
-            holdings_rows = [{
-                "fund_code": fund_code,
-                "report_date": date(today.year, 3, 31).isoformat(),
-                "source": "akshare:target_etf",
-                "asset_code": target_etf["asset_code"],
-                "asset_name": target_etf["asset_name"],
-                "asset_type": "etf",
-                "weight_pct": target_etf["weight_pct"],
-            }]
-            print(
-                f"[onboard] etf feeder target: code={target_etf['asset_code']}, "
-                f"name={target_etf['asset_name']}, weight={target_etf['weight_pct']}"
-            )
-        elif is_etf_feeder:
-            warnings.append("ETF联接基金未识别目标ETF, 不使用公开股票明细估值")
-            holdings_rows = []
+        # ETF联接也先尝试拉取实际公开持仓，包括目标ETF和其他持股
+        if is_etf_feeder:
+            raw_holdings = []
+            if hasattr(data_source, "fetch_fund_public_holdings"):
+                try:
+                    raw_holdings = data_source.fetch_fund_public_holdings(fund_code)
+                except Exception:
+                    pass
+            if not raw_holdings:
+                try:
+                    raw_holdings = data_source.fetch_fund_holdings(fund_code, year=today.year)
+                except Exception:
+                    pass
+            if not isinstance(raw_holdings, list):
+                raw_holdings = []
+            holdings_rows = _normalize_holding_rows(fund_code, raw_holdings or [])
+            if holdings_rows:
+                print(f"[onboard] etf feeder using actual holdings: count={len(holdings_rows)}")
+            elif target_etf is not None:
+                # 无法获取实际持仓，回退到目标ETF单一持仓
+                holdings_rows = [{
+                    "fund_code": fund_code,
+                    "report_date": date(today.year, 3, 31).isoformat(),
+                    "source": "akshare:target_etf",
+                    "asset_code": target_etf["asset_code"],
+                    "asset_name": target_etf["asset_name"],
+                    "asset_type": "etf",
+                    "weight_pct": target_etf["weight_pct"],
+                }]
+                print(
+                    f"[onboard] etf feeder fallback target: code={target_etf['asset_code']}, "
+                    f"name={target_etf['asset_name']}, weight={target_etf['weight_pct']}"
+                )
+            else:
+                warnings.append("ETF联接基金未识别目标ETF, 不使用公开股票明细估值")
+        elif target_etf is not None:
+            # 已知的ETF联接（KNOWN_ETF_FEEDER_TARGETS），仍尝试实际持仓
+            raw_holdings = []
+            if hasattr(data_source, "fetch_fund_public_holdings"):
+                try:
+                    raw_holdings = data_source.fetch_fund_public_holdings(fund_code)
+                except Exception:
+                    pass
+            if not isinstance(raw_holdings, list):
+                raw_holdings = []
+            real_holdings = _normalize_holding_rows(fund_code, raw_holdings or [])
+            if real_holdings:
+                holdings_rows = real_holdings
+                print(f"[onboard] known etf feeder using actual holdings: count={len(holdings_rows)}")
+            else:
+                holdings_rows = [{
+                    "fund_code": fund_code,
+                    "report_date": date(today.year, 3, 31).isoformat(),
+                    "source": "akshare:target_etf",
+                    "asset_code": target_etf["asset_code"],
+                    "asset_name": target_etf["asset_name"],
+                    "asset_type": "etf",
+                    "weight_pct": target_etf["weight_pct"],
+                }]
         else:
             if hasattr(data_source, "fetch_fund_public_holdings"):
                 raw_holdings = data_source.fetch_fund_public_holdings(fund_code)

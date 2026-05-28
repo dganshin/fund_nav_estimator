@@ -183,7 +183,19 @@ def sync_daily_all_funds(task_id: int):
                     .order_by(HoldingVersion.report_date.desc())
                 )
                 if active_holding is None:
-                    logger.info("sync_daily_all_funds skip %s: no active holding", fund_code)
+                    logger.info("sync_daily_all_funds %s: no active holding, try onboarding", fund_code)
+                    try:
+                        from .onboarding import ensure_fund_full_onboarded
+                        ensure_fund_full_onboarded(session, fund_code, data_source)
+                        active_holding = session.scalar(
+                            select(HoldingVersion)
+                            .where(HoldingVersion.fund_code == fund_code, HoldingVersion.is_active.is_(True))
+                            .order_by(HoldingVersion.report_date.desc())
+                        )
+                    except Exception as exc:
+                        logger.warning("sync_daily_all_funds onboard %s failed: %s", fund_code, exc)
+                if active_holding is None:
+                    logger.info("sync_daily_all_funds skip %s: still no active holding", fund_code)
                     continue
 
                 latest_residual_date = _max_trade_date(
@@ -233,7 +245,7 @@ def sync_daily_all_funds(task_id: int):
                             logger.warning("sync_daily_all_funds quote error for %s: %s", fund_code, exc)
 
                 from .calibration import run_incremental_calibration
-                calibrated = run_incremental_calibration(session, fund_code)
+                calibrated = run_incremental_calibration(session, fund_code, data_source)
                 logger.info(
                     "sync_daily_all_funds calibrated %s: %s rows, latest_nav=%s",
                     fund_code,

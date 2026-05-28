@@ -21,7 +21,9 @@
       <p style="margin:0; font-size:13px; color:#9a3412;">增量同步所有 Active 基金的最新净值、日 K 线，并生成因果校准残差。每天盘后或次日早晨点击一次即可。</p>
     </div>
     <button class="btn btn-primary" onclick="runDailySync(this)" style="background:#ea580c; border-color:#ea580c;">一键同步并校准</button>
+    <button class="btn" onclick="runForceRebuild(this)" style="background:#dc2626; border-color:#dc2626; color:#fff; margin-left:8px;">强制全量重建</button>
   </div>
+  <p style="margin:8px 0 0 0; font-size:12px; color:#9a3412;">「一键同步」只更新增量 (跳过已有)。「强制全量重建」清空所有校准残差从头重建。切换数据源后请执行一次。</p>
 </div>
 
 <!-- ══ 基金管理 ══ -->
@@ -368,6 +370,29 @@ function runDailySync(btn) {
       alert("请求失败：" + err.message);
       btn.disabled = false;
       btn.textContent = "一键同步并校准";
+    });
+}
+
+function runForceRebuild(btn) {
+  if (!confirm("⚠️ 强制全量重建会清空所有校准残差和状态，从头拉取数据并重新校准。\n\n这个过程可能需要较长时间。确认继续吗？")) return;
+  btn.disabled = true;
+  btn.textContent = "启动中...";
+  fetch("/api/sync-daily-force", { method: "POST" })
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok) {
+        alert("全量重建已启动！已清空 " + data.deleted + " 条历史数据。\n\n请返回首页查看进度。");
+        window.location.href = "/";
+      } else {
+        alert("启动失败：" + (data.error || "未知错误"));
+        btn.disabled = false;
+        btn.textContent = "强制全量重建";
+      }
+    })
+    .catch(err => {
+      alert("请求失败：" + err.message);
+      btn.disabled = false;
+      btn.textContent = "强制全量重建";
     });
 }
 </script>

@@ -14,7 +14,7 @@ except ImportError:
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from src.data_sources import AKShareDataSource, DataSourceError
+    from src.data_sources import AKShareDataSource, DataSourceError, EfinanceDataSource, FallbackDataSource
     from src.db import get_session_factory
     from src.estimator import (
         compute_live_fund_estimates,
@@ -58,7 +58,7 @@ if __package__ in {None, ""}:
         save_user_position_rows,
     )
 else:
-    from .data_sources import AKShareDataSource, DataSourceError
+    from .data_sources import AKShareDataSource, DataSourceError, EfinanceDataSource, FallbackDataSource
     from .db import get_session_factory
     from .estimator import (
         compute_live_fund_estimates,
@@ -139,7 +139,10 @@ def get_cached_session_factory():
 
 @st.cache_resource
 def get_cached_data_source():
-    return AKShareDataSource(raw_dir=RAW_CACHE_DIR)
+    return FallbackDataSource([
+        AKShareDataSource(raw_dir=RAW_CACHE_DIR),
+        EfinanceDataSource(raw_dir=RAW_CACHE_DIR.parent / "efinance"),
+    ])
 
 
 def inject_styles() -> None:
@@ -782,6 +785,36 @@ def load_live_estimate_results(
         timeout_seconds=8.0,
     )
     warnings = list(getattr(data_source, "last_warnings", []))
+    # 将实时行情写入 DailyQuote，校准残差使用与盘中估值相同的数据源
+    if live_records:
+        try:
+            with session_factory() as session:
+                today = date.today()
+                for r in live_records:
+                    existing = session.get(DailyQuote, {"trade_date": today, "asset_code": r.asset_code})
+                    if existing is not None:
+                        existing.return_pct = r.return_pct
+                        existing.source = f"{r.source}:live_intraday"
+                    else:
+                        try:
+                            session.add(DailyQuote(
+                                trade_date=today,
+                                asset_code=r.asset_code,
+                                asset_name=r.asset_name,
+                                return_pct=r.return_pct,
+                                source=f"{r.source}:live_intraday",
+                            ))
+                            session.flush()
+                        except Exception:
+                            session.rollback()
+                            existing = session.get(DailyQuote, {"trade_date": today, "asset_code": r.asset_code})
+                            if existing is not None:
+                                existing.return_pct = r.return_pct
+                                existing.source = f"{r.source}:live_intraday"
+                session.commit()
+        except Exception:
+            pass  # live quote upsert is best-effort, don't block estimates
+
     live_quote_map = {
         record.asset_code: {
             "asset_name": record.asset_name,
@@ -1365,6 +1398,8 @@ def render_dashboard_tab(
         "effective_weight_estimate": live_result.effective_weight_estimate,
         "coverage_adjusted_estimate": live_result.coverage_adjusted_estimate,
         "calibrated_estimate": live_result.calibrated_estimate,
+        "single_scale_estimate": live_result.single_scale_estimate,
+        "two_factor_estimate": live_result.two_factor_estimate,
         "best_estimate": live_result.final_estimate,
         "best_method": live_result.final_method,
         "confidence_level": live_result.confidence_level,
@@ -1446,8 +1481,10 @@ def render_dashboard_tab(
                 [
                     {"项目": "公开权重估值", "值": format_percent(snapshot["raw_estimate"], signed=True)},
                     {"项目": "修正权重估值", "值": format_percent(snapshot["effective_weight_estimate"], signed=True)},
-                    {"项目": "覆盖修正估值", "值": format_percent(snapshot["coverage_adjusted_estimate"], signed=True)},
-                    {"项目": "校准估值", "值": format_percent(snapshot["calibrated_estimate"], signed=True)},
+                    {"项目": "覆盖修正估值(覆盖)", "值": format_percent(snapshot["coverage_adjusted_estimate"], signed=True)},
+                    {"项目": "单因子估值(single)", "值": format_percent(snapshot["single_scale_estimate"], signed=True)},
+                    {"项目": "双因子估值(two_factor)", "值": format_percent(snapshot["two_factor_estimate"], signed=True)},
+                    {"项目": "校准估值(ensemble)", "值": format_percent(snapshot["calibrated_estimate"], signed=True)},
                     {"项目": "当前 scale", "值": f"{float(snapshot['current_scale_factor']):.4f}"},
                     {"项目": "最新真实净值日", "值": format_display_date(snapshot["latest_real_nav_date"])},
                     {"项目": "最近误差", "值": format_percent(snapshot["latest_mae"])},
