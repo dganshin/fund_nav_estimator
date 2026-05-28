@@ -288,6 +288,19 @@ def short_error_label(label: str | None) -> str:
     return text
 
 
+def detail_error_band_label(result) -> str:
+    label = result.error_band_label or "样本不足"
+    if (
+        result.error_band_pct is None
+        and result.best_status == "ok"
+        and result.covered_weight >= 0.9
+        and len(result.holdings) == 1
+        and result.holdings[0].asset_type == "etf"
+    ):
+        return "目标ETF代理"
+    return label
+
+
 def reliability_from_error(error_band_pct: float | None, label: str | None) -> dict:
     text = str(label or "样本不足")
     if text in {"缺持仓", "缺公开持仓", "不可估", "行情缺失", "同步失败"}:
@@ -304,11 +317,11 @@ def reliability_from_error(error_band_pct: float | None, label: str | None) -> d
             "detail": "近期误差扩大或疑似调仓, 仅供方向参考。",
             "tone": "warn",
         }
-    if text == "ETF锚定":
+    if text == "目标ETF代理":
         return {
-            "key": "etf_anchor",
-            "label": "ETF锚定",
-            "detail": "已锚定目标ETF, 暂无足够历史误差样本。",
+            "key": "target_etf_proxy",
+            "label": "目标ETF代理",
+            "detail": "使用目标ETF实时涨跌做代理, 实际暴露比例仍需历史净值校准。",
             "tone": "good",
         }
     if error_band_pct is None:
@@ -633,7 +646,7 @@ def build_home_rows(
             and len(item.holdings) == 1
             and item.holdings[0].asset_type == "etf"
         ):
-            status_text = "ETF锚定"
+            status_text = "目标ETF代理"
         current_estimate_text = format_percent(item.current_estimate)
         if item.best_status == "no_data":
             current_estimate_text = "缺持仓"
@@ -831,9 +844,9 @@ def build_detail_context(
             actual_return_date, now
         ),
         "confidence_level": result.confidence_level or "D",
-        "error_band_label": result.error_band_label or "样本不足",
+        "error_band_label": detail_error_band_label(result),
         "reliability": reliability_from_error(
-            result.error_band_pct, result.error_band_label or "样本不足"
+            result.error_band_pct, detail_error_band_label(result)
         ),
         "confidence_text": result.confidence_text,
         "quote_time": result.quote_time.strftime("%H:%M:%S")

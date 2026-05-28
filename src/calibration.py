@@ -616,6 +616,34 @@ def run_online_calibration(
             CalibrationResidual.trade_date == calibration_date,
         )
     )
+
+    # 目标ETF行情缺失时, 不写 0 估值残差, 避免把缺行情误判成持仓漂移。
+    if features.quote_coverage <= 0 and abs(features.base_estimate) < 1e-12:
+        if existing_residual is not None:
+            session.delete(existing_residual)
+            session.commit()
+        logger.warning(
+            "skip calibration residual for %s %s: no quote coverage",
+            fund_code,
+            calibration_date,
+        )
+        return CalibrationResult(
+            fund_code=fund_code,
+            holding_version_id=holding_version.id,
+            calibration_date=calibration_date,
+            scale_factor_before=scale_before,
+            scale_factor_after=new_scale,
+            raw_estimate=raw_estimate,
+            effective_estimate=effective_estimate,
+            actual_return=actual_return_val,
+            residual=residual,
+            observed_scale=observed_scale,
+            is_updated=False,
+            skip_reason=skip_reason,
+            sample_count=state.sample_count,
+            confidence_level=state.confidence_level or "D",
+        )
+
     if existing_residual is None:
         residual_row = CalibrationResidual(
             fund_code=fund_code,
