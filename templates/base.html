@@ -17,6 +17,7 @@
       <nav class="topnav">
         <a href="/" {% if request.url.path == '/' %}class="active"{% endif %}>首页</a>
         <a href="/portfolio" {% if request.url.path == '/portfolio' %}class="active"{% endif %}>我的持仓</a>
+        <a href="/exposure" {% if request.url.path == '/exposure' %}class="active"{% endif %}>穿透</a>
         <a href="/manage" {% if request.url.path == '/manage' %}class="active"{% endif %}>管理</a>
       </nav>
     </header>

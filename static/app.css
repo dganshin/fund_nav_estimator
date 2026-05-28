@@ -336,6 +336,23 @@ button:active, .btn:active { transform: scale(.97); }
   margin: 4px 0 0;
 }
 
+.panel-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.panel-title-row .panel-title { margin: 0; }
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-top: 14px;
+}
+
 /* ── 详情页顶部 ── */
 .detail-top {
   background: #fff;

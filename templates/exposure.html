@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}场内穿透{% endblock %}
+
+{% block content %}
+<div class="status-bar">
+  <span>场内穿透</span>
+  <span class="sep">·</span>
+  <span>{{ status_message }}</span>
+  {% if used_fallback %}
+  <span class="sep">·</span>
+  <span>部分行情使用缓存</span>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <div class="panel-title">穿透汇总</div>
+  <p class="panel-note">按“基金持有金额 × 校准后修正权重”映射成等效股票/ETF持仓。等效金额用当前持仓金额, 今日贡献按今日参与盈亏金额计算。</p>
+  <div class="metric-grid">
+    <div>
+      <div class="metric-label">穿透资产数</div>
+      <div class="metric-value">{{ asset_count }}</div>
+    </div>
+    <div>
+      <div class="metric-label">等效场内金额</div>
+      <div class="metric-value">¥{{ total_amount_text }}</div>
+    </div>
+    <div>
+      <div class="metric-label">今日贡献</div>
+      <div class="metric-value">{{ total_profit_text }}</div>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-title-row">
+    <div class="panel-title">等效持仓明细</div>
+    <form method="get" action="/exposure">
+      <select name="sort" onchange="this.form.submit()" style="width:180px">
+        <option value="amount_desc" {% if sort == 'amount_desc' %}selected{% endif %}>按等效金额</option>
+        <option value="profit_desc" {% if sort == 'profit_desc' %}selected{% endif %}>按今日贡献高到低</option>
+        <option value="profit_asc" {% if sort == 'profit_asc' %}selected{% endif %}>按今日贡献低到高</option>
+        <option value="return_desc" {% if sort == 'return_desc' %}selected{% endif %}>按涨跌幅高到低</option>
+        <option value="return_asc" {% if sort == 'return_asc' %}selected{% endif %}>按涨跌幅低到高</option>
+      </select>
+    </form>
+  </div>
+  <div class="table-wrap">
+    <table class="plain-table">
+      <thead>
+        <tr>
+          <th>股票/ETF</th>
+          <th class="align-right">等效金额</th>
+          <th class="align-right">组合占比</th>
+          <th class="align-right">涨跌幅</th>
+          <th class="align-right">今日贡献</th>
+          <th>来源基金</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>
+            <div style="font-weight:800">{{ row.asset_name }}</div>
+            <div class="muted"><code>{{ row.asset_code }}</code> · {{ row.asset_type }}</div>
+          </td>
+          <td class="align-right">¥{{ row.equivalent_amount_text }}</td>
+          <td class="align-right">{{ row.portfolio_weight_text }}</td>
+          <td class="align-right {{ row.return_tone }}">{{ row.return_text }}</td>
+          <td class="align-right {{ row.today_profit_tone }}">{{ row.today_profit_text }}</td>
+          <td class="muted">{{ row.fund_summary }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">暂无可穿透持仓。请先录入持仓并确保基金已拉取公开持仓。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

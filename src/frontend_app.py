@@ -196,6 +196,10 @@ def format_money(v: float | None) -> str:
     return "--" if v is None else f"{v:,.2f}"
 
 
+def format_signed_money(v: float | None) -> str:
+    return "--" if v is None else f"{v:+,.2f}"
+
+
 def clear_live_bundle_cache() -> None:
     LIVE_BUNDLE_CACHE.clear()
 
@@ -775,6 +779,94 @@ def split_home_rows(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict
     return holding_rows, watchlist_rows, other_rows
 
 
+def build_exposure_rows(results, position_context: dict[str, dict], sort: str) -> dict:
+    asset_map: dict[str, dict] = {}
+    total_amount = 0.0
+    total_profit = 0.0
+
+    for result in results:
+        ctx = position_context.get(result.fund_code, {})
+        if not ctx.get("is_holding"):
+            continue
+        holding_amount = safe_float(ctx.get("holding_amount"), 0.0)
+        profit_base_amount = safe_float(
+            ctx.get("profit_base_amount_today"), holding_amount
+        )
+        if holding_amount <= 0:
+            continue
+        total_amount += holding_amount
+        for item in result.holdings:
+            weight = safe_float(item.effective_weight_pct, 0.0) / 100.0
+            if weight <= 0:
+                continue
+            amount = holding_amount * weight
+            profit_base = profit_base_amount * weight
+            return_pct = None if item.return_pct is None else item.return_pct / 100.0
+            profit = 0.0 if return_pct is None else profit_base * return_pct
+            row = asset_map.setdefault(
+                item.asset_code,
+                {
+                    "asset_code": item.asset_code,
+                    "asset_name": item.asset_name,
+                    "asset_type": item.asset_type,
+                    "equivalent_amount": 0.0,
+                    "today_profit": 0.0,
+                    "return_pct": return_pct,
+                    "funds": [],
+                },
+            )
+            row["equivalent_amount"] += amount
+            row["today_profit"] += profit
+            if row["return_pct"] is None and return_pct is not None:
+                row["return_pct"] = return_pct
+            row["funds"].append(
+                {
+                    "fund_code": result.fund_code,
+                    "fund_name": result.fund_name,
+                    "weight_text": f"{weight * 100:.2f}%",
+                    "amount_text": format_money(amount),
+                }
+            )
+            total_profit += profit
+
+    rows = list(asset_map.values())
+    for row in rows:
+        amount = safe_float(row["equivalent_amount"], 0.0)
+        row["portfolio_weight"] = amount / total_amount if total_amount > 0 else 0.0
+        row["equivalent_amount_text"] = format_money(amount)
+        row["portfolio_weight_text"] = f"{row['portfolio_weight'] * 100:.2f}%"
+        row["today_profit_text"] = format_signed_money(row["today_profit"])
+        row["today_profit_tone"] = get_tone(row["today_profit"])
+        row["return_text"] = (
+            "--" if row["return_pct"] is None else f"{row['return_pct'] * 100:+.2f}%"
+        )
+        row["return_tone"] = get_tone(row["return_pct"])
+        row["fund_count"] = len(row["funds"])
+        row["fund_summary"] = " / ".join(
+            f"{f['fund_name']} {f['weight_text']}" for f in row["funds"][:3]
+        )
+        if len(row["funds"]) > 3:
+            row["fund_summary"] += f" / +{len(row['funds']) - 3}"
+
+    if sort == "profit_desc":
+        rows.sort(key=lambda r: safe_float(r["today_profit"]), reverse=True)
+    elif sort == "profit_asc":
+        rows.sort(key=lambda r: safe_float(r["today_profit"]))
+    elif sort == "return_desc":
+        rows.sort(key=lambda r: -999 if r["return_pct"] is None else r["return_pct"], reverse=True)
+    elif sort == "return_asc":
+        rows.sort(key=lambda r: 999 if r["return_pct"] is None else r["return_pct"])
+    else:
+        rows.sort(key=lambda r: safe_float(r["equivalent_amount"]), reverse=True)
+
+    return {
+        "rows": rows,
+        "total_amount_text": format_money(total_amount),
+        "total_profit_text": format_signed_money(total_profit),
+        "asset_count": len(rows),
+    }
+
+
 def build_detail_context(
     result,
     is_watchlist: bool = False,
@@ -1093,6 +1185,36 @@ def api_live_estimates(
             "latest_time": latest_time,
             "data_mode": data_mode,
         }
+    )
+
+
+@app.get("/exposure")
+def exposure(request: Request, sort: str = Query("amount_desc")):
+    try:
+        results, status_message, used_fallback = load_live_estimate_bundle()
+    except Exception as exc:
+        logger.error("exposure page error: %s", exc)
+        results, status_message, used_fallback = [], "行情获取失败", True
+
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        position_context = load_position_profit_context(
+            session, [r.fund_code for r in results]
+        )
+
+    exposure_data = build_exposure_rows(results, position_context, sort)
+    return templates.TemplateResponse(
+        request,
+        "exposure.html",
+        {
+            "rows": exposure_data["rows"],
+            "total_amount_text": exposure_data["total_amount_text"],
+            "total_profit_text": exposure_data["total_profit_text"],
+            "asset_count": exposure_data["asset_count"],
+            "sort": sort,
+            "status_message": status_message,
+            "used_fallback": used_fallback,
+        },
     )
 
 
