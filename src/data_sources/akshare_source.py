@@ -487,6 +487,17 @@ class AKShareDataSource:
         start_date: date,
         end_date: date,
     ) -> list[StockQuoteRecord]:
+        if self._looks_like_hk_code(asset_code):
+            try:
+                return self._fetch_hk_stock_records(
+                    asset_code=asset_code,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            except Exception as exc:
+                self.last_warnings.append(
+                    f"Warning: hk stock history failed for {asset_code}: {exc}"
+                )
         if self._looks_like_etf_code(asset_code):
             try:
                 return self._fetch_etf_fund_records(
@@ -526,6 +537,67 @@ class AKShareDataSource:
     def _looks_like_etf_code(self, asset_code: str) -> bool:
         plain = to_plain_symbol(asset_code)
         return len(plain) == 6 and plain.startswith(("1", "5"))
+
+    def _looks_like_hk_code(self, asset_code: str) -> bool:
+        normalized = normalize_asset_code(asset_code)
+        return normalized.endswith(".HK")
+
+    def _fetch_hk_stock_records(
+        self,
+        asset_code: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[StockQuoteRecord]:
+        plain = to_plain_symbol(asset_code).zfill(5)
+        try:
+            quote_df = self.ak.stock_hk_hist(
+                symbol=plain,
+                period="daily",
+                start_date=start_date.strftime("%Y%m%d"),
+                end_date=end_date.strftime("%Y%m%d"),
+                adjust="",
+            )
+        except Exception:
+            quote_df = self.ak.stock_hk_daily(symbol=plain, adjust="")
+            if quote_df is not None and not quote_df.empty:
+                quote_df = quote_df.copy()
+                quote_df["date"] = pd.to_datetime(quote_df["date"]).dt.date
+                quote_df = quote_df.sort_values("date")
+                quote_df["prev_close"] = quote_df["close"].shift(1)
+                quote_df["涨跌幅"] = (quote_df["close"] / quote_df["prev_close"] - 1.0) * 100
+                quote_df = quote_df.rename(columns={"date": "日期"})
+                quote_df = quote_df[
+                    (quote_df["日期"] >= start_date)
+                    & (quote_df["日期"] <= end_date)
+                ]
+        if quote_df is None or quote_df.empty:
+            return []
+        self._cache_dataframe(
+            quote_df,
+            f"stock_hk_quotes_{plain}_{start_date}_{end_date}.csv",
+        )
+        expected_columns = {"日期", "涨跌幅"}
+        if not expected_columns.issubset(set(quote_df.columns)):
+            raise DataSourceError(
+                f"AKShare hk stock quote columns changed for {asset_code}. Actual columns: {list(quote_df.columns)}"
+            )
+        quote_df = quote_df.copy()
+        quote_df["日期"] = pd.to_datetime(quote_df["日期"]).dt.date
+        normalized_code = normalize_asset_code(plain)
+        records: list[StockQuoteRecord] = []
+        for _, row in quote_df.iterrows():
+            if pd.isna(row["涨跌幅"]):
+                continue
+            records.append(
+                StockQuoteRecord(
+                    trade_date=row["日期"],
+                    asset_code=normalized_code,
+                    asset_name=normalized_code,
+                    return_pct=float(row["涨跌幅"]) / 100.0,
+                    source="akshare:hk_hist",
+                )
+            )
+        return records
 
     def _fetch_etf_fund_records(
         self,
