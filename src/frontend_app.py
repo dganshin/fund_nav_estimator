@@ -15,7 +15,7 @@ from fastapi import BackgroundTasks, FastAPI, Form, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -174,7 +174,102 @@ SORT_OPTIONS = {
 }
 CONFIDENCE_RANK = {"A": 4, "B": 3, "C": 2, "D": 1, None: 0}
 LIVE_BUNDLE_CACHE: dict[str, tuple[float, tuple]] = {}
-LIVE_BUNDLE_TTL = 12.0
+LIVE_BUNDLE_TTL = 0.8
+
+# ── Intraday Realtime Time-Series ────────────────────────────────────────────
+# 记录每次 bundle 刷新时的估值快照，按交易时段存储
+# 格式: {fund_code: [{"t": "10:03:15", "pct": 1.23}]}
+INTRADAY_SERIES: dict[str, list[dict]] = {}
+INTRADAY_DATE: date | None = None
+INTRADAY_LOCK = __import__("threading").Lock()
+
+
+@app.on_event("startup")
+def _load_intraday_from_db():
+    global INTRADAY_DATE
+    try:
+        today = datetime.now().date()
+        sf = get_cached_session_factory()
+        with sf() as s:
+            # Delete old data
+            s.execute(text("DELETE FROM intraday_snapshots WHERE trade_date < :td"), {"td": today})
+            s.commit()
+            
+            # Load today's data
+            rows = s.execute(text("SELECT quote_time, fund_code, estimate_pct FROM intraday_snapshots WHERE trade_date = :td"), {"td": today}).fetchall()
+            with INTRADAY_LOCK:
+                INTRADAY_SERIES.clear()
+                INTRADAY_DATE = today
+                for t_str, code, pct in rows:
+                    lst = INTRADAY_SERIES.setdefault(code, [])
+                    lst.append({"t": t_str, "pct": pct})
+                # Sort the list by time just in case
+                for code in INTRADAY_SERIES:
+                    INTRADAY_SERIES[code].sort(key=lambda x: x["t"])
+    except Exception as exc:
+        logger.warning("_load_intraday_from_db failed (non-fatal): %s", exc)
+
+
+def _record_intraday(results: list) -> None:
+    """将当前估值快照追加到盘中时间序列中（每分钟最多一个点）。
+    此函数异常不会影响主流程。"""
+    global INTRADAY_DATE
+    try:
+        now = datetime.now()
+        today = now.date()
+        h, m = now.hour, now.minute
+        in_morning = (h == 9 and m >= 30) or (h == 10) or (h == 11 and m <= 30)
+        in_afternoon = (13 <= h < 15) or (h == 15 and m == 0)
+        if not (in_morning or in_afternoon):
+            return
+        t_str = now.strftime("%H:%M:%S")
+        t_min = t_str[:5]  # "HH:MM"
+        
+        updates_for_db = []
+        with INTRADAY_LOCK:
+            if INTRADAY_DATE != today:
+                INTRADAY_SERIES.clear()
+                INTRADAY_DATE = today
+            for item in results:
+                if not hasattr(item, "current_estimate") or item.current_estimate is None:
+                    continue
+                code = item.fund_code
+                lst = INTRADAY_SERIES.setdefault(code, [])
+                pt = {"t": t_str, "pct": round(item.current_estimate * 100, 3)}
+                
+                is_update = False
+                # 同一分钟内只保留最新点（更新已有记录）
+                if lst and lst[-1]["t"][:5] == t_min:
+                    lst[-1] = pt
+                    is_update = True
+                else:
+                    lst.append(pt)
+                updates_for_db.append((today, t_str, code, pt["pct"], is_update, t_min))
+
+        if updates_for_db:
+            # Write to db asynchronously to avoid blocking the main flow
+            def _write_db():
+                try:
+                    sf = get_cached_session_factory()
+                    with sf() as s:
+                        for td, t, c, pct, is_update, t_min in updates_for_db:
+                            if is_update:
+                                # Update existing record for this minute
+                                s.execute(text("UPDATE intraday_snapshots SET quote_time = :t, estimate_pct = :pct WHERE trade_date = :td AND fund_code = :c AND quote_time LIKE :t_min"), 
+                                          {"t": t, "pct": pct, "td": td, "c": c, "t_min": t_min + "%"})
+                            else:
+                                # Insert new record
+                                s.execute(text("INSERT OR REPLACE INTO intraday_snapshots (trade_date, quote_time, fund_code, estimate_pct) VALUES (:td, :t, :c, :pct)"), 
+                                          {"td": td, "t": t, "c": c, "pct": pct})
+                        s.commit()
+                except Exception as e:
+                    logger.warning("Failed to write intraday to db: %s", e)
+            
+            import threading
+            threading.Thread(target=_write_db, daemon=True).start()
+
+    except Exception as exc:
+        logger.warning("_record_intraday failed (non-fatal): %s", exc)
 
 
 @lru_cache(maxsize=1)
@@ -585,6 +680,7 @@ def load_live_estimate_bundle(
                 quote_time=None,
                 fund_code=fund_code,
             )
+        _record_intraday(results)
         payload = (results, "当前没有可用持仓", False)
         LIVE_BUNDLE_CACHE[cache_key] = (monotonic(), payload)
         return payload
@@ -686,6 +782,7 @@ def load_live_estimate_bundle(
             calibration_min_samples=5,
         )
 
+    _record_intraday(results)
     payload = (results, summarize_status(warnings, used_fallback, has_today_fallback), used_fallback)
     LIVE_BUNDLE_CACHE[cache_key] = (monotonic(), payload)
     return payload
@@ -1244,6 +1341,173 @@ def index(
             "today_label": date.today().isoformat(),
         },
     )
+
+
+@app.get("/api/fund-intraday/{fund_code}")
+def api_fund_intraday(fund_code: str):
+    """返回某只基金今日盘中实时估值走势（每次刷新记录一个快照）。"""
+    with INTRADAY_LOCK:
+        points = list(INTRADAY_SERIES.get(fund_code, []))
+
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        pos = session.scalar(
+            select(UserFundPosition).where(UserFundPosition.fund_code == fund_code)
+        )
+        holding_amount = float(pos.holding_amount) if pos and pos.holding_amount else 0.0
+
+    enriched = [
+        {
+            "t": pt["t"],
+            "pct": pt["pct"],
+            "profit": round(holding_amount * pt["pct"] / 100, 2) if holding_amount else None,
+        }
+        for pt in points
+    ]
+    return JSONResponse({"fund_code": fund_code, "holding_amount": holding_amount, "points": enriched})
+
+
+@app.get("/api/portfolio-intraday")
+def api_portfolio_intraday():
+    """返回持仓组合今日盘中加权估值走势。"""
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        positions = session.scalars(
+            select(UserFundPosition).where(
+                UserFundPosition.is_active.is_(True),
+                UserFundPosition.holding_amount > 0,
+            )
+        ).all()
+        holding_map = {p.fund_code: float(p.holding_amount) for p in positions}
+
+    total_holding = sum(holding_map.values())
+    if not holding_map or total_holding <= 0:
+        return JSONResponse({"points": [], "total_holding": 0})
+
+    with INTRADAY_LOCK:
+        series_snap = {code: list(INTRADAY_SERIES.get(code, [])) for code in holding_map}
+
+    # 合并所有时间戳
+    all_times: set[str] = set()
+    for pts in series_snap.values():
+        for pt in pts:
+            all_times.add(pt["t"])
+
+    # 建立 code → {t: pct} 索引
+    series_idx: dict[str, dict[str, float]] = {
+        code: {pt["t"]: pt["pct"] for pt in pts}
+        for code, pts in series_snap.items()
+    }
+
+    result = []
+    for t in sorted(all_times):
+        total_profit = 0.0
+        covered = 0
+        for code, amount in holding_map.items():
+            pct = series_idx[code].get(t)
+            if pct is not None:
+                total_profit += amount * pct / 100
+                covered += 1
+        if covered > 0:
+            result.append({
+                "t": t,
+                "pct": round(total_profit / total_holding * 100, 3),
+                "profit": round(total_profit, 2),
+            })
+
+    return JSONResponse({"points": result, "total_holding": total_holding})
+
+
+@app.get("/api/fund-chart/{fund_code}")
+def api_fund_chart(fund_code: str, days: int = Query(30)):
+    """返回某只基金最近 N 个交易日的实际涨跌 + 估值历史（用于首页图表）。"""
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        rows = session.scalars(
+            select(CalibrationResidual)
+            .where(CalibrationResidual.fund_code == fund_code)
+            .order_by(CalibrationResidual.trade_date.desc())
+            .limit(days)
+        ).all()
+
+        # 持仓金额用于换算金额模式
+        pos = session.scalar(
+            select(UserFundPosition).where(UserFundPosition.fund_code == fund_code)
+        )
+        holding_amount = float(pos.holding_amount) if pos and pos.holding_amount else 0.0
+
+    rows = list(reversed(rows))  # 升序
+    points = []
+    for r in rows:
+        points.append({
+            "date": r.trade_date.isoformat(),
+            "actual": round(r.actual_return * 100, 3) if r.actual_return is not None else None,
+            "estimate": round(r.calibrated_estimate * 100, 3) if r.calibrated_estimate is not None else None,
+            "actual_amount": round(holding_amount * r.actual_return, 2) if r.actual_return is not None and holding_amount else None,
+            "estimate_amount": round(holding_amount * r.calibrated_estimate, 2) if r.calibrated_estimate is not None and holding_amount else None,
+        })
+    return JSONResponse({"fund_code": fund_code, "holding_amount": holding_amount, "points": points})
+
+
+@app.get("/api/portfolio-chart")
+def api_portfolio_chart(days: int = Query(30)):
+    """返回持仓组合最近 N 个交易日的总日收益（已出实际净值时用实际，否则用估值）。"""
+    session_factory = get_cached_session_factory()
+    with session_factory() as session:
+        # 取所有有持仓的基金
+        positions = session.scalars(
+            select(UserFundPosition).where(
+                UserFundPosition.is_active.is_(True),
+                UserFundPosition.holding_amount > 0,
+            )
+        ).all()
+        holding_map = {p.fund_code: float(p.holding_amount) for p in positions}
+
+        if not holding_map:
+            return JSONResponse({"points": []})
+
+        fund_codes = list(holding_map.keys())
+
+        # 获取所有相关基金的残差记录
+        rows = session.scalars(
+            select(CalibrationResidual)
+            .where(
+                CalibrationResidual.fund_code.in_(fund_codes),
+                CalibrationResidual.actual_return.isnot(None),
+            )
+            .order_by(CalibrationResidual.trade_date.desc())
+            .limit(days * len(fund_codes) * 2)
+        ).all()
+
+    # 按日期聚合总盈亏
+    from collections import defaultdict
+    daily: dict[str, dict] = defaultdict(lambda: {"total_profit": 0.0, "funds": 0})
+    seen: dict[str, set] = defaultdict(set)  # date -> set of fund_codes already counted
+
+    for r in rows:
+        d = r.trade_date.isoformat()
+        if r.fund_code in seen[d]:
+            continue
+        seen[d].add(r.fund_code)
+        amount = holding_map.get(r.fund_code, 0.0)
+        ret = r.actual_return
+        if ret is not None and amount > 0:
+            daily[d]["total_profit"] += amount * ret
+            daily[d]["funds"] += 1
+
+    # 取最近 days 个日期
+    dates = sorted(daily.keys())[-days:]
+    points = [
+        {
+            "date": d,
+            "total_profit": round(daily[d]["total_profit"], 2),
+            "total_profit_pct": round(
+                daily[d]["total_profit"] / sum(holding_map.values()) * 100, 3
+            ) if sum(holding_map.values()) > 0 else 0,
+        }
+        for d in dates
+    ]
+    return JSONResponse({"points": points, "total_holding": sum(holding_map.values())})
 
 
 @app.get("/api/live-estimates")
