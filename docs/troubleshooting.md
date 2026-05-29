@@ -9,7 +9,8 @@
 
 1. [某只基金估值显示 `--` / "不可估"](#1-某只基金估值显示-----不可估)
 2. [历史校准残差全是 `+0.00%`（raw_estimate_too_small）](#2-历史校准残差全是-000raw_estimate_too_small)
-3. [数据库快速诊断命令](#数据库快速诊断命令)
+3. [高频刷新时盘中缩略图 (Sparkline) 消失](#3-高频刷新时盘中缩略图-sparkline-消失)
+4. [数据库快速诊断命令](#数据库快速诊断命令)
 
 ---
 
@@ -168,6 +169,26 @@ with sf() as s:
 ```
 
 > **注意**：这是数据补全问题，不是 bug。过去的校准残差变差是因为历史行情确实不在库里。
+
+---
+
+## 3. 高频刷新时盘中缩略图 (Sparkline) 消失
+
+### 症状
+
+- 页面初始加载时能看到“分时走势”缩略图。
+- 开启 1秒 / 2秒 / 5秒 自动刷新后，第一次刷新时缩略图瞬间消失，并且再也画不出来。
+- 控制台没有报错。
+
+### 根本原因
+
+在前端应用 (`static/app.js`) 中，局部刷新逻辑使用了 `listContainer.innerHTML = html.join('')` 来全量替换列表 DOM 节点。但是，JavaScript 中用于拼接 HTML 的 `renderHoldingRow` 和 `renderWatchRow` 函数里，**漏写了缩略图的 Canvas 容器** (`<div class="fund-spark"><canvas class="spark-canvas"></canvas></div>`)。
+导致的结果是：初始的 Jinja 模板渲染了完整的容器，但被 JS 第一次覆盖时，画布容器本身就被销毁了，后续依靠 `spark-canvas` class 定位的画图函数自然找不到目标，导致图表消失。
+
+### 修复方法 (2026-05-29)
+
+1. 在 `static/app.js` 的 `renderHoldingRow` 和 `renderWatchRow` 返回的 HTML 数组中，补回了缩略图的 DOM 占位符。
+2. 结合了内存无缝双缓冲策略（Cache-first Rendering）：即每次重建 DOM 时，如果 `sparkCache` 有上一秒的数据，先用零延迟同步把图表画上，然后再异步发起 `fetch` 拉取新点。彻底消除了高频刷新下的重绘闪烁。
 
 ---
 
