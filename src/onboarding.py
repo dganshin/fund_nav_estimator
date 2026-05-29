@@ -33,6 +33,18 @@ KNOWN_ETF_FEEDER_TARGETS: dict[str, dict[str, object]] = {
         "target_name": "芯片ETF",
         "weight_pct": 95.0,
     },
+    "021971": {
+        "fund_name": "南方港股通央企红利ETF联接A",
+        "target_code": "520660.SH",
+        "target_name": "港股通央企红利ETF南方",
+        "weight_pct": 94.95,
+    },
+    "021972": {
+        "fund_name": "南方港股通央企红利ETF联接C",
+        "target_code": "520660.SH",
+        "target_name": "港股通央企红利ETF南方",
+        "weight_pct": 94.95,
+    },
     "016707": {
         "fund_name": "华夏有色金属ETF联接A",
         "target_code": "516650.SH",
