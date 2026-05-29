@@ -716,13 +716,15 @@ def run_online_calibration(
             confidence_level=state.confidence_level or "D",
         )
 
-    # 优先使用盘中实时估值快照，与用户看到的数值完全一致
+    # 从盘中快照还原三个分解值 + 最终估值，保证出真实值后历史表里的数和盘中看到的完全一致。
+    # 若快照某值缺失（如服务重启导致快照未写入），则保留上方Walk-Forward重算的兜底值。
     import json as _json
     from .models import FundEstimate as _FE
     _snap_row = session.get(_FE, {"trade_date": calibration_date, "fund_code": fund_code})
     if _snap_row is not None and _snap_row.missing_assets_json and _snap_row.missing_assets_json.startswith("{"):
         try:
             _snap = _json.loads(_snap_row.missing_assets_json)
+            # 每项只在快照有明确值时覆盖，否则保留Walk-Forward重算结果
             if _snap.get("coverage_adjusted") is not None:
                 coverage_estimate = float(_snap["coverage_adjusted"])
             if _snap.get("single_scale") is not None:
@@ -840,7 +842,7 @@ def load_calibration_residuals(
         .limit(limit)
     ).all()
 
-    return [
+    result_rows = [
         {
             "trade_date": r.trade_date.isoformat(),
             "actual_return": f"{r.actual_return:+.4%}",
@@ -876,6 +878,62 @@ def load_calibration_residuals(
         }
         for r in rows
     ]
+
+    # 若今天尚无校准残差行（真实净值未出），则从盘中快照补一行供盘中校验
+    import json as _json
+    from datetime import date as _date
+    from .models import FundEstimate as _FE
+    today = _date.today()
+    has_today = any(r.trade_date == today for r in rows)
+    if not has_today:
+        snap_row = session.scalar(
+            select(_FE).where(_FE.fund_code == fund_code, _FE.trade_date == today)
+        )
+        if snap_row is not None and snap_row.missing_assets_json and snap_row.missing_assets_json.startswith("{"):
+            try:
+                snap = _json.loads(snap_row.missing_assets_json)
+                cov = snap.get("coverage_adjusted")
+                sng = snap.get("single_scale")
+                two = snap.get("two_factor")
+                final = snap.get("current_estimate") or snap.get("calibrated")
+                if final is not None:
+                    result_rows.append({
+                        "trade_date": today.isoformat(),
+                        "actual_return": "--",          # 今日真实值尚未出
+                        "coverage_estimate": _fmt_pct(cov),
+                        "coverage_residual": "--",
+                        "coverage_abs_residual": "--",
+                        "single_estimate": _fmt_pct(sng),
+                        "single_residual": "--",
+                        "single_abs_residual": "--",
+                        "two_factor_estimate": _fmt_pct(two),
+                        "two_factor_residual": "--",
+                        "two_factor_abs_residual": "--",
+                        "known_estimate": "--",
+                        "unknown_estimate": "--",
+                        "base_estimate": "--",
+                        "raw_estimate": "--",
+                        "calibrated_estimate": _fmt_pct(final),
+                        "effective_estimate": _fmt_pct(final),
+                        "residual": "--",
+                        "abs_residual": "--",
+                        "scale_used": "--",
+                        "beta_known": "--",
+                        "beta_unknown": "--",
+                        "alpha": "--",
+                        "sample_count": "--",
+                        "params_fitted_until": "--",
+                        "model_version": "intraday",    # 前端据此标记为"实时估算"
+                        "is_out_of_sample": "--",
+                        "observed_scale": "--",
+                        "updated_scale": "--",
+                        "is_used": "--",
+                        "skip_reason": "",
+                    })
+            except Exception:
+                pass
+
+    return result_rows
 
 
 def get_calibration_stats(

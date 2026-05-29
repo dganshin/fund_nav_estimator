@@ -91,6 +91,33 @@
   </div>
 </section>
 
+<!-- ── 走势图（盘中实时 / 近30日切换）── -->
+<section class="panel" style="margin-top:12px; padding:16px 18px;" id="detail-chart-section">
+  <div class="chart-controls" style="margin-bottom:12px;">
+    <div class="chart-tab-btns">
+      <button class="chart-tab-btn active" data-tab="intraday">📈 盘中实时</button>
+      <button class="chart-tab-btn" data-tab="history">📅 近30日</button>
+    </div>
+    <div style="display:flex; align-items:center; gap:6px;">
+      <div class="chart-mode-btns" id="detail-mode-btns">
+        <button class="chart-mode-btn active" data-mode="pct">百分比</button>
+        {% if detail.has_position %}<button class="chart-mode-btn" data-mode="amount">金额</button>{% endif %}
+      </div>
+      <button class="btn-sm btn-secondary" id="btn-detail-refresh" title="刷新盘中数据" style="padding:0 10px; font-size:11px; height:26px;">↻</button>
+    </div>
+  </div>
+  <div class="chart-canvas-wrap" id="detail-intraday-wrap">
+    <canvas id="detail-intraday-canvas" height="200"></canvas>
+  </div>
+  <div class="chart-canvas-wrap" id="detail-history-wrap" style="display:none;">
+    <canvas id="detail-history-canvas" height="200"></canvas>
+  </div>
+  <div id="detail-chart-note" style="font-size:11px; color:#94a3b8; margin-top:6px; text-align:right;">
+    盘中数据每次行情刷新时自动记录 · <span id="detail-intraday-count">--</span> 个时间点
+  </div>
+</section>
+
+
 <div class="list-head holding-head">
   <div>股票</div>
   <div class="align-right">公开权重</div>
@@ -98,6 +125,7 @@
   <div class="align-right">涨跌幅</div>
   <div class="align-right">贡献</div>
 </div>
+
 
 <div class="holding-list">
   {% for row in detail.holdings %}
@@ -273,11 +301,13 @@
   function renderHealth(rows) {
     var loadingEl = document.getElementById('estimate-health-loading');
     var contentEl = document.getElementById('estimate-health-content');
-    if (rows.length === 0) {
+    // 排除盘中实时行（今日真实值未出），只统计已确认的历史残差
+    var confirmedRows = rows.filter(function(r) { return r.model_version !== 'intraday'; });
+    if (confirmedRows.length === 0) {
       loadingEl.textContent = '暂无校准记录。';
       return;
     }
-    var recent = rows.slice(-20);
+    var recent = confirmedRows.slice(-20);
     var errors = recent.map(function(r) { return absPct(r.residual); }).filter(function(v) { return v !== null; });
     if (!errors.length) {
       loadingEl.textContent = '暂无有效误差样本。';
@@ -286,8 +316,8 @@
     var mae20 = errors.reduce(function(a, b) { return a + b; }, 0) / errors.length;
     var p80 = percentile(errors, 0.8);
     var maxErr = Math.max.apply(null, errors);
-    var latest = absPct(rows[rows.length - 1].residual);
-    var latestRow = rows[rows.length - 1];
+    var latest = absPct(confirmedRows[confirmedRows.length - 1].residual);
+    var latestRow = confirmedRows[confirmedRows.length - 1];
     var candidateErrors = [
       absPct(latestRow.coverage_residual),
       absPct(latestRow.single_residual),
@@ -335,20 +365,31 @@
     tbody.innerHTML = '';
     rows.slice().reverse().forEach(function(r) {
       var tr = document.createElement('tr');
+      var isIntraday = r.model_version === 'intraday';
+      // 盘中实时行用特殊背景和标记，方便用户截图留存后与出结果时对比
+      if (isIntraday) {
+        tr.style.cssText = 'background:rgba(251,191,36,0.08);border-left:3px solid #f59e0b;';
+      }
       var actual = pctNumber(r.actual_return, true);
       function pair(estimate, residual) {
         var e = pctNumber(estimate, true);
         var re = pctNumber(residual, true);
         return '<span' + toneClass(e) + '>' + e + '</span><span style="color:#94a3b8;"> / </span><span' + toneClass(re) + '>' + re + '</span>';
       }
+      var dateCell = isIntraday
+        ? '<td><strong>' + r.trade_date + '</strong> <span style="font-size:10px;color:#f59e0b;background:rgba(251,191,36,0.2);padding:1px 5px;border-radius:3px;">今日实时</span></td>'
+        : '<td>' + r.trade_date + '</td>';
+      var actualCell = isIntraday
+        ? '<td style="color:#94a3b8;">待出</td>'
+        : '<td' + toneClass(actual) + '>' + actual + '</td>';
       tr.innerHTML = [
-        '<td>' + r.trade_date + '</td>',
-        '<td' + toneClass(actual) + '>' + actual + '</td>',
+        dateCell,
+        actualCell,
         '<td>' + pair(r.coverage_estimate, r.coverage_residual) + '</td>',
         '<td>' + pair(r.single_estimate, r.single_residual) + '</td>',
         '<td>' + pair(r.two_factor_estimate, r.two_factor_residual) + '</td>',
         '<td>' + pair(r.calibrated_estimate, r.residual) + '</td>',
-        '<td>' + (r.model_version || '--') + '</td>'
+        '<td>' + (isIntraday ? '<span style="color:#f59e0b;">实时估算</span>' : (r.model_version || '--')) + '</td>'
       ].join('');
       tbody.appendChild(tr);
     });
@@ -478,6 +519,94 @@ window.handlePosition = function(action) {
     }
   });
 };
+</script>
+
+<script type="module">
+import { drawIntradayChart, drawFundChart } from '/static/charts.js';
+
+const FUND_CODE    = {{ detail.fund_code | tojson }};
+let activeTab      = 'intraday';    // 'intraday' | 'history'
+let chartMode      = 'pct';
+let intradayData   = null;          // {points, holdingAmount}
+let historyData    = null;          // {points}
+
+// ── 盘中数据 ─────────────────────────────────────────────────
+async function loadIntraday() {
+  const r = await fetch('/api/fund-intraday/' + FUND_CODE);
+  const d = await r.json();
+  intradayData = { points: d.points || [], holdingAmount: d.holding_amount || 0 };
+  document.getElementById('detail-intraday-count').textContent = intradayData.points.length;
+}
+
+function renderIntraday() {
+  const canvas = document.getElementById('detail-intraday-canvas');
+  if (!canvas) return;
+  const draw = () => drawIntradayChart(canvas, intradayData?.points || [], chartMode, intradayData?.holdingAmount || 0);
+  draw();
+  if (!canvas._ro) { canvas._ro = new ResizeObserver(draw); canvas._ro.observe(canvas); }
+}
+
+// ── 历史数据 ─────────────────────────────────────────────────
+async function loadHistory() {
+  const r = await fetch('/api/fund-chart/' + FUND_CODE + '?days=30');
+  const d = await r.json();
+  historyData = { points: d.points || [] };
+}
+
+function renderHistory() {
+  const canvas = document.getElementById('detail-history-canvas');
+  if (!canvas) return;
+  const draw = () => drawFundChart(canvas, historyData?.points || [], chartMode);
+  draw();
+  if (!canvas._ro) { canvas._ro = new ResizeObserver(draw); canvas._ro.observe(canvas); }
+}
+
+// ── Tab 切换 ─────────────────────────────────────────────────
+function switchTab(tab) {
+  activeTab = tab;
+  const intradayWrap = document.getElementById('detail-intraday-wrap');
+  const historyWrap  = document.getElementById('detail-history-wrap');
+  const note         = document.getElementById('detail-chart-note');
+  const refreshBtn   = document.getElementById('btn-detail-refresh');
+
+  intradayWrap.style.display = tab === 'intraday' ? 'block' : 'none';
+  historyWrap.style.display  = tab === 'history'  ? 'block' : 'none';
+  note.style.display         = tab === 'intraday' ? 'block' : 'none';
+  refreshBtn.style.display   = tab === 'intraday' ? '' : 'none';
+
+  if (tab === 'intraday') renderIntraday();
+  else if (tab === 'history' && !historyData) {
+    loadHistory().then(renderHistory);
+  } else if (tab === 'history') {
+    renderHistory();
+  }
+
+  document.querySelectorAll('.chart-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+}
+
+document.querySelectorAll('.chart-tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+});
+
+// ── 模式切换（百分比/金额）───────────────────────────────────
+document.getElementById('detail-mode-btns')?.addEventListener('click', e => {
+  const btn = e.target.closest('.chart-mode-btn');
+  if (!btn) return;
+  document.querySelectorAll('#detail-mode-btns .chart-mode-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  chartMode = btn.dataset.mode;
+  if (activeTab === 'intraday') renderIntraday();
+  else renderHistory();
+});
+
+// ── 手动刷新盘中数据 ─────────────────────────────────────────
+document.getElementById('btn-detail-refresh')?.addEventListener('click', async () => {
+  await loadIntraday();
+  renderIntraday();
+});
+
+// ── 初始化 ───────────────────────────────────────────────────
+loadIntraday().then(renderIntraday);
 </script>
 
 {% else %}
