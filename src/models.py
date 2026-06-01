@@ -473,6 +473,21 @@ class TaskRun(Base):
     fund: Mapped["Fund"] = relationship()
 
 
+class IntradaySnapshot(Base):
+    __tablename__ = "intraday_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    quote_time: Mapped[str] = mapped_column(String(8), nullable=False)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False, index=True)
+    estimate_pct: Mapped[float] = mapped_column(Float, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("trade_date", "quote_time", "fund_code", name="uq_intraday_snapshot"),
+    )
+
+    fund: Mapped["Fund"] = relationship()
+
 class UserFundPositionEvent(Base):
     __tablename__ = "user_fund_position_events"
 

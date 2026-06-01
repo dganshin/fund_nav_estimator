@@ -302,6 +302,7 @@
       '<div class="fund-amount">¥' + esc(row.holding_amount_text || '--') + '</div>',
       '<div class="fund-profit ' + esc(row.profit_tone || 'muted') + '">' + esc(row.estimated_today_profit_text || '--') + '</div>',
       '<div class="fund-error reliability-' + esc(row.reliability_tone || 'muted') + '">' + esc(row.reliability_label || row.error_band_short || '样本不足') + '</div>',
+      '<div class="fund-spark"><canvas class="spark-canvas" data-fund="' + esc(row.fund_code) + '" title="' + esc(row.fund_name || row.fund_code) + ' · 点击查看详情大图"></canvas></div>',
       '</a>',
     ].join('');
   }
@@ -316,6 +317,7 @@
       '<div class="fund-value ' + esc(row.estimate_tone || 'muted') + '">' + esc(row.current_estimate_text || '--') + '</div>',
       '<div class="fund-compare ' + esc(row.actual_return_tone || 'muted') + '">' + (row.actual_return_available ? esc(row.actual_return_today_text) : '--') + '</div>',
       '<div class="fund-error reliability-' + esc(row.reliability_tone || 'muted') + '">' + esc(row.reliability_label || row.error_band_short || '样本不足') + '</div>',
+      '<div class="fund-spark"><canvas class="spark-canvas" data-fund="' + esc(row.fund_code) + '" title="' + esc(row.fund_name || row.fund_code) + ' · 点击查看详情大图"></canvas></div>',
       '</a>',
     ].join('');
   }
@@ -341,14 +343,14 @@
 
     html.push('<section class="fund-section" data-section="holding">');
     html.push('<div style="display:flex; justify-content:space-between; align-items:flex-end; margin:10px 4px 6px;"><div style="font-size:15px; font-weight:800; color:#0f172a;">我的持仓</div></div>');
-    html.push('<div class="fund-list-header fund-header-holding"><div class="header-main">基金名称</div><div class="header-col">实时估值</div><div class="header-col">实际收盘</div><div class="header-col">持有金额</div><div class="header-col">今日盈亏</div><div class="header-col">可靠性</div></div>');
+    html.push('<div class="fund-list-header fund-header-holding"><div class="header-main">基金名称</div><div class="header-col">实时估值</div><div class="header-col">实际收盘</div><div class="header-col">持有金额</div><div class="header-col">今日盈亏</div><div class="header-col">可靠性</div><div class="header-col">分时走势</div></div>');
     html.push('<div id="holding-list">');
     html.push(holdingRows.length ? holdingRows.map(renderHoldingRow).join('') : '<div class="empty-panel">暂无持有基金。搜索基金代码后可以按金额买入。</div>');
     html.push('</div></section>');
 
     html.push('<section class="fund-section" data-section="watchlist" style="margin-top:14px;">');
     html.push('<div style="display:flex; justify-content:space-between; align-items:flex-end; margin:10px 4px 6px;"><div style="font-size:15px; font-weight:800; color:#0f172a;">自选观察</div></div>');
-    html.push('<div class="fund-list-header fund-header-watch"><div class="header-main">基金名称</div><div class="header-col">实时估值</div><div class="header-col">实际收盘</div><div class="header-col">可靠性</div></div>');
+    html.push('<div class="fund-list-header fund-header-watch"><div class="header-main">基金名称</div><div class="header-col">实时估值</div><div class="header-col">实际收盘</div><div class="header-col">可靠性</div><div class="header-col">分时走势</div></div>');
     html.push('<div id="watchlist-list">');
     html.push(watchlistRows.length ? watchlistRows.map(renderWatchRow).join('') : '<div class="empty-panel">暂无仅自选基金。持有基金会自动加入自选，但只显示在“我的持仓”。</div>');
     html.push('</div></section>');
@@ -373,6 +375,7 @@
       .then(function (r) { return r.json(); })
       .then(function (data) {
         renderFundList(data);
+        if (typeof window._onLiveRefresh === 'function') window._onLiveRefresh();
         if (statusMsg) statusMsg.textContent = data.status_message || '';
         if (latestTime) latestTime.textContent = data.latest_time || '--';
         scheduleNext();

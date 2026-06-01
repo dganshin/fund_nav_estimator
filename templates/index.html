@@ -2,7 +2,7 @@
 {% block title %}基金实时估值榜{% endblock %}
 
 {% macro holding_row(row) %}
-<a class="fund-row fund-row-holding" href="/fund/{{ row.fund_code }}">
+<a class="fund-row fund-row-holding" href="/fund/{{ row.fund_code }}" id="row-{{ row.fund_code }}">
   <div class="fund-main">
     <div class="fund-name">{{ row.fund_name }}</div>
     <div class="fund-sub">
@@ -17,11 +17,15 @@
   <div class="fund-amount">¥{{ row.holding_amount_text }}</div>
   <div class="fund-profit {{ row.profit_tone }}">{{ row.estimated_today_profit_text }}</div>
   <div class="fund-error reliability-{{ row.reliability_tone }}">{{ row.reliability_label }}</div>
+  <div class="fund-spark">
+    <canvas class="spark-canvas" data-fund="{{ row.fund_code }}"
+            title="{{ row.fund_name }} · 点击查看详情大图"></canvas>
+  </div>
 </a>
 {% endmacro %}
 
 {% macro watch_row(row) %}
-<a class="fund-row fund-row-watch" href="/fund/{{ row.fund_code }}">
+<a class="fund-row fund-row-watch" href="/fund/{{ row.fund_code }}" id="row-{{ row.fund_code }}">
   <div class="fund-main">
     <div class="fund-name">{{ row.fund_name }}</div>
     <div class="fund-sub">{{ row.fund_code }} · 自选 · {{ row.quote_time }}</div>
@@ -31,6 +35,10 @@
     {% if row.actual_return_available %}{{ row.actual_return_today_text }}{% else %}--{% endif %}
   </div>
   <div class="fund-error reliability-{{ row.reliability_tone }}">{{ row.reliability_label }}</div>
+  <div class="fund-spark">
+    <canvas class="spark-canvas" data-fund="{{ row.fund_code }}"
+            title="{{ row.fund_name }} · 点击查看详情大图"></canvas>
+  </div>
 </a>
 {% endmacro %}
 
@@ -51,13 +59,9 @@
   {% for t in active_tasks %}
   <div style="font-size:13px; color:#1e3a8a; display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
     <span style="font-weight:500;">
-      {% if t.task_type == "sync_daily" %}
-        全局数据维护
-      {% elif t.task_type == "onboard_fund" %}
-        基金 {{ t.fund_code }} 自动建档
-      {% else %}
-        {{ t.task_type }}
-      {% endif %}
+      {% if t.task_type == "sync_daily" %}全局数据维护
+      {% elif t.task_type == "onboard_fund" %}基金 {{ t.fund_code }} 自动建档
+      {% else %}{{ t.task_type }}{% endif %}
       ({{ t.status }})
     </span>
     <span>{{ t.progress_text }}</span>
@@ -66,12 +70,28 @@
 </div>
 {% endif %}
 
-<div class="panel" id="home-profit-summary" style="margin-bottom:12px; display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 16px;">
-  <div>
-    <div style="font-size:13px; color:#64748b; font-weight:600;">持有基金当日总盈亏</div>
-    <div style="font-size:12px; color:#94a3b8; margin-top:2px;">有当日实际净值涨跌时用实际，否则用实时估值；今日新增金额下个交易日计入盈亏。</div>
+<!-- ── 持仓总盈亏 ── -->
+<div class="panel" id="home-profit-summary" style="margin-bottom:12px; padding:14px 16px;">
+  <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
+    <div>
+      <div style="font-size:13px; color:#64748b; font-weight:600;">持有基金当日总盈亏</div>
+      <div style="font-size:12px; color:#94a3b8; margin-top:2px;">有当日实际净值时用实际，否则用实时估值；今日新增金额下个交易日计入盈亏。</div>
+    </div>
+    <div style="display:flex; align-items:center; gap:10px;">
+      <div id="total-today-profit" class="{{ total_today_profit_tone }}" style="font-size:26px; font-weight:900;">{{ total_today_profit_text }}</div>
+      <button class="btn-sm btn-secondary" onclick="togglePortfolioChart(this)" id="btn-portfolio-chart" title="组合盘中走势">📊</button>
+    </div>
   </div>
-  <div id="total-today-profit" class="{{ total_today_profit_tone }}" style="font-size:26px; font-weight:900;">{{ total_today_profit_text }}</div>
+  <div id="portfolio-chart-panel" style="display:none; margin-top:12px;">
+    <div class="chart-controls">
+      <span class="chart-label">持仓组合盘中走势</span>
+      <div class="chart-mode-btns" data-chart="portfolio">
+        <button class="chart-mode-btn active" data-mode="pct">百分比</button>
+        <button class="chart-mode-btn" data-mode="amount">金额</button>
+      </div>
+    </div>
+    <div class="chart-canvas-wrap"><canvas id="portfolio-canvas" height="160"></canvas></div>
+  </div>
 </div>
 
 <div class="toolbar" style="display:flex; gap:8px; align-items:center; flex-wrap:nowrap;">
@@ -85,8 +105,10 @@
   <select id="refresh-select">
     <option value="0" {% if refresh == 'off' or not refresh %}selected{% endif %}>不刷新</option>
     <option value="1" {% if refresh == '1' %}selected{% endif %}>1秒</option>
+    <option value="2" {% if refresh == '2' %}selected{% endif %}>2秒</option>
     <option value="5" {% if refresh == '5' %}selected{% endif %}>5秒</option>
     <option value="10" {% if refresh == '10' %}selected{% endif %}>10秒</option>
+    <option value="30" {% if refresh == '30' %}selected{% endif %}>30秒</option>
   </select>
   <form method="get" action="/" style="display:contents">
     <input type="hidden" name="force" value="1">
@@ -122,6 +144,7 @@
       <div class="header-col">持有金额</div>
       <div class="header-col">今日盈亏</div>
       <div class="header-col">可靠性</div>
+      <div class="header-col">分时走势</div>
     </div>
     <div id="holding-list">
       {% for row in holding_rows %}
@@ -141,12 +164,13 @@
       <div class="header-col">实时估值</div>
       <div class="header-col">实际收盘</div>
       <div class="header-col">可靠性</div>
+      <div class="header-col">分时走势</div>
     </div>
     <div id="watchlist-list">
       {% for row in watchlist_rows %}
         {{ watch_row(row) }}
       {% else %}
-        <div class="empty-panel">暂无仅自选基金。持有基金会自动加入自选，但只显示在“我的持仓”。</div>
+        <div class="empty-panel">暂无仅自选基金。持有基金会自动加入自选，但只显示在"我的持仓"。</div>
       {% endfor %}
     </div>
   </section>
@@ -162,4 +186,107 @@
   </section>
   {% endif %}
 </div>
+
+<script type="module">
+import { drawIntradaySparkline, drawPortfolioChart } from '/static/charts.js';
+
+// ── 全局缓存：每只基金的盘中数据 ──────────────────────────────
+let sparkCache = {};       // fund_code → points[]
+let sparkCanvases = {};    // fund_code → canvas 元素
+
+// ── 批量获取并渲染所有 sparkline ─────────────────────────────
+async function refreshAllSparklines() {
+  // 重新收集由于局部刷新而新建的 DOM 元素
+  sparkCanvases = {};
+  document.querySelectorAll('.spark-canvas').forEach(c => {
+    const code = c.dataset.fund;
+    if (code) sparkCanvases[code] = c;
+  });
+
+  const codes = Object.keys(sparkCanvases);
+  if (!codes.length) return;
+
+  // 1. 立即用缓存数据进行绘制，消除重绘导致的闪烁空白期
+  for (const code of codes) {
+    if (sparkCache[code] && sparkCanvases[code]) {
+      drawIntradaySparkline(sparkCanvases[code], sparkCache[code]);
+    }
+  }
+
+  // 2. 并发获取最新盘中数据，获取完毕后覆盖绘制
+  await Promise.allSettled(codes.map(async code => {
+    try {
+      const r = await fetch('/api/fund-intraday/' + code);
+      const d = await r.json();
+      sparkCache[code] = d.points || [];
+    } catch(e) {
+      sparkCache[code] = sparkCache[code] || [];
+    }
+    const canvas = sparkCanvases[code];
+    if (canvas) drawIntradaySparkline(canvas, sparkCache[code]);
+  }));
+}
+
+// ── 首次加载 ──────────────────────────────────────────────────
+refreshAllSparklines();
+
+// ── 监听页面内 ResizeObserver，sparkline 随宽度变化重绘 ──────
+const ro = new ResizeObserver(() => {
+  for (const [code, canvas] of Object.entries(sparkCanvases)) {
+    if (sparkCache[code]) drawIntradaySparkline(canvas, sparkCache[code]);
+  }
+});
+const container = document.getElementById('fund-list-container');
+if (container) ro.observe(container);
+
+// ── 组合走势图 ────────────────────────────────────────────────
+let portfolioData = null;
+let portfolioMode = 'pct';
+
+window.togglePortfolioChart = async function(btn) {
+  const panel = document.getElementById('portfolio-chart-panel');
+  const hidden = panel.style.display === 'none';
+  panel.style.display = hidden ? 'block' : 'none';
+  btn.classList.toggle('active', hidden);
+  if (!hidden) return;
+  await refreshPortfolioChart();
+};
+
+async function refreshPortfolioChart() {
+  try {
+    const r = await fetch('/api/portfolio-intraday');
+    const d = await r.json();
+    portfolioData = { points: d.points, totalHolding: d.total_holding };
+  } catch(e) { return; }
+  const canvas = document.getElementById('portfolio-canvas');
+  if (canvas) {
+    const draw = () => drawPortfolioChart(canvas, portfolioData.points, portfolioMode, portfolioData.totalHolding);
+    draw();
+    if (!canvas._ro) { canvas._ro = new ResizeObserver(draw); canvas._ro.observe(canvas); }
+  }
+}
+
+document.addEventListener('click', e => {
+  const btn = e.target.closest('.chart-mode-btn');
+  if (!btn) return;
+  const wrap = btn.closest('.chart-mode-btns');
+  if (!wrap || wrap.dataset.chart !== 'portfolio') return;
+  wrap.querySelectorAll('.chart-mode-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  portfolioMode = btn.dataset.mode;
+  if (portfolioData) {
+    const canvas = document.getElementById('portfolio-canvas');
+    if (canvas) drawPortfolioChart(canvas, portfolioData.points, portfolioMode, portfolioData.totalHolding);
+  }
+});
+
+// ── 将刷新逻辑挂载到 app.js 的 refreshInterval 上 ────────────
+// 当 app.js 触发行情刷新后，立即更新 sparklines
+window._onLiveRefresh = async () => {
+  await refreshAllSparklines();
+  if (portfolioData && document.getElementById('portfolio-chart-panel').style.display !== 'none') {
+    await refreshPortfolioChart();
+  }
+};
+</script>
 {% endblock %}
