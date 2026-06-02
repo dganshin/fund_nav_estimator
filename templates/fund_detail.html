@@ -43,7 +43,7 @@
       {% endif %}
     </div>
     <div>
-      <div class="metric-label">今日实际收盘</div>
+      <div class="metric-label">{% if detail.is_qdii %}QDII收益口径{% else %}今日实际收盘{% endif %}</div>
       <div class="metric-value {{ detail.actual_return_today_tone }}">
         {% if detail.actual_return_available %}{{ detail.actual_return_today_text }}{% else %}--{% endif %}
       </div>
@@ -168,6 +168,7 @@
 <section class="advanced-box" style="margin-top:12px">
   <div style="font-size:16px; font-weight:800; color:#0f172a; margin-bottom:8px;">增强持仓池</div>
   <div style="font-size:13px; color:#64748b; margin-bottom:10px;">{{ detail.enhanced.status_text }}</div>
+  <div style="font-size:12px; color:#94a3b8; margin-bottom:10px;">扩展持仓来自历史年报/半年报完整持仓, 是候选补充, 不代表确认当前真实持仓。</div>
   <div class="advanced-grid">
     <div><div class="advanced-label">核心持仓数量</div><div class="advanced-value">{{ detail.enhanced.core_count }}</div></div>
     <div><div class="advanced-label">扩展持仓数量</div><div class="advanced-value">{{ detail.enhanced.extended_count }}</div></div>

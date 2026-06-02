@@ -1072,34 +1072,6 @@ def compute_live_fund_estimate(
         enhanced_core_count = sum(1 for item in enhanced_version.items if item.is_core)
         enhanced_extended_count = sum(1 for item in enhanced_version.items if item.is_extended)
         enhanced_source_summary = enhanced_version.source_summary or ""
-        enhanced_display_holdings: list[LiveHoldingContribution] = []
-        for item in sorted(enhanced_version.items, key=lambda row: row.weight, reverse=True):
-            ret = quote_return_map.get(item.asset_code)
-            contribution_pct = None if ret is None else item.weight * ret * 100.0
-            market, currency = classify_asset_market(item.asset_code)
-            source_label = "核心" if item.is_core else ("扩展" if item.is_extended else "旧报告")
-            enhanced_display_holdings.append(
-                LiveHoldingContribution(
-                    asset_code=item.asset_code,
-                    asset_name=item.asset_name,
-                    asset_type=item.asset_type,
-                    published_weight_pct=round(item.original_weight * 100, 4),
-                    effective_weight_pct=round(item.weight * 100, 4),
-                    adjustment_factor=round(item.confidence_weight, 6),
-                    return_pct=None if ret is None else round(ret * 100, 4),
-                    contribution_pct=None if contribution_pct is None else round(contribution_pct, 4),
-                    contribution_explain=f"增强持仓池:{source_label}",
-                    market=market,
-                    currency=currency,
-                    local_return_pct=None if ret is None else round(ret * 100, 4),
-                    fx_return_pct=0.0,
-                    cny_return_pct=None if ret is None else round(ret * 100, 4),
-                    quote_status="缺行情" if ret is None else "已覆盖",
-                    holding_source=source_label,
-                )
-            )
-        if enhanced_display_holdings:
-            holdings = enhanced_display_holdings
     if enhanced_enabled:
         causal_calibrated_estimate = enhanced_estimate
         calibrated_estimate = enhanced_estimate

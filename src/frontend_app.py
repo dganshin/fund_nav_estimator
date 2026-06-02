@@ -1334,7 +1334,7 @@ def build_detail_context(
             "enhanced_mae": "--" if getattr(result, "enhanced_mae", None) is None else f"{result.enhanced_mae:.2%}",
             "sample_count": getattr(result, "enhanced_sample_count", 0),
             "status_text": (
-                "增强持仓池有效, 已用于估值"
+                "增强持仓池经样本外验证有效, 已用于估值"
                 if getattr(result, "enhanced_enabled", False)
                 else ("扩展持仓待验证或疑似过期, 当前仍使用前十大/原模型估值" if getattr(result, "enhanced_total_weight", None) is not None else "尚未构建增强持仓池")
             ),
