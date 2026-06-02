@@ -82,6 +82,13 @@ class DataSource(Protocol):
     ) -> list[dict[str, object]]:
         ...
 
+    def fetch_fund_holdings_all_reports(
+        self,
+        fund_code: str,
+        years: list[int],
+    ) -> list[dict[str, object]]:
+        ...
+
     def fetch_fund_asset_allocation(
         self,
         fund_code: str,

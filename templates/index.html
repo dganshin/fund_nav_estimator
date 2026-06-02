@@ -42,6 +42,24 @@
 </a>
 {% endmacro %}
 
+{% macro qdii_row(row) %}
+<a class="fund-row fund-row-holding" href="/fund/{{ row.fund_code }}" id="row-{{ row.fund_code }}">
+  <div class="fund-main">
+    <div class="fund-name">{{ row.fund_name }}</div>
+    <div class="fund-sub">
+      {{ row.fund_code }} · 持有 · QDII观察 · {{ row.qdii_status or '--' }}
+      {% if row.has_pending_today_event %} · 今日交易下个交易日计盈亏{% endif %}
+    </div>
+  </div>
+  <div class="fund-value {{ row.estimate_tone }}">{{ row.current_estimate_text }}</div>
+  <div class="fund-compare reliability-{{ row.reliability_tone }}">{{ row.qdii_status or '--' }}</div>
+  <div class="fund-amount">¥{{ row.holding_amount_text }}</div>
+  <div class="fund-profit {{ row.profit_tone }}">{{ row.estimated_today_profit_text }}</div>
+  <div class="fund-error reliability-{{ row.reliability_tone }}">覆盖 {{ row.qdii_quote_coverage_text }}</div>
+  <div class="fund-spark muted">--</div>
+</a>
+{% endmacro %}
+
 {% block content %}
 <div class="status-bar">
   <span>今日 {{ today_label }}</span>
@@ -133,6 +151,11 @@
 </div>
 
 <div id="fund-list-container" class="fund-list">
+  <section class="fund-section" data-section="a-share">
+    <div style="font-size:15px; font-weight:800; color:#0f172a; margin:10px 4px 6px;">A股基金实时估值榜</div>
+    <div style="font-size:12px; color:#64748b; margin:0 4px 8px;">用于 14:50 前辅助决策。</div>
+  </section>
+
   <section class="fund-section" data-section="holding">
     <div style="display:flex; justify-content:space-between; align-items:flex-end; margin:10px 4px 6px;">
       <div style="font-size:15px; font-weight:800; color:#0f172a;">我的持仓</div>
@@ -151,6 +174,31 @@
         {{ holding_row(row) }}
       {% else %}
         <div class="empty-panel">暂无持有基金。搜索基金代码后可以按金额买入。</div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="fund-section" data-section="qdii-holding" style="margin-top:14px;">
+    <div style="display:flex; justify-content:space-between; align-items:flex-end; margin:10px 4px 6px;">
+      <div>
+        <div style="font-size:15px; font-weight:800; color:#0f172a;">我的海外持仓</div>
+        <div style="font-size:12px; color:#64748b; margin-top:2px;">QDII 使用夜盘/昨夜估值口径, 不参与 A股 14:50 决策排序。</div>
+      </div>
+    </div>
+    <div class="fund-list-header fund-header-holding">
+      <div class="header-main">基金名称</div>
+      <div class="header-col">观察估值</div>
+      <div class="header-col">状态</div>
+      <div class="header-col">持有金额</div>
+      <div class="header-col">预计收益</div>
+      <div class="header-col">覆盖率</div>
+      <div class="header-col">分时走势</div>
+    </div>
+    <div id="qdii-list">
+      {% for row in qdii_holding_rows %}
+        {{ qdii_row(row) }}
+      {% else %}
+        <div class="empty-panel">暂无持有的 QDII / 海外基金。</div>
       {% endfor %}
     </div>
   </section>
@@ -174,6 +222,17 @@
       {% endfor %}
     </div>
   </section>
+
+  {% if qdii_watchlist_rows %}
+  <section class="fund-section" data-section="qdii-watchlist" style="margin-top:14px;">
+    <div style="font-size:15px; font-weight:800; color:#0f172a; margin:10px 4px 6px;">海外自选观察</div>
+    <div id="qdii-watchlist-list">
+      {% for row in qdii_watchlist_rows %}
+        {{ watch_row(row) }}
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
 
   {% if other_rows %}
   <section class="fund-section" data-section="other" style="margin-top:14px;">

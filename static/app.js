@@ -322,10 +322,29 @@
     ].join('');
   }
 
+  function renderQdiiRow(row) {
+    return [
+      '<a class="fund-row fund-row-holding" href="/fund/' + esc(row.fund_code) + '">',
+      '<div class="fund-main">',
+      '<div class="fund-name">' + esc(row.fund_name || row.fund_code) + '</div>',
+      '<div class="fund-sub">' + esc(row.fund_code) + ' · 持有 · QDII观察 · ' + esc(row.qdii_status || '--') + '</div>',
+      '</div>',
+      '<div class="fund-value ' + esc(row.estimate_tone || 'muted') + '">' + esc(row.current_estimate_text || '--') + '</div>',
+      '<div class="fund-compare reliability-' + esc(row.reliability_tone || 'muted') + '">' + esc(row.qdii_status || '--') + '</div>',
+      '<div class="fund-amount">¥' + esc(row.holding_amount_text || '--') + '</div>',
+      '<div class="fund-profit ' + esc(row.profit_tone || 'muted') + '">' + esc(row.estimated_today_profit_text || '--') + '</div>',
+      '<div class="fund-error reliability-' + esc(row.reliability_tone || 'muted') + '">覆盖 ' + esc(row.qdii_quote_coverage_text || '--') + '</div>',
+      '<div class="fund-spark muted">--</div>',
+      '</a>',
+    ].join('');
+  }
+
   function renderFundList(data) {
     if (!listContainer) return;
     var holdingRows = data && data.holding_rows ? data.holding_rows : [];
     var watchlistRows = data && data.watchlist_rows ? data.watchlist_rows : [];
+    var qdiiHoldingRows = data && data.qdii_holding_rows ? data.qdii_holding_rows : [];
+    var qdiiWatchlistRows = data && data.qdii_watchlist_rows ? data.qdii_watchlist_rows : [];
     var otherRows = data && data.other_rows ? data.other_rows : [];
 
     var totalEl = document.getElementById('total-today-profit');
@@ -334,12 +353,17 @@
       totalEl.className = data.total_today_profit_tone || 'muted';
     }
 
-    if (holdingRows.length === 0 && watchlistRows.length === 0 && otherRows.length === 0) {
+    if (holdingRows.length === 0 && watchlistRows.length === 0 && qdiiHoldingRows.length === 0 && qdiiWatchlistRows.length === 0 && otherRows.length === 0) {
       listContainer.innerHTML = '<div class="empty-panel">当前没有可展示的基金估值结果。<br>请在搜索框输入基金代码，加入自选或按金额买入。</div>';
       return;
     }
 
     var html = [];
+
+    html.push('<section class="fund-section" data-section="a-share">');
+    html.push('<div style="font-size:15px; font-weight:800; color:#0f172a; margin:10px 4px 6px;">A股基金实时估值榜</div>');
+    html.push('<div style="font-size:12px; color:#64748b; margin:0 4px 8px;">用于 14:50 前辅助决策。</div>');
+    html.push('</section>');
 
     html.push('<section class="fund-section" data-section="holding">');
     html.push('<div style="display:flex; justify-content:space-between; align-items:flex-end; margin:10px 4px 6px;"><div style="font-size:15px; font-weight:800; color:#0f172a;">我的持仓</div></div>');
@@ -348,12 +372,25 @@
     html.push(holdingRows.length ? holdingRows.map(renderHoldingRow).join('') : '<div class="empty-panel">暂无持有基金。搜索基金代码后可以按金额买入。</div>');
     html.push('</div></section>');
 
+    html.push('<section class="fund-section" data-section="qdii-holding" style="margin-top:14px;">');
+    html.push('<div style="display:flex; justify-content:space-between; align-items:flex-end; margin:10px 4px 6px;"><div><div style="font-size:15px; font-weight:800; color:#0f172a;">我的海外持仓</div><div style="font-size:12px; color:#64748b; margin-top:2px;">QDII 使用夜盘/昨夜估值口径, 不参与 A股 14:50 决策排序。</div></div></div>');
+    html.push('<div class="fund-list-header fund-header-holding"><div class="header-main">基金名称</div><div class="header-col">观察估值</div><div class="header-col">状态</div><div class="header-col">持有金额</div><div class="header-col">预计收益</div><div class="header-col">覆盖率</div><div class="header-col">分时走势</div></div>');
+    html.push('<div id="qdii-list">');
+    html.push(qdiiHoldingRows.length ? qdiiHoldingRows.map(renderQdiiRow).join('') : '<div class="empty-panel">暂无持有的 QDII / 海外基金。</div>');
+    html.push('</div></section>');
+
     html.push('<section class="fund-section" data-section="watchlist" style="margin-top:14px;">');
     html.push('<div style="display:flex; justify-content:space-between; align-items:flex-end; margin:10px 4px 6px;"><div style="font-size:15px; font-weight:800; color:#0f172a;">自选观察</div></div>');
     html.push('<div class="fund-list-header fund-header-watch"><div class="header-main">基金名称</div><div class="header-col">实时估值</div><div class="header-col">实际收盘</div><div class="header-col">可靠性</div><div class="header-col">分时走势</div></div>');
     html.push('<div id="watchlist-list">');
     html.push(watchlistRows.length ? watchlistRows.map(renderWatchRow).join('') : '<div class="empty-panel">暂无仅自选基金。持有基金会自动加入自选，但只显示在“我的持仓”。</div>');
     html.push('</div></section>');
+
+    if (qdiiWatchlistRows.length) {
+      html.push('<section class="fund-section" data-section="qdii-watchlist" style="margin-top:14px;"><div style="font-size:15px; font-weight:800; color:#0f172a; margin:10px 4px 6px;">海外自选观察</div>');
+      html.push(qdiiWatchlistRows.map(renderWatchRow).join(''));
+      html.push('</section>');
+    }
 
     if (otherRows.length) {
       html.push('<section class="fund-section" data-section="other" style="margin-top:14px;"><div style="font-size:15px; font-weight:800; color:#0f172a; margin:10px 4px 6px;">其他结果</div>');

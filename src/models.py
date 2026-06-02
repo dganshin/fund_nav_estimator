@@ -36,6 +36,8 @@ class Fund(Base):
     calibrated_estimates: Mapped[list["CalibratedEstimate"]] = relationship(back_populates="fund")
     selected_estimates: Mapped[list["SelectedEstimate"]] = relationship(back_populates="fund")
     calibration_residuals: Mapped[list["CalibrationResidual"]] = relationship(back_populates="fund")
+    qdii_valuation_snapshots: Mapped[list["QdiiValuationSnapshot"]] = relationship(back_populates="fund")
+    enhanced_holding_versions: Mapped[list["EnhancedHoldingVersion"]] = relationship(back_populates="fund")
 
 
 class FundAlias(Base):
@@ -251,6 +253,55 @@ class EffectiveWeightItem(Base):
     version: Mapped["EffectiveWeightVersion"] = relationship(back_populates="items")
 
 
+class EnhancedHoldingVersion(Base):
+    __tablename__ = "enhanced_holding_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False, index=True)
+    base_holding_version_id: Mapped[int] = mapped_column(ForeignKey("holding_versions.id"), nullable=False, index=True)
+    build_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    method: Mapped[str] = mapped_column(String(64), nullable=False, default="core_plus_reports")
+    total_weight: Mapped[float] = mapped_column(Float, nullable=False)
+    stock_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("fund_code", "base_holding_version_id", "method", name="uq_enhanced_holding_version"),
+    )
+
+    fund: Mapped["Fund"] = relationship(back_populates="enhanced_holding_versions")
+    items: Mapped[list["EnhancedHoldingItem"]] = relationship(
+        back_populates="version",
+        cascade="all, delete-orphan",
+    )
+
+
+class EnhancedHoldingItem(Base):
+    __tablename__ = "enhanced_holding_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    enhanced_version_id: Mapped[int] = mapped_column(ForeignKey("enhanced_holding_versions.id"), nullable=False, index=True)
+    asset_code: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    asset_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    asset_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    weight: Mapped[float] = mapped_column(Float, nullable=False)
+    original_weight: Mapped[float] = mapped_column(Float, nullable=False)
+    source_report_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_report_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    confidence_weight: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    is_core: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_extended: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        UniqueConstraint("enhanced_version_id", "asset_code", name="uq_enhanced_holding_item"),
+    )
+
+    version: Mapped["EnhancedHoldingVersion"] = relationship(back_populates="items")
+
+
 class UserFundPosition(Base):
     __tablename__ = "user_fund_positions"
 
@@ -330,6 +381,8 @@ class CalibrationResidual(Base):
     coverage_adjusted_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
     single_scale_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
     two_factor_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    enhanced_holdings_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    enhanced_single_scale_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
     raw_estimate: Mapped[float] = mapped_column(Float, nullable=False)
     calibrated_estimate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     effective_estimate: Mapped[float] = mapped_column(Float, nullable=False)
@@ -487,6 +540,31 @@ class IntradaySnapshot(Base):
     )
 
     fund: Mapped["Fund"] = relationship()
+
+
+class QdiiValuationSnapshot(Base):
+    __tablename__ = "qdii_valuation_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.fund_code"), nullable=False, index=True)
+    valuation_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    snapshot_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    snapshot_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    cn_component: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    foreign_component: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fx_component: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    partial_estimate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    full_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quote_coverage: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    missing_quote_weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("fund_code", "valuation_date", "snapshot_type", name="uq_qdii_valuation_snapshot"),
+    )
+
+    fund: Mapped["Fund"] = relationship(back_populates="qdii_valuation_snapshots")
 
 class UserFundPositionEvent(Base):
     __tablename__ = "user_fund_position_events"

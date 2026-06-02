@@ -5,7 +5,16 @@
 <div class="panel">
   <div class="panel-title">确认强制修改持仓金额</div>
   <p class="panel-note">请检查支付宝名称和本地基金是否匹配。未匹配的行可以手动选择基金, 确认后会保存别名, 下次自动识别。</p>
+  <p class="panel-note">
+    今日盈亏口径:
+    {% if profit_effect_mode == 'after_nav' %}
+    真实涨跌公布后覆盖, 今日不重算, 下个交易日生效。
+    {% else %}
+    真实涨跌公布前覆盖, 新金额参与今日盈亏。
+    {% endif %}
+  </p>
   <form method="post" action="/portfolio/force-import">
+    <input type="hidden" name="profit_effect_mode" value="{{ profit_effect_mode }}">
     <div class="table-wrap">
       <table class="plain-table">
         <thead>

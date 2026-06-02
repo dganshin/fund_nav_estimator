@@ -87,6 +87,13 @@ class FallbackDataSource:
     ) -> list[dict[str, object]]:
         return self._try("fetch_fund_holdings", fund_code, year)
 
+    def fetch_fund_holdings_all_reports(
+        self,
+        fund_code: str,
+        years: list[int],
+    ) -> list[dict[str, object]]:
+        return self._try("fetch_fund_holdings_all_reports", fund_code, years)
+
     def fetch_fund_asset_allocation(
         self,
         fund_code: str,

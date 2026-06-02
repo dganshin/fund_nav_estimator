@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from .backfill import fetch_and_store_fund_navs, fetch_and_store_stock_quotes
 from .calibration import run_online_calibration
 from .estimator import build_effective_weight_version
+from .enhanced_holdings import build_enhanced_holding_version
 from .import_data import import_asset_allocations_from_rows, import_funds_from_rows, import_holdings_from_rows
 from .models import ActualReturn, CalibrationResidual, Fund, FundNav, HoldingVersion, OnlineCalibrationState
 from .data_sources.code_utils import normalize_asset_code
@@ -91,6 +92,18 @@ KNOWN_ETF_FEEDER_TARGETS: dict[str, dict[str, object]] = {
         "fund_name": "南方上海金ETF发起联接C",
         "target_code": "518860.SH",
         "target_name": "上海金ETF建信",
+        "weight_pct": 95.0,
+    },
+    "025856": {
+        "fund_name": "华夏中证电网设备主题ETF发起式联接A",
+        "target_code": "159326.SZ",
+        "target_name": "电网设备ETF华夏",
+        "weight_pct": 95.0,
+    },
+    "025857": {
+        "fund_name": "华夏中证电网设备主题ETF发起式联接C",
+        "target_code": "159326.SZ",
+        "target_name": "电网设备ETF华夏",
         "weight_pct": 95.0,
     },
 }
@@ -312,13 +325,23 @@ def _normalize_asset_allocation_rows(
 ) -> list[dict[str, object]]:
     if not raw_rows:
         return []
+    dated_rows: list[tuple[date, dict[str, object]]] = []
+    for row in raw_rows:
+        row_date = _parse_report_date(
+            _pick(row, "report_date", "报告日期", "截止时间", "季度", "持仓日期")
+        )
+        if row_date is not None and row_date <= report_date:
+            dated_rows.append((row_date, row))
+    if dated_rows:
+        latest_date = max(row_date for row_date, _ in dated_rows)
+        raw_rows = [row for row_date, row in dated_rows if row_date == latest_date]
     first = raw_rows[0]
     stock = _to_pct(_pick(first, "stock_weight_pct", "股票占净比", "股票仓位", "股票投资占比", "股票"))
     bond = _to_pct(_pick(first, "bond_weight_pct", "债券占净比", "债券"))
     cash = _to_pct(_pick(first, "cash_weight_pct", "现金占净比", "现金"))
     other = _to_pct(_pick(first, "other_weight_pct", "其他"))
     if stock is None and any("行业类别" in row or "占净值比例" in row for row in raw_rows):
-        # AKShare 的行业配置可视为股票资产在各行业的净值占比之和。
+        # AKShare 行业配置同年含多期, 这里只汇总最新一期。
         weights = [_to_pct(_pick(row, "占净值比例", "weight_pct")) for row in raw_rows]
         stock = sum(weight for weight in weights if weight is not None)
     if stock is None:
@@ -346,6 +369,7 @@ def _run_causal_calibration_history(
     session: Session,
     fund_code: str,
     holding_version: HoldingVersion,
+    data_source,
     force_rebuild: bool = False,
 ) -> int:
     """从当前公开持仓报告日起逐日写入因果残差。"""
@@ -418,26 +442,9 @@ def ensure_fund_full_onboarded(
             _known_etf_feeder_target(fund_code)
             or (_find_target_etf(data_source, str(fund_name), basic_info) if is_etf_feeder else None)
         )
-        # ETF联接也先尝试拉取实际公开持仓，包括目标ETF和其他持股
+        # ETF联接优先使用目标 ETF, 避免误把低比例前十大股票当作全基金估值。
         if is_etf_feeder:
-            raw_holdings = []
-            if hasattr(data_source, "fetch_fund_public_holdings"):
-                try:
-                    raw_holdings = data_source.fetch_fund_public_holdings(fund_code)
-                except Exception:
-                    pass
-            if not raw_holdings:
-                try:
-                    raw_holdings = data_source.fetch_fund_holdings(fund_code, year=today.year)
-                except Exception:
-                    pass
-            if not isinstance(raw_holdings, list):
-                raw_holdings = []
-            holdings_rows = _normalize_holding_rows(fund_code, raw_holdings or [])
-            if holdings_rows:
-                print(f"[onboard] etf feeder using actual holdings: count={len(holdings_rows)}")
-            elif target_etf is not None:
-                # 无法获取实际持仓，回退到目标ETF单一持仓
+            if target_etf is not None:
                 holdings_rows = [{
                     "fund_code": fund_code,
                     "report_date": date(today.year, 3, 31).isoformat(),
@@ -452,7 +459,25 @@ def ensure_fund_full_onboarded(
                     f"name={target_etf['asset_name']}, weight={target_etf['weight_pct']}"
                 )
             else:
-                warnings.append("ETF联接基金未识别目标ETF, 不使用公开股票明细估值")
+                raw_holdings = []
+                if hasattr(data_source, "fetch_fund_public_holdings"):
+                    try:
+                        raw_holdings = data_source.fetch_fund_public_holdings(fund_code)
+                    except Exception:
+                        pass
+                if not raw_holdings:
+                    try:
+                        raw_holdings = data_source.fetch_fund_holdings(fund_code, year=today.year)
+                    except Exception:
+                        pass
+                if not isinstance(raw_holdings, list):
+                    raw_holdings = []
+                holdings_rows = _normalize_holding_rows(fund_code, raw_holdings or [])
+                if holdings_rows:
+                    warnings.append("ETF联接基金未识别目标ETF, 暂用公开持仓明细")
+                    print(f"[onboard] etf feeder using public holdings fallback: count={len(holdings_rows)}")
+                else:
+                    warnings.append("ETF联接基金未识别目标ETF, 不使用公开股票明细估值")
         elif target_etf is not None:
             # 已知的ETF联接（KNOWN_ETF_FEEDER_TARGETS），仍尝试实际持仓
             raw_holdings = []
@@ -547,6 +572,12 @@ def ensure_fund_full_onboarded(
             print(f"[onboard] stock quote rows imported: 0, error={exc}")
         try:
             build_effective_weight_version(session, fund_code, today)
+            try:
+                enhanced = build_enhanced_holding_version(session, fund_code, data_source, years=[today.year, today.year - 1])
+                if enhanced is not None:
+                    print(f"[onboard] enhanced holdings built: count={len(enhanced.items)}, total={enhanced.total_weight:.2%}")
+            except Exception as exc:
+                warnings.append(f"增强持仓池跳过: {exc}")
             session.commit()
         except Exception as exc:
             warnings.append(f"修正权重生成失败: {exc}")
@@ -555,6 +586,7 @@ def ensure_fund_full_onboarded(
                 session=session,
                 fund_code=fund_code,
                 holding_version=active_holding,
+                data_source=data_source,
                 force_rebuild=force_rebuild,
             )
             if residual_count == 0:

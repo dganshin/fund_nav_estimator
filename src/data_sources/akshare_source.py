@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -25,6 +26,13 @@ class AKShareDataSource:
         except ImportError as exc:
             raise DataSourceError("akshare is not installed. Run pip install -r requirements.txt first.") from exc
         self.ak = ak
+
+    def _quote_workers(self, default: int = 12) -> int:
+        try:
+            value = int(os.getenv("FUND_NAV_QUOTE_WORKERS", str(default)))
+        except ValueError:
+            value = default
+        return max(1, min(24, value))
 
     def _request_text(self, url: str, timeout: float = 8.0) -> str:
         session = requests.Session()
@@ -222,25 +230,41 @@ class AKShareDataSource:
         self.last_warnings = []
         dedup_codes = list(dict.fromkeys(asset_codes))
         # 优先东财实时行情（跟日K同一数据源，盘中收盘涨跌幅口径一致）
+        records: list[LiveStockQuoteRecord] = []
         try:
             records = self._fetch_stock_live_quotes_from_eastmoney(
                 asset_codes=dedup_codes,
                 timeout_seconds=timeout_seconds,
             )
-            if records:
+            covered = {r.asset_code for r in records}
+            if records and len(covered) >= len(dedup_codes):
                 records.sort(key=lambda item: item.asset_code)
                 return records
         except Exception as exc:
             self.last_warnings.append(
                 f"Warning: eastmoney live quote fetch failed: {exc}"
             )
+        missing_codes = [code for code in dedup_codes if normalize_asset_code(code) not in {r.asset_code for r in records}]
+        try:
+            us_records = self._fetch_us_live_quotes_from_yahoo(missing_codes, timeout_seconds=timeout_seconds)
+            if us_records:
+                records.extend(us_records)
+                covered = {r.asset_code for r in records}
+                if len(covered) >= len(dedup_codes):
+                    records.sort(key=lambda item: item.asset_code)
+                    return records
+        except Exception as exc:
+            self.last_warnings.append(
+                f"Warning: yahoo us live quote fetch failed: {exc}"
+            )
         # 回退腾讯实时行情
         try:
-            records = self._fetch_stock_live_quotes_from_tencent(
-                asset_codes=dedup_codes,
+            tencent_records = self._fetch_stock_live_quotes_from_tencent(
+                asset_codes=[code for code in dedup_codes if normalize_asset_code(code) not in {r.asset_code for r in records}],
                 timeout_seconds=timeout_seconds,
             )
-            if records:
+            if tencent_records:
+                records.extend(tencent_records)
                 records.sort(key=lambda item: item.asset_code)
                 return records
         except Exception as exc:
@@ -248,12 +272,12 @@ class AKShareDataSource:
                 f"Warning: tencent live quote batch fetch failed: {exc}"
             )
 
-        records: list[LiveStockQuoteRecord] = []
-        max_workers = min(6, max(1, len(dedup_codes)))
+        remaining_codes = [code for code in dedup_codes if normalize_asset_code(code) not in {r.asset_code for r in records}]
+        max_workers = min(self._quote_workers(), max(1, len(remaining_codes)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {
                 executor.submit(self._fetch_stock_live_quote, asset_code): asset_code
-                for asset_code in dedup_codes
+                for asset_code in remaining_codes
             }
             pending = set(future_map)
             deadline = time.monotonic() + max(timeout_seconds, 1.0)
@@ -288,13 +312,107 @@ class AKShareDataSource:
         records.sort(key=lambda item: item.asset_code)
         return records
 
+    def _looks_like_us_symbol(self, asset_code: str) -> bool:
+        code = normalize_asset_code(asset_code)
+        return "." not in code and code.isalpha() and 1 <= len(code) <= 5
+
+    def _fetch_us_live_quotes_from_yahoo(
+        self,
+        asset_codes: list[str],
+        timeout_seconds: float,
+    ) -> list[LiveStockQuoteRecord]:
+        symbols = [normalize_asset_code(code) for code in asset_codes if self._looks_like_us_symbol(code)]
+        if not symbols:
+            return []
+        records: list[LiveStockQuoteRecord] = []
+        now = datetime.now()
+
+        def fetch_one(symbol: str) -> LiveStockQuoteRecord | None:
+            session = requests.Session()
+            session.trust_env = True
+            try:
+                result = None
+                last_error: Exception | None = None
+                for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+                    try:
+                        response = session.get(
+                            f"https://{host}/v8/finance/chart/{symbol}",
+                            params={"range": "5d", "interval": "1d"},
+                            timeout=min(max(timeout_seconds, 6.0), 10.0),
+                            headers={
+                                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/125 Safari/537.36",
+                                "Accept": "application/json,text/plain,*/*",
+                            },
+                        )
+                        response.raise_for_status()
+                        result = (response.json().get("chart", {}).get("result") or [None])[0]
+                        if result:
+                            break
+                    except Exception as exc:
+                        last_error = exc
+                if result is None and last_error is not None:
+                    raise last_error
+                if not result:
+                    return None
+                meta = result.get("meta") or {}
+                latest = meta.get("regularMarketPrice")
+                prev_close = meta.get("previousClose")
+                if latest is None or prev_close in (None, 0):
+                    closes = ((result.get("indicators") or {}).get("quote") or [{}])[0].get("close") or []
+                    closes = [float(v) for v in closes if v is not None]
+                    if len(closes) >= 2:
+                        prev_close, latest = closes[-2], closes[-1]
+                if latest is None or prev_close in (None, 0):
+                    return None
+                return LiveStockQuoteRecord(
+                    trade_date=now.date(),
+                    quote_time=now,
+                    asset_code=symbol,
+                    asset_name=str(meta.get("symbol") or symbol),
+                    return_pct=float(latest) / float(prev_close) - 1.0,
+                    source="yahoo:chart_live",
+                )
+            except Exception as exc:
+                self.last_warnings.append(f"Warning: yahoo us live quote failed for {symbol}: {exc}")
+                return None
+
+        max_workers = min(self._quote_workers(), max(1, len(symbols)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {executor.submit(fetch_one, symbol): symbol for symbol in symbols}
+            pending = set(future_map)
+            deadline = time.monotonic() + min(max(timeout_seconds + 2.0, 6.0), 12.0)
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                done, pending = wait(
+                    pending,
+                    timeout=min(remaining, 0.5),
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in done:
+                    symbol = future_map.get(future, "UNKNOWN")
+                    try:
+                        record = future.result()
+                        if record is not None:
+                            records.append(record)
+                    except Exception as exc:
+                        self.last_warnings.append(f"Warning: yahoo us live quote failed for {symbol}: {exc}")
+            for future in pending:
+                symbol = future_map.get(future, "UNKNOWN")
+                future.cancel()
+                self.last_warnings.append(f"Warning: yahoo us live quote timed out for {symbol}.")
+        return records
+
     def _asset_code_to_eastmoney_secid(self, asset_code: str) -> str | None:
-        """将资产代码转为东财 secid 格式（1.SH, 0.SZ, 116.HK）。"""
+        """将资产代码转为东财 secid 格式。"""
         normalized = normalize_asset_code(asset_code)
         if "." not in normalized:
+            if self._looks_like_us_symbol(normalized):
+                return f"105.{normalized}"
             return None
         digits, market = normalized.split(".", 1)
-        market_map = {"SH": "1", "SZ": "0", "BJ": "0", "HK": "116"}
+        market_map = {"SH": "1", "SZ": "0", "BJ": "0", "HK": "116", "US": "105"}
         prefix = market_map.get(market.upper())
         if prefix is None:
             return None
@@ -322,23 +440,29 @@ class AKShareDataSource:
         fields = "f43,f57,f58,f60,f170"
         records: list[LiveStockQuoteRecord] = []
         now = datetime.now()
-        import requests as req
-        for start in range(0, len(secids), 50):
-            chunk = secids[start:start + 50]
+        eastmoney_session = requests.Session()
+        eastmoney_session.trust_env = False
+
+        def fetch_chunk(chunk: list[str]) -> list[LiveStockQuoteRecord]:
+            chunk_records: list[LiveStockQuoteRecord] = []
             try:
-                r = req.get(
+                r = eastmoney_session.get(
                     url,
-                    params={"secids": ",".join(chunk), "fields": fields},
-                    timeout=max(timeout_seconds, 2.0),
+                    params={
+                        ("secid" if len(chunk) == 1 else "secids"): ",".join(chunk),
+                        "fields": fields,
+                    },
+                    timeout=min(max(timeout_seconds / 2, 1.0), 3.0),
                     headers={"User-Agent": "Mozilla/5.0"},
                 )
                 r.raise_for_status()
                 payload = r.json()
-            except Exception:
-                continue
+            except Exception as exc:
+                self.last_warnings.append(f"Warning: eastmoney chunk failed for {','.join(chunk)}: {exc}")
+                return []
             stocks = payload.get("data", {})
             if not stocks:
-                continue
+                return []
             # 单只返回 dict，批量返回 list
             if isinstance(stocks, dict):
                 stocks = [stocks]
@@ -357,14 +481,42 @@ class AKShareDataSource:
                 change_pct = stock.get("f170")
                 if latest is None or prev_close in (None, 0) or change_pct is None:
                     continue
-                records.append(LiveStockQuoteRecord(
-                    trade_date=now.date(),
-                    quote_time=now,
-                    asset_code=normalize_asset_code(orig_code),
-                    asset_name=str(stock.get("f58", orig_code)),
-                    return_pct=(float(change_pct) / 100.0),
-                    source="eastmoney:qt_live",
-                ))
+                chunk_records.append(
+                    LiveStockQuoteRecord(
+                        trade_date=now.date(),
+                        quote_time=now,
+                        asset_code=normalize_asset_code(orig_code),
+                        asset_name=str(stock.get("f58", orig_code)),
+                        return_pct=(float(change_pct) / 100.0),
+                        source="eastmoney:qt_live",
+                    )
+                )
+            return chunk_records
+
+        us_secids = [secid for secid in secids if secid.startswith("105.")]
+        other_secids = [secid for secid in secids if not secid.startswith("105.")]
+        chunks = [[secid] for secid in us_secids]
+        chunks.extend(other_secids[start:start + 50] for start in range(0, len(other_secids), 50))
+        with ThreadPoolExecutor(max_workers=min(self._quote_workers(), max(1, len(chunks)))) as executor:
+            future_map = {executor.submit(fetch_chunk, chunk): chunk for chunk in chunks}
+            pending = set(future_map)
+            deadline = time.monotonic() + min(max(timeout_seconds, 1.0), 4.0)
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                done, pending = wait(
+                    pending,
+                    timeout=min(remaining, 0.5),
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in done:
+                    try:
+                        records.extend(future.result())
+                    except Exception:
+                        pass
+            for future in pending:
+                future.cancel()
         return records
 
     def _fetch_stock_live_quotes_from_tencent(
@@ -376,11 +528,15 @@ class AKShareDataSource:
             return []
         symbols = []
         for asset_code in asset_codes:
-            try:
-                symbols.append(to_prefixed_symbol(asset_code))
-            except ValueError as e:
-                self.last_warnings.append(f"Warning: skip tencent fetch for unsupported code: {asset_code}")
-                continue
+            normalized = normalize_asset_code(asset_code)
+            if self._looks_like_us_symbol(normalized):
+                symbols.append(f"us{normalized.upper()}")
+            else:
+                try:
+                    symbols.append(to_prefixed_symbol(asset_code))
+                except ValueError:
+                    self.last_warnings.append(f"Warning: skip tencent fetch for unsupported code: {asset_code}")
+                    continue
         if not symbols:
             return []
         records: list[LiveStockQuoteRecord] = []
@@ -412,6 +568,8 @@ class AKShareDataSource:
                 continue
             asset_name = parts[1].strip()
             plain_code = parts[2].strip()
+            if "." in plain_code and not plain_code.upper().endswith((".SH", ".SZ", ".HK")):
+                plain_code = plain_code.split(".", 1)[0]
             latest_price = self._to_float(parts[3])
             prev_close = self._to_float(parts[4])
             quote_time_raw = parts[30].strip()
@@ -420,7 +578,10 @@ class AKShareDataSource:
             try:
                 quote_time = datetime.strptime(quote_time_raw, "%Y%m%d%H%M%S")
             except ValueError:
-                quote_time = datetime.now()
+                try:
+                    quote_time = datetime.strptime(quote_time_raw, "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    quote_time = datetime.now()
             normalized_code = normalize_asset_code(plain_code)
             records.append(
                 LiveStockQuoteRecord(
@@ -522,6 +683,33 @@ class AKShareDataSource:
             return []
         self._cache_dataframe(df, f"fund_holdings_{fund_code}_{year}.csv")
         return df.to_dict(orient="records")
+
+    def fetch_fund_holdings_all_reports(
+        self,
+        fund_code: str,
+        years: list[int],
+    ) -> list[dict[str, object]]:
+        """按年份拉取天天基金披露持仓, 保留报告期用于增强持仓池。"""
+        rows: list[dict[str, object]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for year in years:
+            try:
+                yearly_rows = self.fetch_fund_holdings(fund_code, year=year)
+            except Exception as exc:
+                self.last_warnings.append(f"fund holdings all reports failed for {fund_code} {year}: {exc}")
+                continue
+            for row in yearly_rows:
+                report_key = str(row.get("季度") or row.get("报告日期") or row.get("持仓日期") or "")
+                code_key = str(row.get("股票代码") or row.get("代码") or row.get("证券代码") or "")
+                weight_key = str(row.get("占净值比例") or row.get("持仓占比") or "")
+                key = (report_key, code_key, weight_key)
+                if key in seen:
+                    continue
+                seen.add(key)
+                new_row = dict(row)
+                new_row.setdefault("source", "akshare:portfolio_hold_all")
+                rows.append(new_row)
+        return rows
 
     def fetch_fund_public_holdings(self, fund_code: str) -> list[dict[str, object]]:
         """拉最新公开持仓, 只代表季报/公开前十大, 不是实时持仓。"""

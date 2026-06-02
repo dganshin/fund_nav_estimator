@@ -35,6 +35,8 @@ from .models import (
     OnlineCalibrationState,
     utcnow,
 )
+from .qdii import QDII_MIN_QUOTE_COVERAGE, is_qdii_fund
+from .enhanced_holdings import compute_enhanced_estimate, get_active_enhanced_holding_version
 
 logger = logging.getLogger(__name__)
 
@@ -214,11 +216,44 @@ def _compute_features_from_daily_quotes(
     优先使用当日实时估值快照（与用户盘中看到的一致），
     退而使用 DailyQuote 收盘行情，最后尝试实时行情 API。
     """
-    from .models import FundEstimate
+    from .models import Fund, FundEstimate, QdiiValuationSnapshot
     items = holding_version.items
     covered_weight = sum(item.weight for item in items)
     allocation = _select_asset_allocation_for_holding(session, holding_version)
     stock_weight = covered_weight if allocation is None else allocation.stock_weight
+    fund = session.get(Fund, holding_version.fund_code)
+
+    if is_qdii_fund(fund):
+        snapshot = session.scalar(
+            select(QdiiValuationSnapshot)
+            .where(
+                QdiiValuationSnapshot.fund_code == holding_version.fund_code,
+                QdiiValuationSnapshot.valuation_date == trade_date,
+                QdiiValuationSnapshot.snapshot_type == "foreign_close",
+            )
+            .order_by(QdiiValuationSnapshot.snapshot_time.desc())
+        )
+        if (
+            snapshot is not None
+            and snapshot.full_estimate is not None
+            and snapshot.quote_coverage >= QDII_MIN_QUOTE_COVERAGE
+        ):
+            return CalibrationFeatures(
+                known_estimate=snapshot.full_estimate,
+                unknown_estimate=0.0,
+                base_estimate=snapshot.full_estimate,
+                quote_coverage=snapshot.quote_coverage,
+                covered_weight=snapshot.quote_coverage,
+                stock_weight=1.0,
+            )
+        return CalibrationFeatures(
+            known_estimate=0.0,
+            unknown_estimate=0.0,
+            base_estimate=0.0,
+            quote_coverage=0.0 if snapshot is None else snapshot.quote_coverage,
+            covered_weight=0.0,
+            stock_weight=1.0,
+        )
 
     # 1. 优先使用实时估值快照（与用户盘中看到的数据完全一致）
     saved = session.get(FundEstimate, {"trade_date": trade_date, "fund_code": holding_version.fund_code})
@@ -308,6 +343,22 @@ def _compute_features_from_daily_quotes(
     )
 
 
+def _compute_enhanced_from_daily_quotes(
+    session: Session,
+    fund_code: str,
+    trade_date: date,
+) -> tuple[float | None, float, float]:
+    enhanced_version = get_active_enhanced_holding_version(session, fund_code)
+    if enhanced_version is None:
+        return None, 0.0, 0.0
+    quotes: dict[str, float] = {}
+    for item in enhanced_version.items:
+        quote = session.get(DailyQuote, {"trade_date": trade_date, "asset_code": item.asset_code})
+        if quote is not None:
+            quotes[item.asset_code] = quote.return_pct
+    return compute_enhanced_estimate(enhanced_version, quotes)
+
+
 def _solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[float] | None:
     """小型高斯消元, 避免为 3 个参数强依赖 numpy。"""
     n = len(vector)
@@ -364,6 +415,19 @@ def _fit_single_scale(rows: list[CalibrationResidual], base_scale: float) -> flo
     return max(base_scale * 0.80, min(base_scale * 1.20, scale))
 
 
+def _fit_enhanced_single_scale(rows: list[CalibrationResidual]) -> float | None:
+    scale = 1.0
+    used = 0
+    for row in rows:
+        base = row.enhanced_holdings_estimate
+        if base is None or abs(base) < MIN_RAW_ESTIMATE:
+            continue
+        observed = max(0.80, min(1.20, row.actual_return / base))
+        scale = 0.8 * scale + 0.2 * observed
+        used += 1
+    return scale if used >= SCALE_MIN_SAMPLES else None
+
+
 def _fit_two_factor(rows: list[CalibrationResidual]) -> tuple[float, float, float]:
     if len(rows) < TWO_FACTOR_MIN_SAMPLES:
         return 1.0, 1.0, 0.0
@@ -400,6 +464,10 @@ def _candidate_estimate(row: CalibrationResidual, model: str) -> float | None:
         return row.single_scale_estimate
     if model == "two_factor":
         return row.two_factor_estimate
+    if model == "enhanced_holdings":
+        return row.enhanced_holdings_estimate
+    if model == "enhanced_single_scale":
+        return row.enhanced_single_scale_estimate
     return None
 
 
@@ -599,6 +667,7 @@ def run_online_calibration(
 
     # 5. 构造当天特征, 训练样本严格限制在 trade_date < D。
     features = _compute_features_from_daily_quotes(session, holding_version, calibration_date, data_source)
+    is_qdii = is_qdii_fund(session.get(Fund, fund_code))
     training = _training_rows(session, fund_code, holding_version.id, calibration_date)
     sample_count = len(training)
     raw_estimate = features.base_estimate
@@ -615,6 +684,13 @@ def run_online_calibration(
             + two_params[1] * features.unknown_estimate
             + two_params[2]
         )
+    enhanced_estimate, _, _ = _compute_enhanced_from_daily_quotes(session, fund_code, calibration_date)
+    enhanced_scale = _fit_enhanced_single_scale(training)
+    enhanced_single_estimate = (
+        None
+        if enhanced_estimate is None or enhanced_scale is None
+        else enhanced_scale * enhanced_estimate
+    )
 
     candidates = {
         "coverage_adjusted": coverage_estimate,
@@ -645,7 +721,11 @@ def run_online_calibration(
     if already_calibrated and not force:
         skip_reason = "already_calibrated_this_date"
     elif features.quote_coverage < MIN_QUOTE_COVERAGE:
-        skip_reason = f"quote_coverage_too_low({features.quote_coverage:.2%})"
+        skip_reason = (
+            "insufficient_foreign_quote_coverage"
+            if is_qdii
+            else f"quote_coverage_too_low({features.quote_coverage:.2%})"
+        )
     elif abs(features.base_estimate) < MIN_RAW_ESTIMATE:
         skip_reason = f"raw_estimate_too_small({features.base_estimate:.6f})"
     elif abs_residual > MAX_ABS_RESIDUAL:
@@ -731,6 +811,10 @@ def run_online_calibration(
                 single_estimate = float(_snap["single_scale"])
             if _snap.get("two_factor") is not None:
                 two_estimate = float(_snap["two_factor"])
+            if _snap.get("enhanced_holdings") is not None:
+                enhanced_estimate = float(_snap["enhanced_holdings"])
+            if _snap.get("enhanced_single_scale") is not None:
+                enhanced_single_estimate = float(_snap["enhanced_single_scale"])
             _snap_final = _snap.get("current_estimate") or _snap.get("calibrated")
             if _snap_final is not None:
                 effective_estimate = float(_snap_final)
@@ -751,6 +835,8 @@ def run_online_calibration(
             coverage_adjusted_estimate=coverage_estimate,
             single_scale_estimate=single_estimate,
             two_factor_estimate=two_estimate,
+            enhanced_holdings_estimate=enhanced_estimate,
+            enhanced_single_scale_estimate=enhanced_single_estimate,
             raw_estimate=raw_estimate,
             calibrated_estimate=effective_estimate,
             effective_estimate=effective_estimate,
@@ -779,6 +865,8 @@ def run_online_calibration(
         existing_residual.coverage_adjusted_estimate = coverage_estimate
         existing_residual.single_scale_estimate = single_estimate
         existing_residual.two_factor_estimate = two_estimate
+        existing_residual.enhanced_holdings_estimate = enhanced_estimate
+        existing_residual.enhanced_single_scale_estimate = enhanced_single_estimate
         existing_residual.raw_estimate = raw_estimate
         existing_residual.calibrated_estimate = effective_estimate
         existing_residual.effective_estimate = effective_estimate
@@ -855,6 +943,11 @@ def load_calibration_residuals(
             "two_factor_estimate": _fmt_pct(r.two_factor_estimate),
             "two_factor_residual": _fmt_pct(None if r.two_factor_estimate is None else r.actual_return - r.two_factor_estimate),
             "two_factor_abs_residual": _fmt_abs_pct(None if r.two_factor_estimate is None else abs(r.actual_return - r.two_factor_estimate)),
+            "enhanced_estimate": _fmt_pct(r.enhanced_holdings_estimate),
+            "enhanced_residual": _fmt_pct(None if r.enhanced_holdings_estimate is None else r.actual_return - r.enhanced_holdings_estimate),
+            "enhanced_abs_residual": _fmt_abs_pct(None if r.enhanced_holdings_estimate is None else abs(r.actual_return - r.enhanced_holdings_estimate)),
+            "enhanced_single_estimate": _fmt_pct(r.enhanced_single_scale_estimate),
+            "enhanced_single_residual": _fmt_pct(None if r.enhanced_single_scale_estimate is None else r.actual_return - r.enhanced_single_scale_estimate),
             "known_estimate": f"{r.known_estimate:+.4%}",
             "unknown_estimate": f"{r.unknown_estimate:+.4%}",
             "base_estimate": f"{r.base_estimate:+.4%}",

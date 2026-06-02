@@ -208,6 +208,13 @@ class EfinanceDataSource:
             })
         return rows
 
+    def fetch_fund_holdings_all_reports(
+        self,
+        fund_code: str,
+        years: list[int],
+    ) -> list[dict[str, object]]:
+        return self.fetch_fund_holdings(fund_code, year=years[0] if years else None)
+
     # ── Fund Asset Allocation ─────────────────────────────────────────────
 
     def fetch_fund_asset_allocation(

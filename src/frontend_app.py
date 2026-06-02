@@ -49,6 +49,7 @@ if __package__ in {None, ""}:
         load_asset_allocation_rows,
         load_fund_rows,
         load_holding_rows,
+        load_holding_rows_for_codes,
         load_user_position_rows,
         load_watchlist_rows,
         save_asset_allocation_rows,
@@ -89,6 +90,7 @@ else:
         load_asset_allocation_rows,
         load_fund_rows,
         load_holding_rows,
+        load_holding_rows_for_codes,
         load_user_position_rows,
         load_watchlist_rows,
         save_asset_allocation_rows,
@@ -329,7 +331,7 @@ def load_position_profit_context(
 
     设计口径：
     - holding_amount 永远展示当前快照金额；
-    - 今日手工买入 / 卖出 / 清仓 / 修改金额默认 effective_date 为下一交易日；
+    - 今日手工买入 / 卖出 / 清仓 / 修改金额可按 effective_date 控制是否参与今日盈亏；
     - 今日盈亏用 profit_base_amount_today 计算，排除今天新增、但仍计入今天未生效的卖出/清仓前金额。
     """
     today = today or date.today()
@@ -384,6 +386,11 @@ def load_position_profit_context(
         item["has_pending_today_event"] = abs(pending_delta) > 1e-9
 
     return ctx
+
+
+def force_import_effective_date(mode: str | None) -> date:
+    """净值出来前覆盖金额计入今日, 净值出来后覆盖金额次日生效。"""
+    return next_business_date() if mode == "after_nav" else date.today()
 
 
 def short_error_label(label: str | None) -> str:
@@ -650,6 +657,7 @@ def load_live_estimate_bundle(
     data_source = get_cached_data_source()
 
     with session_factory() as session:
+        target_fund_codes: set[str] | None = None
         if fund_code is None:
             pos_rows = [
                 r for r in load_user_position_rows(session) if r.get("is_active")
@@ -658,16 +666,10 @@ def load_live_estimate_bundle(
             active_codes = {str(r["fund_code"]) for r in pos_rows} | {
                 str(r["fund_code"]) for r in wl_rows
             }
-            holding_rows = (
-                load_holding_rows(session)
-                if not active_codes
-                else [
-                    r
-                    for r in load_holding_rows(session)
-                    if r["fund_code"] in active_codes
-                ]
-            )
+            target_fund_codes = active_codes or None
+            holding_rows = load_holding_rows_for_codes(session, target_fund_codes)
         else:
+            target_fund_codes = {fund_code}
             holding_rows = load_holding_rows(session, fund_code)
 
     asset_codes = list(dict.fromkeys(str(r["asset_code"]) for r in holding_rows))
@@ -679,6 +681,7 @@ def load_live_estimate_bundle(
                 trade_date=date.today(),
                 quote_time=None,
                 fund_code=fund_code,
+                fund_codes=target_fund_codes,
             )
         _record_intraday(results)
         payload = (results, "当前没有可用持仓", False)
@@ -689,7 +692,7 @@ def load_live_estimate_bundle(
         if hasattr(data_source, "last_warnings"):
             data_source.last_warnings = []
         live_records = data_source.fetch_stock_live_quotes(
-            asset_codes=asset_codes, sleep_seconds=0.0, timeout_seconds=8.0
+            asset_codes=asset_codes, sleep_seconds=0.0, timeout_seconds=3.0
         )
         warnings = list(getattr(data_source, "last_warnings", []))
     except Exception as exc:
@@ -757,7 +760,19 @@ def load_live_estimate_bundle(
         warnings.append("partial_fallback")
 
     if not live_quote_map:
-        return [], "当前抓不到实时行情，也没有可用缓存", False
+        with session_factory() as session:
+            results = compute_live_fund_estimates(
+                session=session,
+                live_quotes={},
+                trade_date=date.today(),
+                quote_time=None,
+                fund_code=fund_code,
+                fund_codes=target_fund_codes,
+            )
+        _record_intraday(results)
+        payload = (results, "当前抓不到实时行情，也没有可用缓存", False)
+        LIVE_BUNDLE_CACHE[cache_key] = (monotonic(), payload)
+        return payload
 
     quote_times = [
         p["quote_time"]
@@ -773,6 +788,7 @@ def load_live_estimate_bundle(
             trade_date=quote_time.date(),
             quote_time=quote_time,
             fund_code=fund_code,
+            fund_codes=target_fund_codes,
             selection_window=20,
             min_samples=10,
             min_improvement_bps=5,
@@ -850,6 +866,23 @@ def actual_return_source_label(
     return "最近收盘涨跌"
 
 
+def select_qdii_profit_return(
+    result,
+    residual,
+    now: datetime | None = None,
+) -> tuple[float | None, date | None, str]:
+    """QDII 今日收益用上一估值日官方涨跌, 未公布时才用昨夜收盘估值。"""
+    current_time = now or datetime.now()
+    if residual is not None and residual.trade_date <= current_time.date():
+        return residual.actual_return, residual.trade_date, "QDII最近官方涨跌"
+    if (
+        getattr(result, "qdii_snapshot_type", None) == "foreign_close"
+        and getattr(result, "qdii_full_estimate", None) is not None
+    ):
+        return getattr(result, "qdii_full_estimate", None), None, "QDII昨夜收盘估值"
+    return None, None, "QDII等待官方净值"
+
+
 def build_home_rows(
     results: list,
     residuals_map: dict | None = None,
@@ -867,6 +900,7 @@ def build_home_rows(
         if item.fund_code in ("000001", "000002") or "示例" in (item.fund_name or ""):
             continue
 
+        is_qdii = bool(getattr(item, "is_qdii", False))
         status_text = item.error_band_label or "样本不足"
         if (
             item.error_band_pct is None
@@ -883,6 +917,16 @@ def build_home_rows(
         elif item.best_status == "missing_quotes":
             current_estimate_text = "行情缺失"
             status_text = "不可估"
+        elif is_qdii:
+            qdii_full = getattr(item, "qdii_full_estimate", None)
+            qdii_partial = getattr(item, "qdii_partial_estimate", None)
+            status_text = getattr(item, "qdii_status", None) or status_text
+            if qdii_full is not None:
+                current_estimate_text = format_percent(qdii_full)
+            elif qdii_partial is not None:
+                current_estimate_text = f"已覆盖 {format_percent(qdii_partial)}"
+            else:
+                current_estimate_text = "完整估值不可用"
         reliability = reliability_from_error(item.error_band_pct, status_text)
 
         res = residuals_map.get(item.fund_code)
@@ -902,11 +946,13 @@ def build_home_rows(
             0.0,
         )
 
-        profit_return = (
-            actual_return_today
-            if actual_return_today is not None
-            else item.current_estimate
-        )
+        profit_return = actual_return_today if actual_return_today is not None else item.current_estimate
+        profit_return_label = actual_return_source_label(actual_return_date, now)
+        if is_qdii:
+            profit_return, actual_return_date, profit_return_label = select_qdii_profit_return(
+                item, res, now
+            )
+            actual_return_today = profit_return
         estimated_today_profit = None
         if is_holding and profit_return is not None:
             estimated_today_profit = profit_base_amount * profit_return
@@ -920,7 +966,7 @@ def build_home_rows(
                 "fund_name": item.fund_name,
                 "current_estimate": item.current_estimate,
                 "current_estimate_text": current_estimate_text,
-                "estimate_tone": get_tone(item.current_estimate),
+                "estimate_tone": get_tone(profit_return if is_qdii else item.current_estimate),
                 "actual_return_today": actual_return_today,
                 "actual_return_today_text": format_percent(actual_return_today),
                 "actual_return_tone": get_tone(actual_return_today),
@@ -942,7 +988,8 @@ def build_home_rows(
                 "profit_tone": get_tone(estimated_today_profit),
                 "profit_return_source": "actual"
                 if actual_return_today is not None
-                else "estimate",
+                else ("qdii_full_estimate" if is_qdii else "estimate"),
+                "profit_return_source_label": profit_return_label,
                 "confidence_level": item.confidence_level or "D",
                 "error_band_pct": item.error_band_pct,
                 "error_band_label": status_text,
@@ -962,6 +1009,16 @@ def build_home_rows(
                 "is_holding": is_holding,
                 "is_watchlist": is_watchlist,
                 "group": group,
+                "is_qdii": is_qdii,
+                "qdii_status": getattr(item, "qdii_status", None),
+                "qdii_status_message": getattr(item, "qdii_status_message", None),
+                "qdii_cn_component_text": format_percent(getattr(item, "qdii_cn_component", None)),
+                "qdii_foreign_component_text": format_percent(getattr(item, "qdii_foreign_component", None)),
+                "qdii_fx_component_text": format_percent(getattr(item, "qdii_fx_component", None)),
+                "qdii_partial_estimate_text": format_percent(getattr(item, "qdii_partial_estimate", None)),
+                "qdii_full_estimate_text": format_percent(getattr(item, "qdii_full_estimate", None)),
+                "qdii_quote_coverage_text": format_percent(getattr(item, "qdii_quote_coverage", None)),
+                "qdii_missing_quote_weight_text": format_percent(getattr(item, "qdii_missing_quote_weight", None)),
             }
         )
     return rows
@@ -994,6 +1051,7 @@ def sort_home_rows(rows: list[dict], sort_key: str) -> list[dict]:
 
 
 def split_home_rows(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    rows = [r for r in rows if not r.get("is_qdii")]
     holding_rows = [r for r in rows if r.get("is_holding")]
     watchlist_rows = [
         r for r in rows if r.get("is_watchlist") and not r.get("is_holding")
@@ -1002,6 +1060,22 @@ def split_home_rows(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict
         r for r in rows if not r.get("is_holding") and not r.get("is_watchlist")
     ]
     return holding_rows, watchlist_rows, other_rows
+
+
+def split_qdii_rows(rows: list[dict]) -> list[dict]:
+    return [r for r in rows if r.get("is_qdii")]
+
+
+def split_qdii_home_rows(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    qdii_rows = split_qdii_rows(rows)
+    qdii_holding_rows = [r for r in qdii_rows if r.get("is_holding")]
+    qdii_watchlist_rows = [
+        r for r in qdii_rows if r.get("is_watchlist") and not r.get("is_holding")
+    ]
+    qdii_other_rows = [
+        r for r in qdii_rows if not r.get("is_holding") and not r.get("is_watchlist")
+    ]
+    return qdii_holding_rows, qdii_watchlist_rows, qdii_other_rows
 
 
 def build_exposure_rows(results, position_context: dict[str, dict], sort: str) -> dict:
@@ -1123,11 +1197,14 @@ def build_detail_context(
         latest_residual, result.quote_time, now
     )
 
-    profit_return = (
-        actual_return_today
-        if actual_return_today is not None
-        else result.current_estimate
-    )
+    is_qdii = bool(getattr(result, "is_qdii", False))
+    profit_return = actual_return_today if actual_return_today is not None else result.current_estimate
+    profit_return_label = actual_return_source_label(actual_return_date, now)
+    if is_qdii:
+        profit_return, actual_return_date, profit_return_label = select_qdii_profit_return(
+            result, latest_residual, now
+        )
+        actual_return_today = profit_return
     estimated_today_profit = None
     if has_position and profit_return is not None:
         estimated_today_profit = profit_base_amount * profit_return
@@ -1135,8 +1212,12 @@ def build_detail_context(
     return {
         "fund_code": result.fund_code,
         "fund_name": result.fund_name,
-        "current_estimate_text": format_percent(result.current_estimate),
-        "current_estimate_tone": get_tone(result.current_estimate),
+        "current_estimate_text": (
+            format_percent(getattr(result, "qdii_full_estimate", None))
+            if (is_qdii and getattr(result, "qdii_full_estimate", None) is not None)
+            else ("完整估值不可用" if is_qdii else format_percent(result.current_estimate))
+        ),
+        "current_estimate_tone": get_tone(profit_return if is_qdii else result.current_estimate),
         "actual_return_today_text": format_percent(actual_return_today),
         "actual_return_today_tone": get_tone(actual_return_today),
         "actual_return_available": actual_return_today is not None,
@@ -1156,10 +1237,10 @@ def build_detail_context(
         ),
         "profit_return_source": "actual"
         if actual_return_today is not None
-        else "estimate",
+        else ("qdii_full_estimate" if is_qdii else "estimate"),
         "profit_return_source_label": actual_return_source_label(
             actual_return_date, now
-        ),
+        ) if not is_qdii else profit_return_label,
         "confidence_level": result.confidence_level or "D",
         "error_band_label": detail_error_band_label(result),
         "reliability": reliability_from_error(
@@ -1184,11 +1265,17 @@ def build_detail_context(
             {
                 "asset_name": h.asset_name,
                 "asset_code": h.asset_code,
+                "market": getattr(h, "market", "CN"),
+                "currency": getattr(h, "currency", "CNY"),
                 "published_weight": f"{h.published_weight_pct:.2f}%",
                 "effective_weight": f"{h.effective_weight_pct:.2f}%",
                 "live_return": "--"
                 if h.return_pct is None
                 else f"{h.return_pct:+.2f}%",
+                "fx_return": "--" if getattr(h, "fx_return_pct", None) is None else f"{h.fx_return_pct:+.2f}%",
+                "cny_return": "--" if getattr(h, "cny_return_pct", None) is None else f"{h.cny_return_pct:+.2f}%",
+                "quote_status": getattr(h, "quote_status", "已覆盖"),
+                "holding_source": getattr(h, "holding_source", "核心"),
                 "return_tone": get_tone(h.return_pct),
                 "contribution": "--"
                 if h.contribution_pct is None
@@ -1217,7 +1304,7 @@ def build_detail_context(
             ("今日参与盈亏金额", format_money(profit_base_amount)),
             (
                 "盈亏口径",
-                actual_return_source_label(actual_return_date, now),
+                profit_return_label,
             ),
             (
                 "三大模型(覆盖)",
@@ -1231,7 +1318,38 @@ def build_detail_context(
                 "三大模型(双因子)",
                 format_percent(result.two_factor_estimate),
             ),
+            (
+                "增强持仓模型",
+                format_percent(getattr(result, "enhanced_holdings_estimate", None)),
+            ),
         ],
+        "enhanced": {
+            "has_pool": getattr(result, "enhanced_total_weight", None) is not None,
+            "enabled": bool(getattr(result, "enhanced_enabled", False)),
+            "core_count": getattr(result, "enhanced_core_count", 0),
+            "extended_count": getattr(result, "enhanced_extended_count", 0),
+            "total_weight": format_percent(getattr(result, "enhanced_total_weight", None)),
+            "covered_weight": format_percent(getattr(result, "enhanced_covered_weight", None)),
+            "top10_mae": "--" if getattr(result, "enhanced_top10_mae", None) is None else f"{result.enhanced_top10_mae:.2%}",
+            "enhanced_mae": "--" if getattr(result, "enhanced_mae", None) is None else f"{result.enhanced_mae:.2%}",
+            "sample_count": getattr(result, "enhanced_sample_count", 0),
+            "status_text": (
+                "增强持仓池有效, 已用于估值"
+                if getattr(result, "enhanced_enabled", False)
+                else ("扩展持仓待验证或疑似过期, 当前仍使用前十大/原模型估值" if getattr(result, "enhanced_total_weight", None) is not None else "尚未构建增强持仓池")
+            ),
+            "source_summary": getattr(result, "enhanced_source_summary", ""),
+        },
+        "is_qdii": is_qdii,
+        "qdii_status": getattr(result, "qdii_status", None),
+        "qdii_status_message": getattr(result, "qdii_status_message", None),
+        "qdii_cn_component_text": format_percent(getattr(result, "qdii_cn_component", None)),
+        "qdii_foreign_component_text": format_percent(getattr(result, "qdii_foreign_component", None)),
+        "qdii_fx_component_text": format_percent(getattr(result, "qdii_fx_component", None)),
+        "qdii_partial_estimate_text": format_percent(getattr(result, "qdii_partial_estimate", None)),
+        "qdii_full_estimate_text": format_percent(getattr(result, "qdii_full_estimate", None)),
+        "qdii_quote_coverage_text": format_percent(getattr(result, "qdii_quote_coverage", None)),
+        "qdii_missing_quote_weight_text": format_percent(getattr(result, "qdii_missing_quote_weight", None)),
     }
 
 
@@ -1304,9 +1422,12 @@ def index(
     else:
         latest_time = "--"
 
+    qdii_rows = split_qdii_rows(rows)
+    qdii_holding_rows, qdii_watchlist_rows, qdii_other_rows = split_qdii_home_rows(rows)
     holding_rows, watchlist_rows, other_rows = split_home_rows(rows)
     total_today_profit = sum(
-        (r.get("estimated_today_profit") or 0.0) for r in holding_rows
+        (r.get("estimated_today_profit") or 0.0)
+        for r in holding_rows + qdii_holding_rows
     )
 
     has_today_quote = any(
@@ -1325,6 +1446,10 @@ def index(
             "rows": rows,
             "holding_rows": holding_rows,
             "watchlist_rows": watchlist_rows,
+            "qdii_rows": qdii_rows,
+            "qdii_holding_rows": qdii_holding_rows,
+            "qdii_watchlist_rows": qdii_watchlist_rows,
+            "qdii_other_rows": qdii_other_rows,
             "other_rows": other_rows,
             "total_today_profit": total_today_profit,
             "total_today_profit_text": format_amount(total_today_profit),
@@ -1525,6 +1650,10 @@ def api_live_estimates(
                 "holding_rows": [],
                 "watchlist_rows": [],
                 "other_rows": [],
+                "qdii_rows": [],
+                "qdii_holding_rows": [],
+                "qdii_watchlist_rows": [],
+                "qdii_other_rows": [],
                 "total_today_profit_text": "--",
                 "status_message": "行情获取失败",
                 "latest_time": "--",
@@ -1567,9 +1696,12 @@ def api_live_estimates(
     else:
         latest_time = "--"
 
+    qdii_rows = split_qdii_rows(rows)
+    qdii_holding_rows, qdii_watchlist_rows, qdii_other_rows = split_qdii_home_rows(rows)
     holding_rows, watchlist_rows, other_rows = split_home_rows(rows)
     total_today_profit = sum(
-        (r.get("estimated_today_profit") or 0.0) for r in holding_rows
+        (r.get("estimated_today_profit") or 0.0)
+        for r in holding_rows + qdii_holding_rows
     )
     has_today_quote = any(
         isinstance(t, datetime) and t.date() == date.today() for t in raw_times
@@ -1581,6 +1713,10 @@ def api_live_estimates(
             "rows": rows,
             "holding_rows": holding_rows,
             "watchlist_rows": watchlist_rows,
+            "qdii_rows": qdii_rows,
+            "qdii_holding_rows": qdii_holding_rows,
+            "qdii_watchlist_rows": qdii_watchlist_rows,
+            "qdii_other_rows": qdii_other_rows,
             "other_rows": other_rows,
             "total_today_profit": total_today_profit,
             "total_today_profit_text": format_amount(total_today_profit),
@@ -1840,7 +1976,11 @@ async def watchlist_batch_import(request: Request, background_tasks: BackgroundT
 
 
 @app.post("/portfolio/force-preview")
-def force_preview_portfolio(request: Request, raw_text: str = Form("")):
+def force_preview_portfolio(
+    request: Request,
+    raw_text: str = Form(""),
+    profit_effect_mode: str = Form("before_nav"),
+):
     rows = parse_force_position_text(raw_text)
     session_factory = get_cached_session_factory()
     with session_factory() as session:
@@ -1859,7 +1999,7 @@ def force_preview_portfolio(request: Request, raw_text: str = Form("")):
     return templates.TemplateResponse(
         request,
         "force_import_preview.html",
-        {"rows": preview_rows, "funds": funds},
+        {"rows": preview_rows, "funds": funds, "profit_effect_mode": profit_effect_mode},
     )
 
 
@@ -1869,6 +2009,8 @@ async def force_import_portfolio(request: Request):
     alias_names = form.getlist("alias_name")
     amounts = form.getlist("amount")
     fund_codes = form.getlist("fund_code")
+    profit_effect_mode = str(form.get("profit_effect_mode") or "before_nav")
+    event_effective_date = force_import_effective_date(profit_effect_mode)
     imported = 0
     failed = 0
     session_factory = get_cached_session_factory()
@@ -1917,9 +2059,12 @@ async def force_import_portfolio(request: Request):
                     fund_code=fund.fund_code,
                     event_type="set_amount",
                     amount_delta=delta,
-                    effective_date=date.today(),
+                    effective_date=event_effective_date,
                     source="ocr_text",
-                    note=f"文本导入强制覆盖金额: {name}",
+                    note=(
+                        f"文本导入强制覆盖金额: {name}; "
+                        + ("净值后覆盖, 次日计盈亏" if profit_effect_mode == "after_nav" else "净值前覆盖, 当日计盈亏")
+                    ),
                 )
             imported += 1
         session.commit()

@@ -36,8 +36,11 @@
 
   <div class="detail-metrics">
     <div>
-      <div class="metric-label">今日实时估值</div>
+      <div class="metric-label">{% if detail.is_qdii %}QDII 观察模式{% else %}今日实时估值{% endif %}</div>
       <div class="metric-value {{ detail.current_estimate_tone }}">{{ detail.current_estimate_text }}</div>
+      {% if detail.is_qdii and detail.current_estimate_text == '完整估值不可用' %}
+      <div style="font-size:12px; color:#94a3b8;">完整估值不可用</div>
+      {% endif %}
     </div>
     <div>
       <div class="metric-label">今日实际收盘</div>
@@ -71,6 +74,24 @@
   <div class="status-bar reliability-{{ detail.reliability.tone }}" style="margin-top:10px; margin-bottom:0;">
     {{ detail.reliability.detail }}
   </div>
+
+  {% if detail.is_qdii %}
+  <div class="status-bar" style="margin-top:10px; margin-bottom:0; color:#1e40af; background:#eff6ff; border-color:#bfdbfe;">
+    <span>QDII 观察模式</span>
+    <span class="sep">·</span>
+    <span>当前状态 {{ detail.qdii_status }}</span>
+    <span class="sep">·</span>
+    <span>{{ detail.qdii_status_message }}</span>
+  </div>
+  <div class="detail-metrics" style="margin-top:10px;">
+    <div><div class="metric-label">已覆盖行情权重</div><div style="font-size:18px; font-weight:800;">{{ detail.qdii_quote_coverage_text }}</div></div>
+    <div><div class="metric-label">缺失行情权重</div><div style="font-size:18px; font-weight:800;">{{ detail.qdii_missing_quote_weight_text }}</div></div>
+    <div><div class="metric-label">A股部分贡献</div><div style="font-size:18px; font-weight:800;">{{ detail.qdii_cn_component_text }}</div></div>
+    <div><div class="metric-label">海外部分贡献</div><div style="font-size:18px; font-weight:800;">{{ detail.qdii_foreign_component_text }}</div></div>
+    <div><div class="metric-label">汇率影响</div><div style="font-size:18px; font-weight:800;">{{ detail.qdii_fx_component_text }}</div></div>
+    <div><div class="metric-label">已覆盖部分估值</div><div style="font-size:18px; font-weight:800;">{{ detail.qdii_partial_estimate_text }}</div></div>
+  </div>
+  {% endif %}
 
   {% if detail.has_pending_today_event %}
   <div class="status-bar" style="margin-top:10px; margin-bottom:0; color:#1e40af; background:#eff6ff; border-color:#bfdbfe;">
@@ -132,15 +153,32 @@
   <div class="holding-row">
     <div>
       <div class="holding-name">{{ row.asset_name }}</div>
-      <div class="holding-sub">{{ row.asset_code }}</div>
+      <div class="holding-sub">
+        {{ row.asset_code }} · {{ row.holding_source }}{% if detail.is_qdii %} · {{ row.market }} / {{ row.currency }} · {{ row.quote_status }}{% endif %}
+      </div>
     </div>
     <div class="align-right">{{ row.published_weight }}</div>
     <div class="align-right">{{ row.effective_weight }}</div>
-    <div class="align-right {{ row.return_tone }}">{{ row.live_return }}</div>
+    <div class="align-right {{ row.return_tone }}">{% if detail.is_qdii %}{{ row.cny_return }}{% else %}{{ row.live_return }}{% endif %}</div>
     <div class="align-right {{ row.contribution_tone }}">{{ row.contribution }}</div>
   </div>
   {% endfor %}
 </div>
+
+<section class="advanced-box" style="margin-top:12px">
+  <div style="font-size:16px; font-weight:800; color:#0f172a; margin-bottom:8px;">增强持仓池</div>
+  <div style="font-size:13px; color:#64748b; margin-bottom:10px;">{{ detail.enhanced.status_text }}</div>
+  <div class="advanced-grid">
+    <div><div class="advanced-label">核心持仓数量</div><div class="advanced-value">{{ detail.enhanced.core_count }}</div></div>
+    <div><div class="advanced-label">扩展持仓数量</div><div class="advanced-value">{{ detail.enhanced.extended_count }}</div></div>
+    <div><div class="advanced-label">总覆盖权重</div><div class="advanced-value">{{ detail.enhanced.total_weight }}</div></div>
+    <div><div class="advanced-label">行情覆盖权重</div><div class="advanced-value">{{ detail.enhanced.covered_weight }}</div></div>
+    <div><div class="advanced-label">验证样本</div><div class="advanced-value">{{ detail.enhanced.sample_count }}</div></div>
+    <div><div class="advanced-label">前十大 MAE</div><div class="advanced-value">{{ detail.enhanced.top10_mae }}</div></div>
+    <div><div class="advanced-label">增强 MAE</div><div class="advanced-value">{{ detail.enhanced.enhanced_mae }}</div></div>
+    <div><div class="advanced-label">当前使用</div><div class="advanced-value">{% if detail.enhanced.enabled %}增强持仓{% else %}原模型{% endif %}</div></div>
+  </div>
+</section>
 
 <section class="advanced-box" style="margin-top:12px" id="estimate-health-section">
   <div style="font-size:16px; font-weight:800; color:#0f172a; margin-bottom:8px;">估值稳定性</div>

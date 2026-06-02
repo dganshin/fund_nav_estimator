@@ -191,7 +191,6 @@ button:active, .btn:active { transform: scale(.97); }
 .fund-row-watch {
   grid-template-columns: minmax(200px, 2.2fr) minmax(86px, .72fr) minmax(86px, .72fr) minmax(76px, .62fr) 80px;
 }
-
 /* ── Sparkline 缩略图单元格 ── */
 .fund-spark {
   display: flex;
@@ -618,7 +617,6 @@ button:active, .btn:active { transform: scale(.97); }
 }
 
 .holding-head { grid-template-columns: 1.8fr 0.9fr 0.9fr 0.9fr 0.9fr; }
-
 .holding-row {
   display: grid;
   gap: 10px;
@@ -629,7 +627,6 @@ button:active, .btn:active { transform: scale(.97); }
   padding: 10px 14px;
   grid-template-columns: 1.8fr 0.9fr 0.9fr 0.9fr 0.9fr;
 }
-
 .holding-name { font-size: 14px; font-weight: 700; color: #1a2436; }
 .holding-sub { color: #8898b8; font-size: 12px; margin-top: 1px; }
 

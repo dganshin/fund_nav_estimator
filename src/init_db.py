@@ -33,6 +33,8 @@ def migrate_schema(engine) -> None:
                 "coverage_adjusted_estimate": "ALTER TABLE calibration_residuals ADD COLUMN coverage_adjusted_estimate FLOAT",
                 "single_scale_estimate": "ALTER TABLE calibration_residuals ADD COLUMN single_scale_estimate FLOAT",
                 "two_factor_estimate": "ALTER TABLE calibration_residuals ADD COLUMN two_factor_estimate FLOAT",
+                "enhanced_holdings_estimate": "ALTER TABLE calibration_residuals ADD COLUMN enhanced_holdings_estimate FLOAT",
+                "enhanced_single_scale_estimate": "ALTER TABLE calibration_residuals ADD COLUMN enhanced_single_scale_estimate FLOAT",
                 "calibrated_estimate": "ALTER TABLE calibration_residuals ADD COLUMN calibrated_estimate FLOAT NOT NULL DEFAULT 0.0",
                 "beta_known": "ALTER TABLE calibration_residuals ADD COLUMN beta_known FLOAT NOT NULL DEFAULT 1.0",
                 "beta_unknown": "ALTER TABLE calibration_residuals ADD COLUMN beta_unknown FLOAT NOT NULL DEFAULT 1.0",

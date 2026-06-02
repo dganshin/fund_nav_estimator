@@ -34,12 +34,19 @@ def load_fund_rows(session: Session) -> list[dict[str, object]]:
 
 
 def load_holding_rows(session: Session, fund_code: str | None = None) -> list[dict[str, object]]:
+    return load_holding_rows_for_codes(session, [fund_code] if fund_code else None)
+
+
+def load_holding_rows_for_codes(session: Session, fund_codes: list[str] | set[str] | None = None) -> list[dict[str, object]]:
     stmt = select(HoldingVersion).where(HoldingVersion.is_active.is_(True)).order_by(
         HoldingVersion.fund_code.asc(),
         HoldingVersion.report_date.desc(),
     )
-    if fund_code:
-        stmt = stmt.where(HoldingVersion.fund_code == fund_code)
+    if fund_codes:
+        codes = [str(code) for code in fund_codes if code]
+        if not codes:
+            return []
+        stmt = stmt.where(HoldingVersion.fund_code.in_(codes))
 
     rows: list[dict[str, object]] = []
     for version in session.scalars(stmt).all():

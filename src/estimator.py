@@ -23,6 +23,8 @@ from .models import (
     SelectedEstimate,
     UserFundPosition,
 )
+from .qdii import QDII_MIN_QUOTE_COVERAGE, classify_asset_market, is_qdii_fund, qdii_snapshot_valuation_date, qdii_status
+from .enhanced_holdings import compute_enhanced_estimate, get_active_enhanced_holding_version, should_use_enhanced_holdings
 
 
 @dataclass
@@ -143,6 +145,13 @@ class LiveHoldingContribution:
     return_pct: float | None
     contribution_pct: float | None
     contribution_explain: str
+    market: str = "CN"
+    currency: str = "CNY"
+    local_return_pct: float | None = None
+    fx_return_pct: float | None = 0.0
+    cny_return_pct: float | None = None
+    quote_status: str = "已覆盖"
+    holding_source: str = "核心"
 
 
 @dataclass
@@ -179,6 +188,28 @@ class LiveFundEstimateResult:
     error_band_pct: float | None = None
     error_band_label: str = "样本不足"
     confidence_text: str = "样本不足"
+    is_qdii: bool = False
+    qdii_status: str | None = None
+    qdii_status_message: str | None = None
+    qdii_snapshot_type: str | None = None
+    qdii_cn_component: float = 0.0
+    qdii_foreign_component: float = 0.0
+    qdii_fx_component: float = 0.0
+    qdii_partial_estimate: float | None = None
+    qdii_full_estimate: float | None = None
+    qdii_quote_coverage: float = 0.0
+    qdii_missing_quote_weight: float = 0.0
+    enhanced_holdings_estimate: float | None = None
+    enhanced_single_scale_estimate: float | None = None
+    enhanced_enabled: bool = False
+    enhanced_sample_count: int = 0
+    enhanced_top10_mae: float | None = None
+    enhanced_mae: float | None = None
+    enhanced_total_weight: float | None = None
+    enhanced_covered_weight: float | None = None
+    enhanced_core_count: int = 0
+    enhanced_extended_count: int = 0
+    enhanced_source_summary: str = ""
 
 
 @dataclass
@@ -929,6 +960,20 @@ def compute_live_fund_estimate(
     allocation = select_asset_allocation(session, fund_code, trade_date)
     published_total_weight = sum(item.weight for item in version.items)
     stock_weight = published_total_weight if allocation is None else allocation.stock_weight
+    is_qdii = is_qdii_fund(fund)
+    qdii_cn_component = 0.0
+    qdii_foreign_component = 0.0
+    qdii_fx_component = 0.0
+    qdii_covered_weight = 0.0
+    qdii_total_weight = 0.0
+    qdii_foreign_total_weight = 0.0
+    qdii_foreign_covered_weight = 0.0
+    quote_return_map: dict[str, float] = {}
+    for code, quote in live_quotes.items():
+        try:
+            quote_return_map[code] = float(quote["return_pct"])
+        except Exception:
+            continue
 
     for item in sorted(version.items, key=lambda row: row.weight, reverse=True):
         quote = live_quotes.get(item.asset_code)
@@ -937,6 +982,11 @@ def compute_live_fund_estimate(
         effective_weight = published_weight * display_known_factor
         adjustment_factor = display_known_factor
         contribution_explain = "按因果在线参数修正已知持仓"
+        market, currency = classify_asset_market(item.asset_code)
+        if is_qdii:
+            qdii_total_weight += max(effective_weight, 0.0)
+            if market != "CN":
+                qdii_foreign_total_weight += max(effective_weight, 0.0)
         return_pct = None if quote is None else float(quote["return_pct"])
         contribution_pct = None
         if return_pct is not None:
@@ -944,6 +994,13 @@ def compute_live_fund_estimate(
             raw_estimate += item.weight * return_pct
             effective_weight_estimate += effective_weight * return_pct
             contribution_pct = effective_weight * return_pct * 100.0
+            if is_qdii:
+                qdii_covered_weight += max(effective_weight, 0.0)
+                if market == "CN":
+                    qdii_cn_component += effective_weight * return_pct
+                else:
+                    qdii_foreign_component += effective_weight * return_pct
+                    qdii_foreign_covered_weight += max(effective_weight, 0.0)
             if quote_time is None:
                 current_quote_time = quote.get("quote_time")
                 if isinstance(current_quote_time, datetime):
@@ -961,6 +1018,13 @@ def compute_live_fund_estimate(
                 return_pct=None if return_pct is None else round(return_pct * 100, 4),
                 contribution_pct=None if contribution_pct is None else round(contribution_pct, 4),
                 contribution_explain=contribution_explain,
+                market=market,
+                currency=currency,
+                local_return_pct=None if return_pct is None else round(return_pct * 100, 4),
+                fx_return_pct=0.0,
+                cny_return_pct=None if return_pct is None else round(return_pct * 100, 4),
+                quote_status="缺行情" if return_pct is None else "已覆盖",
+                holding_source="核心",
             )
         )
 
@@ -990,6 +1054,58 @@ def compute_live_fund_estimate(
                 for model, weight in usable_weights.items()
             )
             model_mode = "ensemble"
+
+    enhanced_version = get_active_enhanced_holding_version(session, fund_code)
+    enhanced_estimate, enhanced_covered_weight, enhanced_missing_weight = compute_enhanced_estimate(
+        enhanced_version,
+        quote_return_map,
+    )
+    enhanced_single_scale_estimate = None if enhanced_estimate is None else current_scale_factor * enhanced_estimate
+    enhanced_stats = {"enabled": False, "sample_count": 0, "top10_mae": None, "enhanced_mae": None}
+    if enhanced_version is not None:
+        enhanced_stats = should_use_enhanced_holdings(session, fund_code, version.id)
+    enhanced_enabled = bool(enhanced_stats.get("enabled")) and enhanced_estimate is not None
+    enhanced_core_count = 0
+    enhanced_extended_count = 0
+    enhanced_source_summary = ""
+    if enhanced_version is not None:
+        enhanced_core_count = sum(1 for item in enhanced_version.items if item.is_core)
+        enhanced_extended_count = sum(1 for item in enhanced_version.items if item.is_extended)
+        enhanced_source_summary = enhanced_version.source_summary or ""
+        enhanced_display_holdings: list[LiveHoldingContribution] = []
+        for item in sorted(enhanced_version.items, key=lambda row: row.weight, reverse=True):
+            ret = quote_return_map.get(item.asset_code)
+            contribution_pct = None if ret is None else item.weight * ret * 100.0
+            market, currency = classify_asset_market(item.asset_code)
+            source_label = "核心" if item.is_core else ("扩展" if item.is_extended else "旧报告")
+            enhanced_display_holdings.append(
+                LiveHoldingContribution(
+                    asset_code=item.asset_code,
+                    asset_name=item.asset_name,
+                    asset_type=item.asset_type,
+                    published_weight_pct=round(item.original_weight * 100, 4),
+                    effective_weight_pct=round(item.weight * 100, 4),
+                    adjustment_factor=round(item.confidence_weight, 6),
+                    return_pct=None if ret is None else round(ret * 100, 4),
+                    contribution_pct=None if contribution_pct is None else round(contribution_pct, 4),
+                    contribution_explain=f"增强持仓池:{source_label}",
+                    market=market,
+                    currency=currency,
+                    local_return_pct=None if ret is None else round(ret * 100, 4),
+                    fx_return_pct=0.0,
+                    cny_return_pct=None if ret is None else round(ret * 100, 4),
+                    quote_status="缺行情" if ret is None else "已覆盖",
+                    holding_source=source_label,
+                )
+            )
+        if enhanced_display_holdings:
+            holdings = enhanced_display_holdings
+    if enhanced_enabled:
+        causal_calibrated_estimate = enhanced_estimate
+        calibrated_estimate = enhanced_estimate
+        best_enhanced_note = "增强持仓池最近样本外误差更低"
+    else:
+        best_enhanced_note = ""
     coverage_adjusted_estimate: float | None = None
     coverage_warnings: list[str] = []
     if effective_version is not None:
@@ -1029,6 +1145,10 @@ def compute_live_fund_estimate(
     best_estimate = causal_calibrated_estimate
     best_status = "ok"
     decision_reason = "首页使用已知持仓贡献 + 未知仓位代理贡献的因果在线校准"
+    if enhanced_enabled:
+        best_method = "enhanced_holdings"
+        best_estimate = enhanced_estimate
+        decision_reason = best_enhanced_note
     best_mae = None if state is None else state.recent_mae
     best_hit_rate = None
     if state is not None and state.warning_json:
@@ -1050,6 +1170,37 @@ def compute_live_fund_estimate(
         error_band = {"error_band_pct": None, "error_band_label": "不可估", "confidence_text": "不可估"}
     elif quote_time is None:
         data_warning = "缺少实时行情"
+
+    qdii_snapshot_type = None
+    qdii_status_text = None
+    qdii_status_message = None
+    qdii_partial_estimate = None
+    qdii_full_estimate = None
+    qdii_quote_coverage = 0.0
+    qdii_missing_quote_weight = 0.0
+    if is_qdii:
+        qdii_total_weight = qdii_total_weight if qdii_total_weight > 0 else max(stock_weight or 0.0, published_total_weight)
+        qdii_quote_coverage = qdii_covered_weight / qdii_total_weight if qdii_total_weight > 0 else 0.0
+        qdii_missing_quote_weight = max(qdii_total_weight - qdii_covered_weight, 0.0)
+        qdii_partial_estimate = qdii_cn_component + qdii_foreign_component + qdii_fx_component
+        qdii_status_text, qdii_status_message, qdii_snapshot_type = qdii_status(
+            quote_time or datetime.now(),
+            qdii_quote_coverage,
+            qdii_foreign_total_weight,
+            qdii_foreign_covered_weight,
+        )
+        if qdii_quote_coverage >= QDII_MIN_QUOTE_COVERAGE and qdii_status_text != "海外未开盘":
+            qdii_full_estimate = qdii_partial_estimate
+        else:
+            best_estimate = None
+            estimated_today_profit = None
+            data_warning = qdii_status_text
+            best_status = "qdii_partial"
+            error_band = {"error_band_pct": None, "error_band_label": qdii_status_text, "confidence_text": qdii_status_text}
+        if qdii_full_estimate is not None:
+            best_estimate = qdii_full_estimate
+            if holding_amount is not None:
+                estimated_today_profit = holding_amount * qdii_full_estimate
 
     return LiveFundEstimateResult(
         fund_code=fund_code,
@@ -1084,6 +1235,28 @@ def compute_live_fund_estimate(
         error_band_pct=error_band["error_band_pct"],
         error_band_label=str(error_band["error_band_label"]),
         confidence_text=str(error_band["confidence_text"]),
+        is_qdii=is_qdii,
+        qdii_status=qdii_status_text,
+        qdii_status_message=qdii_status_message,
+        qdii_snapshot_type=qdii_snapshot_type,
+        qdii_cn_component=round(qdii_cn_component, 8),
+        qdii_foreign_component=round(qdii_foreign_component, 8),
+        qdii_fx_component=round(qdii_fx_component, 8),
+        qdii_partial_estimate=None if qdii_partial_estimate is None else round(qdii_partial_estimate, 8),
+        qdii_full_estimate=None if qdii_full_estimate is None else round(qdii_full_estimate, 8),
+        qdii_quote_coverage=round(qdii_quote_coverage, 8),
+        qdii_missing_quote_weight=round(qdii_missing_quote_weight, 8),
+        enhanced_holdings_estimate=None if enhanced_estimate is None else round(enhanced_estimate, 8),
+        enhanced_single_scale_estimate=None if enhanced_single_scale_estimate is None else round(enhanced_single_scale_estimate, 8),
+        enhanced_enabled=enhanced_enabled,
+        enhanced_sample_count=int(enhanced_stats.get("sample_count") or 0),
+        enhanced_top10_mae=enhanced_stats.get("top10_mae"),
+        enhanced_mae=enhanced_stats.get("enhanced_mae"),
+        enhanced_total_weight=None if enhanced_version is None else round(enhanced_version.total_weight, 8),
+        enhanced_covered_weight=None if enhanced_version is None else round(enhanced_covered_weight, 8),
+        enhanced_core_count=enhanced_core_count,
+        enhanced_extended_count=enhanced_extended_count,
+        enhanced_source_summary=enhanced_source_summary,
     )
 
 
@@ -1093,6 +1266,7 @@ def compute_live_fund_estimates(
     trade_date: date,
     quote_time: datetime | None = None,
     fund_code: str | None = None,
+    fund_codes: set[str] | list[str] | None = None,
     selection_window: int = 20,
     min_samples: int = 10,
     min_improvement_bps: int = 5,
@@ -1104,6 +1278,11 @@ def compute_live_fund_estimates(
     stmt = select(Fund).where(Fund.is_active.is_(True)).order_by(Fund.fund_code.asc())
     if fund_code:
         stmt = stmt.where(Fund.fund_code == fund_code)
+    elif fund_codes:
+        codes = [str(code) for code in fund_codes if code]
+        if not codes:
+            return []
+        stmt = stmt.where(Fund.fund_code.in_(codes))
     results: list[LiveFundEstimateResult] = []
     for fund in session.scalars(stmt).all():
         result = compute_live_fund_estimate(
@@ -1124,19 +1303,55 @@ def compute_live_fund_estimates(
         if result is not None:
             results.append(result)
             # 保存实时估值快照（含所有模型值 + ensemble），校准直接使用，不再重算
-            _upsert_live_fund_estimate(session, result)
+            _upsert_live_fund_estimate(session, result, commit=False)
+    session.commit()
     return results
 
 
-def _upsert_live_fund_estimate(session: Session, result: LiveFundEstimateResult) -> None:
-    from .models import FundEstimate
+def _upsert_live_fund_estimate(session: Session, result: LiveFundEstimateResult, commit: bool = True) -> None:
+    from .models import FundEstimate, QdiiValuationSnapshot
     import json
+    if result.is_qdii:
+        valuation_date = qdii_snapshot_valuation_date(
+            result.quote_time or datetime.now(),
+            result.qdii_snapshot_type,
+        )
+        existing_snapshot = session.scalar(
+            select(QdiiValuationSnapshot).where(
+                QdiiValuationSnapshot.fund_code == result.fund_code,
+                QdiiValuationSnapshot.valuation_date == valuation_date,
+                QdiiValuationSnapshot.snapshot_type == (result.qdii_snapshot_type or "foreign_live"),
+            )
+        )
+        if existing_snapshot is None:
+            existing_snapshot = QdiiValuationSnapshot(
+                fund_code=result.fund_code,
+                valuation_date=valuation_date,
+                snapshot_type=result.qdii_snapshot_type or "foreign_live",
+                snapshot_time=result.quote_time or datetime.now(UTC).replace(tzinfo=None),
+            )
+            session.add(existing_snapshot)
+        existing_snapshot.snapshot_time = result.quote_time or datetime.now(UTC).replace(tzinfo=None)
+        existing_snapshot.cn_component = result.qdii_cn_component
+        existing_snapshot.foreign_component = result.qdii_foreign_component
+        existing_snapshot.fx_component = result.qdii_fx_component
+        existing_snapshot.partial_estimate = result.qdii_partial_estimate or 0.0
+        existing_snapshot.full_estimate = result.qdii_full_estimate
+        existing_snapshot.quote_coverage = result.qdii_quote_coverage
+        existing_snapshot.missing_quote_weight = result.qdii_missing_quote_weight
+        existing_snapshot.status = result.qdii_status or ""
+        if commit:
+            session.commit()
+        return
+
     existing = session.get(FundEstimate, {"trade_date": result.trade_date, "fund_code": result.fund_code})
     snapshot = json.dumps({
         "current_estimate": result.current_estimate,
         "coverage_adjusted": result.coverage_adjusted_estimate,
         "single_scale": result.single_scale_estimate,
         "two_factor": result.two_factor_estimate,
+        "enhanced_holdings": result.enhanced_holdings_estimate,
+        "enhanced_single_scale": result.enhanced_single_scale_estimate,
         "calibrated": result.calibrated_estimate,
     })
     if existing is not None:
@@ -1154,7 +1369,8 @@ def _upsert_live_fund_estimate(session: Session, result: LiveFundEstimateResult)
             missing_weight=result.missing_weight,
             missing_assets_json=snapshot,
         ))
-    session.commit()
+    if commit:
+        session.commit()
 
 
 def build_fund_estimates(

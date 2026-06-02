@@ -9,10 +9,10 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.frontend_app import app, build_home_rows, load_live_estimate_bundle
+from src.frontend_app import app, build_home_rows, load_live_estimate_bundle, split_home_rows, split_qdii_rows
 from src.init_db import init_db
 from src.db import get_session_factory
-from src.import_data import import_funds_from_rows
+from src.import_data import import_asset_allocations_from_rows, import_funds_from_rows, import_holdings_from_rows
 from src.web_services import load_fund_rows, save_watchlist_rows, save_user_position_rows
 from src.backfill import fetch_and_store_stock_quotes
 from tests.test_stage4 import make_mock_source, seed_fund_holdings_and_allocations
@@ -294,3 +294,64 @@ def test_home_rows_hide_stale_close_after_realtime_quote_starts():
     assert row["actual_return_available"] is False
     assert row["profit_return_source"] == "estimate"
     assert abs(row["estimated_today_profit"] - 39.0) < 0.01
+
+
+def test_qdii_rows_use_observation_mode_and_skip_a_share_board(tmp_path):
+    session_factory = create_session_factory(tmp_path)
+    with session_factory() as session:
+        import_funds_from_rows(session, [{
+            "fund_code": "016665",
+            "fund_name": "天弘全球高端制造QDII C",
+            "fund_type": "QDII",
+            "market": "海外",
+            "is_active": True,
+        }])
+        import_holdings_from_rows(session, [
+            {"fund_code": "016665", "report_date": "2026-03-31", "source": "manual", "asset_code": "300308.SZ", "asset_name": "中际旭创", "asset_type": "stock", "weight_pct": 10},
+            {"fund_code": "016665", "report_date": "2026-03-31", "source": "manual", "asset_code": "300502.SZ", "asset_name": "新易盛", "asset_type": "stock", "weight_pct": 10},
+            {"fund_code": "016665", "report_date": "2026-03-31", "source": "manual", "asset_code": "300476.SZ", "asset_name": "胜宏科技", "asset_type": "stock", "weight_pct": 10},
+            {"fund_code": "016665", "report_date": "2026-03-31", "source": "manual", "asset_code": "NVDA", "asset_name": "NVDA", "asset_type": "stock", "weight_pct": 10},
+            {"fund_code": "016665", "report_date": "2026-03-31", "source": "manual", "asset_code": "AVGO", "asset_name": "AVGO", "asset_type": "stock", "weight_pct": 10},
+            {"fund_code": "016665", "report_date": "2026-03-31", "source": "manual", "asset_code": "TSM", "asset_name": "TSM", "asset_type": "stock", "weight_pct": 10},
+            {"fund_code": "016665", "report_date": "2026-03-31", "source": "manual", "asset_code": "TSEM", "asset_name": "TSEM", "asset_type": "stock", "weight_pct": 10},
+            {"fund_code": "016665", "report_date": "2026-03-31", "source": "manual", "asset_code": "LITE", "asset_name": "LITE", "asset_type": "stock", "weight_pct": 10},
+            {"fund_code": "016665", "report_date": "2026-03-31", "source": "manual", "asset_code": "COHR", "asset_name": "COHR", "asset_type": "stock", "weight_pct": 10},
+            {"fund_code": "016665", "report_date": "2026-03-31", "source": "manual", "asset_code": "JP3684400009", "asset_name": "Lasertec", "asset_type": "stock", "weight_pct": 10},
+        ])
+        import_asset_allocations_from_rows(session, [{
+            "fund_code": "016665",
+            "report_date": "2026-03-31",
+            "source": "manual",
+            "stock_weight_pct": 100,
+            "bond_weight_pct": 0,
+            "cash_weight_pct": 0,
+            "other_weight_pct": 0,
+        }])
+        save_user_position_rows(session, [{"fund_code": "016665", "holding_amount": 1000.0, "is_active": True}])
+
+        from src.estimator import compute_live_fund_estimates
+        results = compute_live_fund_estimates(
+            session=session,
+            live_quotes={
+                "300308.SZ": {"return_pct": -0.01},
+                "300502.SZ": {"return_pct": 0.02},
+                "300476.SZ": {"return_pct": -0.02},
+            },
+            trade_date=date.fromisoformat("2026-06-02"),
+            quote_time=datetime(2026, 6, 2, 10, 0),
+            fund_code="016665",
+        )
+
+    result = results[0]
+    assert result.is_qdii is True
+    assert result.qdii_full_estimate is None
+    assert result.qdii_status == "海外未开盘"
+    assert round(result.qdii_quote_coverage, 2) == 0.30
+
+    rows = build_home_rows(results)
+    holding_rows, watch_rows, other_rows = split_home_rows(rows)
+    qdii_rows = split_qdii_rows(rows)
+    assert not holding_rows and not watch_rows and not other_rows
+    assert len(qdii_rows) == 1
+    assert qdii_rows[0]["current_estimate_text"].startswith("已覆盖")
+    assert qdii_rows[0]["estimated_today_profit"] is None

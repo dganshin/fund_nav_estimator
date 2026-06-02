@@ -36,6 +36,7 @@ from src.calibration import (
     run_online_calibration,
 )
 from src.data_sources.base import FundNavRecord, FundProfile, StockQuoteRecord
+from src.enhanced_holdings import build_enhanced_holding_version, should_use_enhanced_holdings
 from src.onboarding import _find_target_etf, _known_etf_feeder_target, ensure_fund_full_onboarded
 from src.frontend_app import app
 from src.init_db import init_db
@@ -50,6 +51,7 @@ from src.models import (
     Fund,
     TaskRun,
     UserFundPositionEvent,
+    FundAssetAllocation,
 )
 from src.tasks import sync_daily_all_funds
 from tests.test_stage4 import seed_fund_holdings_and_allocations
@@ -83,6 +85,62 @@ def seed_with_actual_return(tmp_path, session):
     )
     session.add(ar)
     session.commit()
+
+
+def test_enhanced_holdings_builds_extended_pool_and_validates(tmp_path):
+    sf = make_db(tmp_path)
+
+    class Source:
+        def fetch_fund_holdings_all_reports(self, fund_code, years):
+            return [
+                {"季度": "2026年1季度", "股票代码": "600000", "股票名称": "核心A", "占净值比例": 20.0},
+                {"季度": "2025年4季度", "股票代码": "600010", "股票名称": "扩展B", "占净值比例": 10.0},
+                {"季度": "2025年2季度", "股票代码": "600020", "股票名称": "扩展C", "占净值比例": 8.0},
+            ]
+
+    with sf() as session:
+        session.add(Fund(fund_code="009001", fund_name="增强测试", fund_type="equity", market="CN", is_active=True))
+        hv = HoldingVersion(
+            fund_code="009001",
+            report_date=date(2026, 3, 31),
+            source="test",
+            total_weight=0.2,
+            is_active=True,
+        )
+        session.add(hv)
+        session.flush()
+        hv.items.append(HoldingItem(asset_code="600000.SH", asset_name="核心A", asset_type="stock", weight=0.2))
+        session.add(FundAssetAllocation(fund_code="009001", report_date=date(2026, 3, 31), source="test", stock_weight=0.5, cash_weight=0.5, is_active=True))
+        session.flush()
+        ev = build_enhanced_holding_version(session, "009001", Source(), years=[2026, 2025])
+        assert ev is not None
+        assert len(ev.items) == 3
+        assert sum(1 for item in ev.items if item.is_extended) == 2
+        assert ev.total_weight <= 0.5 + 1e-9
+
+        for i in range(5):
+            session.add(CalibrationResidual(
+                fund_code="009001",
+                holding_version_id=hv.id,
+                trade_date=date(2026, 5, 1 + i),
+                actual_return=0.01,
+                known_estimate=0.0,
+                unknown_estimate=0.0,
+                base_estimate=0.0,
+                coverage_adjusted_estimate=0.0,
+                enhanced_holdings_estimate=0.0098,
+                raw_estimate=0.0,
+                calibrated_estimate=0.0,
+                effective_estimate=0.0,
+                residual=0.0,
+                abs_residual=0.0,
+                scale_used_before_update=1.0,
+                is_used_for_update=True,
+                skip_reason="",
+            ))
+        session.commit()
+        stats = should_use_enhanced_holdings(session, "009001", hv.id)
+        assert stats["enabled"] is True
 
 
 def test_sync_daily_skips_per_fund_nav_when_already_calibrated(tmp_path, monkeypatch):
