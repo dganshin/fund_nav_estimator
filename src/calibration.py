@@ -257,7 +257,11 @@ def _compute_features_from_daily_quotes(
 
     # 1. 优先使用实时估值快照（与用户盘中看到的数据完全一致）
     saved = session.get(FundEstimate, {"trade_date": trade_date, "fund_code": holding_version.fund_code})
-    if saved is not None and saved.raw_estimate != 0.0:
+    if (
+        saved is not None
+        and saved.holding_version_id == holding_version.id
+        and saved.raw_estimate != 0.0
+    ):
         return CalibrationFeatures(
             known_estimate=saved.raw_estimate,
             unknown_estimate=max((stock_weight or 0.0) - covered_weight, 0.0)
@@ -801,7 +805,12 @@ def run_online_calibration(
     import json as _json
     from .models import FundEstimate as _FE
     _snap_row = session.get(_FE, {"trade_date": calibration_date, "fund_code": fund_code})
-    if _snap_row is not None and _snap_row.missing_assets_json and _snap_row.missing_assets_json.startswith("{"):
+    if (
+        _snap_row is not None
+        and _snap_row.holding_version_id == holding_version.id
+        and _snap_row.missing_assets_json
+        and _snap_row.missing_assets_json.startswith("{")
+    ):
         try:
             _snap = _json.loads(_snap_row.missing_assets_json)
             # 每项只在快照有明确值时覆盖，否则保留Walk-Forward重算结果

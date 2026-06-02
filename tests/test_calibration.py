@@ -38,6 +38,7 @@ from src.calibration import (
 from src.data_sources.base import FundNavRecord, FundProfile, StockQuoteRecord
 from src.enhanced_holdings import build_enhanced_holding_version, should_use_enhanced_holdings
 from src.onboarding import _find_target_etf, _known_etf_feeder_target, ensure_fund_full_onboarded
+from src.qdii import classify_asset_market
 from src.frontend_app import app
 from src.init_db import init_db
 from src.db import get_session_factory
@@ -585,6 +586,30 @@ def test_known_etf_feeder_target_fallback_handles_fund_code_only():
     assert target is not None
     assert target["asset_code"] == "516650.SH"
     assert target["asset_name"] == "有色金属ETF华夏"
+
+
+def test_known_etf_feeder_target_covers_watchlist_problem_funds():
+    expected = {
+        "017470": "588200.SH",
+        "007818": "515880.SH",
+        "008087": "515050.SH",
+        "012620": "159852.SZ",
+        "017854": "516510.SH",
+        "020274": "516120.SH",
+        "012895": "159603.SZ",
+    }
+
+    for fund_code, asset_code in expected.items():
+        target = _known_etf_feeder_target(fund_code)
+        assert target is not None
+        assert target["asset_code"] == asset_code
+
+
+def test_qdii_asia_aliases_are_not_classified_as_cn_market():
+    assert classify_asset_market("005930.SZ") == ("KR", "KRW")
+    assert classify_asset_market("000660.SZ") == ("KR", "KRW")
+    assert classify_asset_market("2454") == ("TW", "TWD")
+    assert classify_asset_market("JP3684400009") == ("JP", "JPY")
 
 
 def test_missing_holdings_home_row_shows_status_not_zero(tmp_path):

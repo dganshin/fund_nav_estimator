@@ -5,7 +5,19 @@ from datetime import date, datetime, time, timedelta
 
 QDII_MIN_QUOTE_COVERAGE = 0.70
 CN_MARKETS = {"SH", "SZ", "BJ"}
-FOREIGN_MARKETS = {"US", "HK", "JP", "OTHER"}
+FOREIGN_MARKETS = {"US", "HK", "JP", "TW", "KR", "OTHER"}
+KNOWN_FOREIGN_CODE_MARKETS = {
+    "000660.SZ": ("KR", "KRW"),
+    "005930.SZ": ("KR", "KRW"),
+    "2308": ("TW", "TWD"),
+    "2317": ("TW", "TWD"),
+    "2330": ("TW", "TWD"),
+    "2345": ("TW", "TWD"),
+    "2383": ("TW", "TWD"),
+    "2454": ("TW", "TWD"),
+    "373220KS": ("KR", "KRW"),
+    "4062JP.BJ": ("JP", "JPY"),
+}
 
 
 def is_qdii_text(*values: object) -> bool:
@@ -25,6 +37,8 @@ def is_qdii_fund(fund) -> bool:
 
 def classify_asset_market(asset_code: str) -> tuple[str, str]:
     code = str(asset_code or "").strip().upper()
+    if code in KNOWN_FOREIGN_CODE_MARKETS:
+        return KNOWN_FOREIGN_CODE_MARKETS[code]
     if "." in code:
         _, market = code.rsplit(".", 1)
         market = market.upper()
@@ -38,6 +52,10 @@ def classify_asset_market(asset_code: str) -> tuple[str, str]:
             return "US", "USD"
     if code.startswith("JP") and len(code) >= 10:
         return "JP", "JPY"
+    if code.isdigit() and len(code) == 4:
+        return "TW", "TWD"
+    if code.endswith("KS") and code[:-2].isdigit():
+        return "KR", "KRW"
     if code.isalpha() and 1 <= len(code) <= 5:
         return "US", "USD"
     return "OTHER", "USD"

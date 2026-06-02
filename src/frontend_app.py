@@ -178,6 +178,29 @@ CONFIDENCE_RANK = {"A": 4, "B": 3, "C": 2, "D": 1, None: 0}
 LIVE_BUNDLE_CACHE: dict[str, tuple[float, tuple]] = {}
 LIVE_BUNDLE_TTL = 0.8
 
+
+def get_active_holding_version_ids(session, fund_codes: list[str]) -> dict[str, int]:
+    if not fund_codes:
+        return {}
+    rows = (
+        session.query(HoldingVersion)
+        .filter(
+            HoldingVersion.fund_code.in_(fund_codes),
+            HoldingVersion.is_active.is_(True),
+        )
+        .order_by(
+            HoldingVersion.fund_code.asc(),
+            HoldingVersion.report_date.desc(),
+            HoldingVersion.created_at.desc(),
+        )
+        .all()
+    )
+    result: dict[str, int] = {}
+    for row in rows:
+        result.setdefault(row.fund_code, row.id)
+    return result
+
+
 # ── Intraday Realtime Time-Series ────────────────────────────────────────────
 # 记录每次 bundle 刷新时的估值快照，按交易时段存储
 # 格式: {fund_code: [{"t": "10:03:15", "pct": 1.23}]}
@@ -315,6 +338,30 @@ def next_business_date(base_date: date | None = None) -> date:
     return d
 
 
+def previous_business_date(base_date: date | None = None) -> date:
+    d = (base_date or date.today()) - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def profit_session_date(now: datetime | None = None) -> date:
+    current_time = now or datetime.now()
+    if current_time.time() < MARKET_OPEN_TIME:
+        return previous_business_date(current_time.date())
+    return current_time.date()
+
+
+def profit_period_label(now: datetime | None = None) -> str:
+    current_time = now or datetime.now()
+    return "上一收益" if current_time.time() < MARKET_OPEN_TIME else "当日收益"
+
+
+def qdii_profit_period_label(now: datetime | None = None) -> str:
+    current_time = now or datetime.now()
+    return "QDII次日收益" if current_time.time() < MARKET_OPEN_TIME else "QDII当日收益"
+
+
 def safe_float(v, default: float = 0.0) -> float:
     try:
         if v is None:
@@ -334,7 +381,7 @@ def load_position_profit_context(
     - 今日手工买入 / 卖出 / 清仓 / 修改金额可按 effective_date 控制是否参与今日盈亏；
     - 今日盈亏用 profit_base_amount_today 计算，排除今天新增、但仍计入今天未生效的卖出/清仓前金额。
     """
-    today = today or date.today()
+    today = today or profit_session_date()
     codes = list(dict.fromkeys(str(c) for c in fund_codes if c))
     if not codes:
         return {}
@@ -357,7 +404,6 @@ def load_position_profit_context(
     events = session.scalars(
         select(UserFundPositionEvent).where(
             UserFundPositionEvent.fund_code.in_(codes),
-            UserFundPositionEvent.trade_date == today,
             UserFundPositionEvent.effective_date.is_not(None),
             UserFundPositionEvent.effective_date > today,
         )
@@ -809,12 +855,18 @@ def get_compare_residuals(session, fund_codes: list[str]) -> dict:
         return {}
     from sqlalchemy import func
 
+    active_version_ids = get_active_holding_version_ids(session, fund_codes)
+    if not active_version_ids:
+        return {}
     subq = (
         session.query(
             CalibrationResidual.fund_code,
             func.max(CalibrationResidual.trade_date).label("max_date"),
         )
-        .filter(CalibrationResidual.fund_code.in_(fund_codes))
+        .filter(
+            CalibrationResidual.fund_code.in_(fund_codes),
+            CalibrationResidual.holding_version_id.in_(active_version_ids.values()),
+        )
         .group_by(CalibrationResidual.fund_code)
         .subquery()
     )
@@ -838,19 +890,15 @@ def select_visible_actual_return(
     quote_time: datetime | None = None,
     now: datetime | None = None,
 ) -> tuple[float | None, date | None]:
-    """行情仍是前收缓存时, 保留同日实际收盘用于对比。"""
+    """9:30 前使用上一收益日, 9:30 后才进入当日收益。"""
     if not residual:
         return None, None
 
     current_time = now or datetime.now()
+    session_date = profit_session_date(current_time)
     residual_date = residual.trade_date
-    quote_date = quote_time.date() if quote_time else None
 
-    if quote_date and residual_date == quote_date:
-        return residual.actual_return, residual_date
-    if residual_date == current_time.date():
-        return residual.actual_return, residual_date
-    if current_time.time() < MARKET_OPEN_TIME and residual_date < current_time.date():
+    if residual_date == session_date:
         return residual.actual_return, residual_date
     return None, None
 
@@ -861,6 +909,9 @@ def actual_return_source_label(
     if actual_return_date is None:
         return "实时估值涨跌"
     current_time = now or datetime.now()
+    session_date = profit_session_date(current_time)
+    if actual_return_date == session_date and current_time.time() < MARKET_OPEN_TIME:
+        return "上一收益实际涨跌"
     if actual_return_date == current_time.date():
         return "今日实际涨跌"
     return "最近收盘涨跌"
@@ -871,15 +922,19 @@ def select_qdii_profit_return(
     residual,
     now: datetime | None = None,
 ) -> tuple[float | None, date | None, str]:
-    """QDII 今日收益用上一估值日官方涨跌, 未公布时才用昨夜收盘估值。"""
+    """QDII 昨夜估值归次日收益, 9:30 后改口为当日收益。"""
     current_time = now or datetime.now()
-    if residual is not None and residual.trade_date <= current_time.date():
-        return residual.actual_return, residual.trade_date, "QDII最近官方涨跌"
+    session_date = profit_session_date(current_time)
+    period_label = qdii_profit_period_label(current_time)
+    if residual is not None and residual.trade_date == session_date:
+        return residual.actual_return, residual.trade_date, f"{period_label}官方涨跌"
     if (
         getattr(result, "qdii_snapshot_type", None) == "foreign_close"
         and getattr(result, "qdii_full_estimate", None) is not None
     ):
-        return getattr(result, "qdii_full_estimate", None), None, "QDII昨夜收盘估值"
+        return getattr(result, "qdii_full_estimate", None), session_date, f"{period_label}估值"
+    if getattr(result, "qdii_full_estimate", None) is not None:
+        return getattr(result, "qdii_full_estimate", None), session_date, f"{period_label}估值"
     return None, None, "QDII等待官方净值"
 
 
@@ -990,6 +1045,9 @@ def build_home_rows(
                 if actual_return_today is not None
                 else ("qdii_full_estimate" if is_qdii else "estimate"),
                 "profit_return_source_label": profit_return_label,
+                "profit_period_label": profit_period_label(now),
+                "qdii_profit_period_label": qdii_profit_period_label(now),
+                "profit_session_date": profit_session_date(now).isoformat(),
                 "confidence_level": item.confidence_level or "D",
                 "error_band_pct": item.error_band_pct,
                 "error_band_label": status_text,
@@ -1241,6 +1299,9 @@ def build_detail_context(
         "profit_return_source_label": actual_return_source_label(
             actual_return_date, now
         ) if not is_qdii else profit_return_label,
+        "profit_period_label": profit_period_label(now),
+        "qdii_profit_period_label": qdii_profit_period_label(now),
+        "profit_session_date": profit_session_date(now).isoformat(),
         "confidence_level": result.confidence_level or "D",
         "error_band_label": detail_error_band_label(result),
         "reliability": reliability_from_error(
@@ -1364,6 +1425,9 @@ def index(
     refresh: str = Query("off"),
     force: int = Query(0),
 ):
+    now = datetime.now()
+    session_date = profit_session_date(now)
+    period_label = profit_period_label(now)
     results, status_message, used_fallback = load_live_estimate_bundle(
         force_refresh=bool(force)
     )
@@ -1378,7 +1442,7 @@ def index(
             for r in load_watchlist_rows(session)
             if r.get("is_active")
         }
-        position_context = load_position_profit_context(session, fund_codes)
+        position_context = load_position_profit_context(session, fund_codes, today=session_date)
 
         tasks_query = (
             session.execute(
@@ -1397,7 +1461,7 @@ def index(
             for t in tasks_query
         ]
 
-    rows = build_home_rows(results, residuals_map, position_context, watchlist_codes)
+    rows = build_home_rows(results, residuals_map, position_context, watchlist_codes, now=now)
 
     if search.strip():
         kw = search.strip().lower()
@@ -1464,6 +1528,9 @@ def index(
             "estimate_date": estimate_date,
             "active_tasks": active_tasks,
             "today_label": date.today().isoformat(),
+            "profit_session_date": session_date.isoformat(),
+            "profit_period_label": period_label,
+            "qdii_profit_period_label": qdii_profit_period_label(now),
         },
     )
 
@@ -1471,6 +1538,8 @@ def index(
 @app.get("/api/fund-intraday/{fund_code}")
 def api_fund_intraday(fund_code: str):
     """返回某只基金今日盘中实时估值走势（每次刷新记录一个快照）。"""
+    if datetime.now().time() < MARKET_OPEN_TIME:
+        return JSONResponse({"fund_code": fund_code, "holding_amount": 0, "points": []})
     with INTRADAY_LOCK:
         points = list(INTRADAY_SERIES.get(fund_code, []))
 
@@ -1495,6 +1564,8 @@ def api_fund_intraday(fund_code: str):
 @app.get("/api/portfolio-intraday")
 def api_portfolio_intraday():
     """返回持仓组合今日盘中加权估值走势。"""
+    if datetime.now().time() < MARKET_OPEN_TIME:
+        return JSONResponse({"points": [], "total_holding": 0})
     session_factory = get_cached_session_factory()
     with session_factory() as session:
         positions = session.scalars(
@@ -1548,9 +1619,14 @@ def api_fund_chart(fund_code: str, days: int = Query(30)):
     """返回某只基金最近 N 个交易日的实际涨跌 + 估值历史（用于首页图表）。"""
     session_factory = get_cached_session_factory()
     with session_factory() as session:
+        active_version_ids = get_active_holding_version_ids(session, [fund_code])
+        active_version_id = active_version_ids.get(fund_code)
         rows = session.scalars(
             select(CalibrationResidual)
-            .where(CalibrationResidual.fund_code == fund_code)
+            .where(
+                CalibrationResidual.fund_code == fund_code,
+                CalibrationResidual.holding_version_id == active_version_id,
+            )
             .order_by(CalibrationResidual.trade_date.desc())
             .limit(days)
         ).all()
@@ -1592,12 +1668,16 @@ def api_portfolio_chart(days: int = Query(30)):
             return JSONResponse({"points": []})
 
         fund_codes = list(holding_map.keys())
+        active_version_ids = get_active_holding_version_ids(session, fund_codes)
+        if not active_version_ids:
+            return JSONResponse({"points": []})
 
         # 获取所有相关基金的残差记录
         rows = session.scalars(
             select(CalibrationResidual)
             .where(
                 CalibrationResidual.fund_code.in_(fund_codes),
+                CalibrationResidual.holding_version_id.in_(active_version_ids.values()),
                 CalibrationResidual.actual_return.isnot(None),
             )
             .order_by(CalibrationResidual.trade_date.desc())
@@ -1640,6 +1720,8 @@ def api_live_estimates(
     search: str = Query(""),
     sort: str = Query("estimate_desc"),
 ):
+    now = datetime.now()
+    session_date = profit_session_date(now)
     try:
         results, status_message, used_fallback = load_live_estimate_bundle()
     except Exception as exc:
@@ -1669,9 +1751,9 @@ def api_live_estimates(
             for r in load_watchlist_rows(session)
             if r.get("is_active")
         }
-        position_context = load_position_profit_context(session, fund_codes)
+        position_context = load_position_profit_context(session, fund_codes, today=session_date)
 
-    rows = build_home_rows(results, residuals_map, position_context, watchlist_codes)
+    rows = build_home_rows(results, residuals_map, position_context, watchlist_codes, now=now)
 
     if search.strip():
         kw = search.strip().lower()
@@ -1724,6 +1806,9 @@ def api_live_estimates(
             "status_message": status_message,
             "latest_time": latest_time,
             "data_mode": data_mode,
+            "profit_session_date": session_date.isoformat(),
+            "profit_period_label": profit_period_label(now),
+            "qdii_profit_period_label": qdii_profit_period_label(now),
         }
     )
 
@@ -1738,8 +1823,9 @@ def exposure(request: Request, sort: str = Query("amount_desc")):
 
     session_factory = get_cached_session_factory()
     with session_factory() as session:
+        now = datetime.now()
         position_context = load_position_profit_context(
-            session, [r.fund_code for r in results]
+            session, [r.fund_code for r in results], today=profit_session_date(now)
         )
 
     exposure_data = build_exposure_rows(results, position_context, sort)
@@ -1788,7 +1874,10 @@ def fund_detail(request: Request, fund_code: str, debug: int = 0, msg: str = "")
         holding_report_date = (
             None if active_holding is None else active_holding.report_date
         )
-        position_context = load_position_profit_context(session, [fund_code]).get(
+        now_for_profit = datetime.now()
+        position_context = load_position_profit_context(
+            session, [fund_code], today=profit_session_date(now_for_profit)
+        ).get(
             fund_code, {}
         )
         latest_residual = get_compare_residuals(session, [fund_code]).get(fund_code)

@@ -53,7 +53,7 @@
       <div style="font-size:18px; font-weight:800; color:#334155;">¥{{ detail.holding_amount }}</div>
     </div>
     <div>
-      <div class="metric-label">今日估算盈亏</div>
+      <div class="metric-label">{% if detail.is_qdii %}{{ detail.qdii_profit_period_label }}{% else %}{{ detail.profit_period_label }}{% endif %}</div>
       <div class="metric-value {{ detail.estimated_today_profit_tone }}">{{ detail.estimated_today_profit_text }}</div>
       <div style="font-size:12px; color:#94a3b8; margin-top:2px;">
         口径：{{ detail.profit_return_source_label }}；参与金额 ¥{{ detail.profit_base_amount_today }}
@@ -95,7 +95,7 @@
 
   {% if detail.has_pending_today_event %}
   <div class="status-bar" style="margin-top:10px; margin-bottom:0; color:#1e40af; background:#eff6ff; border-color:#bfdbfe;">
-    今日有手工交易记录：持有总金额已更新，但新增/减少金额从下一交易日开始影响“今日盈亏”。
+    当前有未生效交易记录：持有总金额已更新，但新增/减少金额从下一交易日开始影响收益。
   </div>
   {% endif %}
 

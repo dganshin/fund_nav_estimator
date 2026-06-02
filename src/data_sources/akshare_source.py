@@ -16,6 +16,22 @@ from .base import DataSourceError, FundNavRecord, FundProfile, LiveStockQuoteRec
 from .code_utils import normalize_asset_code, to_plain_symbol, to_prefixed_symbol
 
 
+YAHOO_QUOTE_ALIASES: dict[str, str] = {
+    "000660.SZ": "000660.KS",  # SK海力士
+    "005930.SZ": "005930.KS",  # 三星电子
+    "2308": "2308.TW",
+    "2317": "2317.TW",
+    "2330": "2330.TW",
+    "2345": "2345.TW",
+    "2383": "2383.TW",
+    "2454": "2454.TW",
+    "373220KS": "373220.KS",
+    "4062JP.BJ": "4062.T",
+    "JP3122400009": "6857.T",  # 爱德万测试
+    "JP3684400009": "3110.T",  # Nitto Boseki
+}
+
+
 class AKShareDataSource:
     def __init__(self, raw_dir: str | Path | None = None) -> None:
         self.raw_dir = Path(raw_dir) if raw_dir else Path(__file__).resolve().parents[2] / "data" / "raw" / "akshare"
@@ -316,14 +332,35 @@ class AKShareDataSource:
         code = normalize_asset_code(asset_code)
         return "." not in code and code.isalpha() and 1 <= len(code) <= 5
 
+    def _to_yahoo_symbol(self, asset_code: str) -> str | None:
+        normalized = normalize_asset_code(asset_code)
+        alias = YAHOO_QUOTE_ALIASES.get(normalized) or YAHOO_QUOTE_ALIASES.get(str(asset_code).strip().upper())
+        if alias:
+            return alias
+        if self._looks_like_us_symbol(normalized):
+            return normalized
+        if normalized.isdigit() and len(normalized) == 4:
+            return f"{normalized}.TW"
+        if normalized.endswith("KS") and normalized[:-2].isdigit():
+            return f"{normalized[:-2]}.KS"
+        if normalized.endswith("JP") and normalized[:-2].isdigit():
+            return f"{normalized[:-2]}.T"
+        return None
+
     def _fetch_us_live_quotes_from_yahoo(
         self,
         asset_codes: list[str],
         timeout_seconds: float,
     ) -> list[LiveStockQuoteRecord]:
-        symbols = [normalize_asset_code(code) for code in asset_codes if self._looks_like_us_symbol(code)]
+        symbol_pairs = [
+            (normalize_asset_code(code), symbol)
+            for code in asset_codes
+            if (symbol := self._to_yahoo_symbol(code))
+        ]
+        symbols = list(dict.fromkeys(symbol for _, symbol in symbol_pairs))
         if not symbols:
             return []
+        reverse_map = {symbol: original for original, symbol in symbol_pairs}
         records: list[LiveStockQuoteRecord] = []
         now = datetime.now()
 
@@ -367,7 +404,7 @@ class AKShareDataSource:
                 return LiveStockQuoteRecord(
                     trade_date=now.date(),
                     quote_time=now,
-                    asset_code=symbol,
+                    asset_code=reverse_map.get(symbol, symbol),
                     asset_name=str(meta.get("symbol") or symbol),
                     return_pct=float(latest) / float(prev_close) - 1.0,
                     source="yahoo:chart_live",
@@ -407,6 +444,8 @@ class AKShareDataSource:
     def _asset_code_to_eastmoney_secid(self, asset_code: str) -> str | None:
         """将资产代码转为东财 secid 格式。"""
         normalized = normalize_asset_code(asset_code)
+        if normalized in YAHOO_QUOTE_ALIASES or str(asset_code).strip().upper() in YAHOO_QUOTE_ALIASES:
+            return None
         if "." not in normalized:
             if self._looks_like_us_symbol(normalized):
                 return f"105.{normalized}"
@@ -529,6 +568,8 @@ class AKShareDataSource:
         symbols = []
         for asset_code in asset_codes:
             normalized = normalize_asset_code(asset_code)
+            if normalized in YAHOO_QUOTE_ALIASES or str(asset_code).strip().upper() in YAHOO_QUOTE_ALIASES:
+                continue
             if self._looks_like_us_symbol(normalized):
                 symbols.append(f"us{normalized.upper()}")
             else:

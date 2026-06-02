@@ -7,7 +7,7 @@
     <div class="fund-name">{{ row.fund_name }}</div>
     <div class="fund-sub">
       {{ row.fund_code }} · 持有 · {{ row.quote_time }}
-      {% if row.has_pending_today_event %} · 今日交易下个交易日计盈亏{% endif %}
+      {% if row.has_pending_today_event %} · 当前交易下个交易日计盈亏{% endif %}
     </div>
   </div>
   <div class="fund-value {{ row.estimate_tone }}">{{ row.current_estimate_text }}</div>
@@ -48,7 +48,7 @@
     <div class="fund-name">{{ row.fund_name }}</div>
     <div class="fund-sub">
       {{ row.fund_code }} · 持有 · QDII观察 · {{ row.qdii_status or '--' }}
-      {% if row.has_pending_today_event %} · 今日交易下个交易日计盈亏{% endif %}
+      {% if row.has_pending_today_event %} · 当前交易下个交易日计盈亏{% endif %}
     </div>
   </div>
   <div class="fund-value {{ row.estimate_tone }}">{{ row.current_estimate_text }}</div>
@@ -92,8 +92,8 @@
 <div class="panel" id="home-profit-summary" style="margin-bottom:12px; padding:14px 16px;">
   <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
     <div>
-      <div style="font-size:13px; color:#64748b; font-weight:600;">持有基金当日总盈亏</div>
-      <div style="font-size:12px; color:#94a3b8; margin-top:2px;">有当日实际净值时用实际，否则用实时估值；今日新增金额下个交易日计入盈亏。</div>
+      <div style="font-size:13px; color:#64748b; font-weight:600;">持有基金{{ profit_period_label }}总盈亏</div>
+      <div style="font-size:12px; color:#94a3b8; margin-top:2px;">9:30 前使用上一收益日 {{ profit_session_date }}, 9:30 后切换当日盘中；当前交易新增金额下个交易日计入盈亏。</div>
     </div>
     <div style="display:flex; align-items:center; gap:10px;">
       <div id="total-today-profit" class="{{ total_today_profit_tone }}" style="font-size:26px; font-weight:900;">{{ total_today_profit_text }}</div>
@@ -165,7 +165,7 @@
       <div class="header-col">实时估值</div>
       <div class="header-col">实际收盘</div>
       <div class="header-col">持有金额</div>
-      <div class="header-col">今日盈亏</div>
+      <div class="header-col">{{ profit_period_label }}</div>
       <div class="header-col">可靠性</div>
       <div class="header-col">分时走势</div>
     </div>
@@ -182,7 +182,7 @@
     <div style="display:flex; justify-content:space-between; align-items:flex-end; margin:10px 4px 6px;">
       <div>
         <div style="font-size:15px; font-weight:800; color:#0f172a;">我的海外持仓</div>
-        <div style="font-size:12px; color:#64748b; margin-top:2px;">QDII 使用夜盘/昨夜估值口径, 不参与 A股 14:50 决策排序。</div>
+        <div style="font-size:12px; color:#64748b; margin-top:2px;">QDII 使用夜盘/昨夜估值口径, 9:30 前叫次日收益, 9:30 后并入当日收益。</div>
       </div>
     </div>
     <div class="fund-list-header fund-header-holding">
@@ -190,7 +190,7 @@
       <div class="header-col">观察估值</div>
       <div class="header-col">状态</div>
       <div class="header-col">持有金额</div>
-      <div class="header-col">预计收益</div>
+      <div class="header-col">{{ qdii_profit_period_label }}</div>
       <div class="header-col">覆盖率</div>
       <div class="header-col">分时走势</div>
     </div>

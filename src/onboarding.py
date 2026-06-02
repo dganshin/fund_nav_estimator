@@ -106,6 +106,108 @@ KNOWN_ETF_FEEDER_TARGETS: dict[str, dict[str, object]] = {
         "target_name": "电网设备ETF华夏",
         "weight_pct": 95.0,
     },
+    "017469": {
+        "fund_name": "嘉实上证科创板芯片ETF发起联接A",
+        "target_code": "588200.SH",
+        "target_name": "科创芯片ETF嘉实",
+        "weight_pct": 95.0,
+    },
+    "017470": {
+        "fund_name": "嘉实上证科创板芯片ETF发起联接C",
+        "target_code": "588200.SH",
+        "target_name": "科创芯片ETF嘉实",
+        "weight_pct": 95.0,
+    },
+    "024417": {
+        "fund_name": "华夏上证科创板半导体材料设备主题ETF发起式联接A",
+        "target_code": "562590.SH",
+        "target_name": "半导体设备ETF华夏",
+        "weight_pct": 95.0,
+    },
+    "024418": {
+        "fund_name": "华夏上证科创板半导体材料设备主题ETF发起式联接C",
+        "target_code": "562590.SH",
+        "target_name": "半导体设备ETF华夏",
+        "weight_pct": 95.0,
+    },
+    "007817": {
+        "fund_name": "国泰中证全指通信设备ETF联接A",
+        "target_code": "515880.SH",
+        "target_name": "通信ETF国泰",
+        "weight_pct": 95.0,
+    },
+    "007818": {
+        "fund_name": "国泰中证全指通信设备ETF联接C",
+        "target_code": "515880.SH",
+        "target_name": "通信ETF国泰",
+        "weight_pct": 95.0,
+    },
+    "008086": {
+        "fund_name": "华夏中证5G通信主题ETF联接A",
+        "target_code": "515050.SH",
+        "target_name": "通信ETF华夏",
+        "weight_pct": 95.0,
+    },
+    "008087": {
+        "fund_name": "华夏中证5G通信主题ETF联接C",
+        "target_code": "515050.SH",
+        "target_name": "通信ETF华夏",
+        "weight_pct": 95.0,
+    },
+    "012619": {
+        "fund_name": "嘉实中证软件服务ETF联接A",
+        "target_code": "159852.SZ",
+        "target_name": "软件ETF嘉实",
+        "weight_pct": 95.0,
+    },
+    "012620": {
+        "fund_name": "嘉实中证软件服务ETF联接C",
+        "target_code": "159852.SZ",
+        "target_name": "软件ETF嘉实",
+        "weight_pct": 95.0,
+    },
+    "017853": {
+        "fund_name": "易方达中证云计算与大数据主题ETF联接A",
+        "target_code": "516510.SH",
+        "target_name": "云计算ETF易方达",
+        "weight_pct": 95.0,
+    },
+    "017854": {
+        "fund_name": "易方达中证云计算与大数据主题ETF联接C",
+        "target_code": "516510.SH",
+        "target_name": "云计算ETF易方达",
+        "weight_pct": 95.0,
+    },
+    "020273": {
+        "fund_name": "富国中证细分化工产业主题ETF发起式联接A",
+        "target_code": "516120.SH",
+        "target_name": "化工ETF富国",
+        "weight_pct": 95.0,
+    },
+    "020274": {
+        "fund_name": "富国中证细分化工产业主题ETF发起式联接C",
+        "target_code": "516120.SH",
+        "target_name": "化工ETF富国",
+        "weight_pct": 95.0,
+    },
+    "012894": {
+        "fund_name": "天弘中证科创创业50ETF联接A",
+        "target_code": "159603.SZ",
+        "target_name": "天弘中证科创创业50ETF",
+        "weight_pct": 95.0,
+    },
+    "012895": {
+        "fund_name": "天弘中证科创创业50ETF联接C",
+        "target_code": "159603.SZ",
+        "target_name": "天弘中证科创创业50ETF",
+        "weight_pct": 95.0,
+    },
+    "022981": {
+        "fund_name": "天弘中证科创创业50ETF联接Y",
+        "target_code": "159603.SZ",
+        "target_name": "天弘中证科创创业50ETF",
+        "weight_pct": 95.0,
+    },
 }
 
 
@@ -376,11 +478,9 @@ def _run_causal_calibration_history(
     if force_rebuild:
         session.execute(delete(CalibrationResidual).where(
             CalibrationResidual.fund_code == fund_code,
-            CalibrationResidual.holding_version_id == holding_version.id,
         ))
         session.execute(delete(OnlineCalibrationState).where(
             OnlineCalibrationState.fund_code == fund_code,
-            OnlineCalibrationState.holding_version_id == holding_version.id,
         ))
         session.commit()
 
