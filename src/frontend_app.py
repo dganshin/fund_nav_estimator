@@ -15,7 +15,7 @@ from fastapi import BackgroundTasks, FastAPI, Form, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, text
+from sqlalchemy import bindparam, select, text
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -1545,6 +1545,15 @@ def api_fund_intraday(fund_code: str):
 
     session_factory = get_cached_session_factory()
     with session_factory() as session:
+        if not points:
+            db_rows = session.execute(
+                text(
+                    "SELECT quote_time, estimate_pct FROM intraday_snapshots "
+                    "WHERE trade_date = :td AND fund_code = :code ORDER BY quote_time"
+                ),
+                {"td": date.today(), "code": fund_code},
+            ).fetchall()
+            points = [{"t": str(t), "pct": float(pct)} for t, pct in db_rows]
         pos = session.scalar(
             select(UserFundPosition).where(UserFundPosition.fund_code == fund_code)
         )
@@ -1582,6 +1591,18 @@ def api_portfolio_intraday():
 
     with INTRADAY_LOCK:
         series_snap = {code: list(INTRADAY_SERIES.get(code, [])) for code in holding_map}
+
+    if not any(series_snap.values()):
+        with session_factory() as session:
+            db_rows = session.execute(
+                text(
+                    "SELECT fund_code, quote_time, estimate_pct FROM intraday_snapshots "
+                    "WHERE trade_date = :td AND fund_code IN :codes ORDER BY quote_time"
+                ).bindparams(bindparam("codes", expanding=True)),
+                {"td": date.today(), "codes": list(holding_map)},
+            ).fetchall()
+        for code, t, pct in db_rows:
+            series_snap.setdefault(str(code), []).append({"t": str(t), "pct": float(pct)})
 
     # 合并所有时间戳
     all_times: set[str] = set()

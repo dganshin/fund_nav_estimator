@@ -520,13 +520,23 @@ class AKShareDataSource:
                 change_pct = stock.get("f170")
                 if latest is None or prev_close in (None, 0) or change_pct is None:
                     continue
+                latest_val = float(latest)
+                prev_close_val = float(prev_close)
+                return_pct = latest_val / prev_close_val - 1.0
+                if abs(return_pct) > 0.8:
+                    # 东财美股 f170/价格缩放口径和 A 股不一致, 异常时回退涨跌幅字段。
+                    raw_change = float(change_pct)
+                    return_pct = raw_change / (10000.0 if abs(raw_change) > 100 else 100.0)
+                if abs(return_pct) > 0.8:
+                    self.last_warnings.append(f"Warning: skip abnormal eastmoney return for {orig_code}: {return_pct:.2%}")
+                    continue
                 chunk_records.append(
                     LiveStockQuoteRecord(
                         trade_date=now.date(),
                         quote_time=now,
                         asset_code=normalize_asset_code(orig_code),
                         asset_name=str(stock.get("f58", orig_code)),
-                        return_pct=(float(change_pct) / 100.0),
+                        return_pct=return_pct,
                         source="eastmoney:qt_live",
                     )
                 )
